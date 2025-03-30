@@ -1,4 +1,4 @@
-# db/qdrant/qdrant
+# db/qdrant/qdrant.yaml
 # Configuración para Qdrant Vector Database
 
 storage:
@@ -11,11 +11,13 @@ storage:
     memmap_threshold: 20000
     indexing_threshold: 50000
     flush_interval_sec: 30
+    max_optimization_threads: 2
 
   # Configuración de snapshots
   snapshots:
     enabled: true
     path: /qdrant/snapshots
+    interval_sec: 3600  # Cada hora
 
 # Configuración de servicio
 service:
@@ -23,6 +25,7 @@ service:
   http_port: 6333
   grpc_port: 6334
   enable_cors: true
+  timeout: 60  # Timeout en segundos para operaciones HTTP
 
 # Configuración del cluster
 cluster:
@@ -31,3 +34,13 @@ cluster:
 # Telemetría
 telemetry:
   disabled: false
+
+# Límites
+limits:
+  # Estos límites pueden ajustarse según los recursos disponibles
+  max_vectors_count_per_request: 1000
+  max_payload_mb: 20
+
+# Logs
+log:
+  level: INFO  # Nivel de log: TRACE, DEBUG, INFO, WARN, ERROR
