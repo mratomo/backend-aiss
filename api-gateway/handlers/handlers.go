@@ -197,6 +197,16 @@ func (h *ContextHandler) DeleteArea(c *gin.Context) {
 	proxyRequest(c, h.serviceURL+"/areas/"+c.Param("id"), "DELETE")
 }
 
+// GetAreaSystemPrompt obtiene el prompt de sistema de un área
+func (h *ContextHandler) GetAreaSystemPrompt(c *gin.Context) {
+	proxyRequest(c, h.serviceURL+"/areas/"+c.Param("id")+"/system-prompt", "GET")
+}
+
+// UpdateAreaSystemPrompt actualiza el prompt de sistema de un área
+func (h *ContextHandler) UpdateAreaSystemPrompt(c *gin.Context) {
+	proxyRequest(c, h.serviceURL+"/areas/"+c.Param("id")+"/system-prompt", "PUT")
+}
+
 // EmbeddingHandler maneja solicitudes relacionadas con embeddings
 type EmbeddingHandler struct {
 	serviceURL string
@@ -264,6 +274,47 @@ func (h *RAGHandler) DeleteProvider(c *gin.Context) {
 // TestProvider prueba un proveedor LLM
 func (h *RAGHandler) TestProvider(c *gin.Context) {
 	proxyRequest(c, h.serviceURL+"/providers/"+c.Param("id")+"/test", "POST")
+}
+
+// LLMSettingsHandler maneja solicitudes relacionadas con configuraciones LLM
+type LLMSettingsHandler struct {
+	serviceURL string
+}
+
+// NewLLMSettingsHandler crea un nuevo manejador de configuraciones LLM
+func NewLLMSettingsHandler(serviceURL string) *LLMSettingsHandler {
+	return &LLMSettingsHandler{
+		serviceURL: serviceURL,
+	}
+}
+
+// GetSystemPrompt obtiene el prompt de sistema global
+func (h *LLMSettingsHandler) GetSystemPrompt(c *gin.Context) {
+	proxyRequest(c, h.serviceURL+"/settings/system-prompt", "GET")
+}
+
+// UpdateSystemPrompt actualiza el prompt de sistema global
+func (h *LLMSettingsHandler) UpdateSystemPrompt(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "no autorizado"})
+		return
+	}
+	// Añadir user_id como query param
+	url := h.serviceURL + "/settings/system-prompt?user_id=" + userID.(string)
+	proxyRequest(c, url, "PUT")
+}
+
+// ResetSystemPrompt restablece el prompt de sistema global
+func (h *LLMSettingsHandler) ResetSystemPrompt(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "no autorizado"})
+		return
+	}
+	// Añadir user_id como query param
+	url := h.serviceURL + "/settings/system-prompt/reset?user_id=" + userID.(string)
+	proxyRequest(c, url, "POST")
 }
 
 // proxyRequest es una función auxiliar para reenviar solicitudes a servicios internos

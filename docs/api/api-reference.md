@@ -10,6 +10,7 @@
 6. [Servicio de Contexto](#servicio-de-contexto)
 7. [Servicio de Embeddings](#servicio-de-embeddings)
 8. [Agente RAG](#agente-rag)
+9. [System Prompts](#system-prompts)
 
 ## Introducción
 
@@ -88,12 +89,14 @@ Todos los endpoints a continuación requieren autenticación.
 
 - **GET /knowledge/areas** - Listar áreas de conocimiento
 - **GET /knowledge/areas/:id** - Obtener información de un área específica
+- **GET /knowledge/areas/:id/system-prompt** - Obtener el prompt de sistema de un área específica
 
 ### Administración de Áreas (requieren rol de administrador)
 
 - **POST /knowledge/admin/areas** - Crear nueva área de conocimiento
 - **PUT /knowledge/admin/areas/:id** - Actualizar área de conocimiento
 - **DELETE /knowledge/admin/areas/:id** - Eliminar área de conocimiento
+- **PUT /knowledge/admin/areas/:id/system-prompt** - Actualizar el prompt de sistema de un área específica
 
 ## Servicio de Embeddings
 
@@ -133,6 +136,19 @@ Los siguientes endpoints son internos y no están expuestos directamente a trav�
 - **PUT /llm/providers/:id** - Actualizar proveedor LLM
 - **DELETE /llm/providers/:id** - Eliminar proveedor LLM
 - **POST /llm/providers/:id/test** - Probar proveedor LLM
+
+## System Prompts
+
+### Gestión de System Prompt Global (requieren rol de administrador)
+
+- **GET /llm/settings/system-prompt** - Obtener el prompt de sistema global
+- **PUT /llm/settings/system-prompt** - Actualizar el prompt de sistema global
+- **POST /llm/settings/system-prompt/reset** - Restablecer el prompt de sistema global a valores predeterminados
+
+### Gestión de System Prompts por Área
+
+- **GET /knowledge/areas/:id/system-prompt** - Obtener el prompt de sistema de un área específica (accesible para todos los usuarios)
+- **PUT /knowledge/admin/areas/:id/system-prompt** - Actualizar el prompt de sistema de un área específica (solo administradores)
 
 ## Detalles de los Endpoints
 
@@ -203,7 +219,9 @@ Payload:
   "include_personal": true,
   "area_ids": ["area1", "area2"],
   "llm_provider_id": "provider1",
-  "max_sources": 5
+  "max_sources": 5,
+  "temperature": 0.0,
+  "max_tokens": 4096
 }
 ```
 
@@ -306,6 +324,50 @@ Respuesta:
 }
 ```
 
+#### Obtener System Prompt de un Área
+
+```
+GET /knowledge/areas/:id/system-prompt
+```
+
+Respuesta:
+```json
+{
+  "area_id": "area123",
+  "system_prompt": "Eres un asistente especializado en Inteligencia Artificial. Responde preguntas sobre IA, machine learning, deep learning y temas relacionados utilizando la información proporcionada en el contexto."
+}
+```
+
+#### Actualizar System Prompt de un Área
+
+```
+PUT /knowledge/admin/areas/:id/system-prompt
+```
+
+Payload:
+```json
+{
+  "system_prompt": "Eres un asistente especializado en Inteligencia Artificial. Responde preguntas sobre IA, machine learning, deep learning y temas relacionados utilizando la información proporcionada en el contexto. Proporciona ejemplos prácticos cuando sea posible."
+}
+```
+
+Respuesta:
+```json
+{
+  "id": "area123",
+  "name": "Inteligencia Artificial",
+  "description": "Área dedicada a la IA y sus aplicaciones",
+  "icon": "brain",
+  "color": "#3498DB",
+  "tags": ["IA", "Machine Learning", "Deep Learning"],
+  "mcp_context_id": "ctx123",
+  "system_prompt": "Eres un asistente especializado en Inteligencia Artificial. Responde preguntas sobre IA, machine learning, deep learning y temas relacionados utilizando la información proporcionada en el contexto. Proporciona ejemplos prácticos cuando sea posible.",
+  "active": true,
+  "created_at": "2025-03-28T08:45:12Z",
+  "updated_at": "2025-03-28T11:30:15Z"
+}
+```
+
 ### Gestión de Proveedores LLM
 
 #### Añadir Proveedor LLM
@@ -345,5 +407,59 @@ Respuesta:
   },
   "created_at": "2025-03-28T11:20:15Z",
   "updated_at": "2025-03-28T11:20:15Z"
+}
+```
+
+### Gestión de System Prompt Global
+
+#### Obtener System Prompt Global
+
+```
+GET /llm/settings/system-prompt
+```
+
+Respuesta:
+```json
+{
+  "system_prompt": "Eres un asistente de inteligencia artificial especializado en responder preguntas basadas en la información proporcionada. Utiliza SOLO la información en el contexto para responder. Si la información no está en el contexto, indica que no tienes esa información. Proporciona respuestas detalladas y bien estructuradas.",
+  "last_updated": "2025-03-20T15:30:22Z",
+  "updated_by": "admin123"
+}
+```
+
+#### Actualizar System Prompt Global
+
+```
+PUT /llm/settings/system-prompt
+```
+
+Payload:
+```json
+{
+  "system_prompt": "Eres un asistente de inteligencia artificial especializado en responder preguntas basadas en la información proporcionada. Utiliza SOLO la información en el contexto para responder. Si la información no está en el contexto, indica que no tienes esa información. Proporciona respuestas detalladas, bien estructuradas y cita las fuentes cuando sea posible."
+}
+```
+
+Respuesta:
+```json
+{
+  "system_prompt": "Eres un asistente de inteligencia artificial especializado en responder preguntas basadas en la información proporcionada. Utiliza SOLO la información en el contexto para responder. Si la información no está en el contexto, indica que no tienes esa información. Proporciona respuestas detalladas, bien estructuradas y cita las fuentes cuando sea posible.",
+  "last_updated": "2025-03-30T09:45:18Z",
+  "updated_by": "admin123"
+}
+```
+
+#### Restablecer System Prompt Global
+
+```
+POST /llm/settings/system-prompt/reset
+```
+
+Respuesta:
+```json
+{
+  "system_prompt": "Eres un asistente de inteligencia artificial especializado en responder preguntas basadas en la información proporcionada. Utiliza SOLO la información en el contexto para responder. Si la información no está en el contexto, indica que no tienes esa información. Proporciona respuestas detalladas y bien estructuradas.",
+  "last_updated": "2025-03-30T09:48:35Z",
+  "updated_by": "admin123"
 }
 ```

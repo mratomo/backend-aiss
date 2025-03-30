@@ -10,6 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from config.settings import Settings
 from models.query import QueryRequest, AreaQueryRequest, PersonalQueryRequest, QueryResponse
+from models.llm_settings import GlobalSystemPromptUpdate
 from services.llm_service import LLMService
 from services.llm_settings_service import LLMSettingsService
 from services.mcp_service import MCPService
@@ -208,6 +209,46 @@ async def get_mcp_status():
     except Exception as e:
         logger.error(f"Error getting MCP status: {e}")
         raise HTTPException(status_code=500, detail=f"Error getting MCP status: {str(e)}")
+
+# Rutas para configuración de system prompts
+@app.get("/settings/system-prompt", tags=["Settings"])
+async def get_system_prompt():
+    """
+    Obtener el prompt de sistema global actual.
+    """
+    settings = await llm_settings_service.get_settings()
+    return {
+        "system_prompt": settings.default_system_prompt,
+        "last_updated": settings.last_updated,
+        "updated_by": settings.updated_by
+    }
+
+@app.put("/settings/system-prompt", tags=["Settings"])
+async def update_system_prompt(update: GlobalSystemPromptUpdate, user_id: Optional[str] = Query(None)):
+    """
+    Actualizar el prompt de sistema global.
+    """
+    updated_settings = await llm_settings_service.update_system_prompt(
+        system_prompt=update.system_prompt,
+        user_id=user_id
+    )
+    return {
+        "system_prompt": updated_settings.default_system_prompt,
+        "last_updated": updated_settings.last_updated,
+        "updated_by": updated_settings.updated_by
+    }
+
+@app.post("/settings/system-prompt/reset", tags=["Settings"])
+async def reset_system_prompt(user_id: Optional[str] = Query(None)):
+    """
+    Restablecer el prompt de sistema global a valores predeterminados.
+    """
+    reset_settings = await llm_settings_service.reset_to_defaults(user_id=user_id)
+    return {
+        "system_prompt": reset_settings.default_system_prompt,
+        "last_updated": reset_settings.last_updated,
+        "updated_by": reset_settings.updated_by
+    }
 
 if __name__ == "__main__":
     uvicorn.run(

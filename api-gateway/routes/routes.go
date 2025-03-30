@@ -19,6 +19,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 	contextHandler := handlers.NewContextHandler(cfg.Services.ContextService)
 	embeddingHandler := handlers.NewEmbeddingHandler(cfg.Services.EmbeddingService)
 	ragHandler := handlers.NewRAGHandler(cfg.Services.RagAgent)
+	llmSettingsHandler := handlers.NewLLMSettingsHandler(cfg.Services.RagAgent)
 
 	// Middleware de autenticación
 	authMiddleware := middleware.NewAuthMiddleware(cfg.AuthSecret)
@@ -57,6 +58,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 		// Listado y consulta de áreas (todos los usuarios)
 		knowledge.GET("/areas", contextHandler.ListAreas)
 		knowledge.GET("/areas/:id", contextHandler.GetAreaByID)
+		knowledge.GET("/areas/:id/system-prompt", contextHandler.GetAreaSystemPrompt)
 
 		// Administración de áreas (solo admin)
 		admin := knowledge.Group("/admin")
@@ -65,6 +67,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 			admin.POST("/areas", contextHandler.CreateArea)
 			admin.PUT("/areas/:id", contextHandler.UpdateArea)
 			admin.DELETE("/areas/:id", contextHandler.DeleteArea)
+			admin.PUT("/areas/:id/system-prompt", contextHandler.UpdateAreaSystemPrompt)
 		}
 	}
 
@@ -112,5 +115,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 		llm.PUT("/providers/:id", ragHandler.UpdateProvider)
 		llm.DELETE("/providers/:id", ragHandler.DeleteProvider)
 		llm.POST("/providers/:id/test", ragHandler.TestProvider)
+
+		// Nuevas rutas para configuración de system prompt global
+		llm.GET("/settings/system-prompt", llmSettingsHandler.GetSystemPrompt)
+		llm.PUT("/settings/system-prompt", llmSettingsHandler.UpdateSystemPrompt)
+		llm.POST("/settings/system-prompt/reset", llmSettingsHandler.ResetSystemPrompt)
 	}
 }
