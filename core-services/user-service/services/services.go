@@ -1,0 +1,248 @@
+package services
+
+import (
+	"context"
+	"errors"
+	"time"
+	"user-service/models"
+	"user-service/repositories"
+
+	"github.com/golang-jwt/jwt/v4"
+	"golang.org/x/crypto/bcrypt"
+)
+
+// UserService proporciona funcionalidad para operaciones de usuario
+type UserService struct {
+	repo            *repositories.UserRepository
+	jwtSecret       string
+	expirationHours int
+}
+
+// NewUserService crea un nuevo servicio de usuario
+func NewUserService(repo *repositories.UserRepository, jwtSecret string, expirationHours int) *UserService {
+	return &UserService{
+		repo:            repo,
+		jwtSecret:       jwtSecret,
+		expirationHours: expirationHours,
+	}
+}
+
+// RegisterUser registra un nuevo usuario
+func (s *UserService) RegisterUser(ctx context.Context, user *models.User, password string) (*models.TokenResponse, error) {
+	// Generar hash de la contraseña
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+
+	// Asignar hash a usuario
+	user.PasswordHash = string(hashedPassword)
+
+	// Guardar usuario en base de datos
+	savedUser, err := s.repo.CreateUser(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+
+	// Generar token de autenticación
+	return s.generateTokens(savedUser)
+}
+
+// LoginUser autentica un usuario
+func (s *UserService) LoginUser(ctx context.Context, username, password string) (*models.TokenResponse, error) {
+	// Buscar usuario por nombre de usuario
+	user, err := s.repo.GetUserByUsername(ctx, username)
+	if err != nil {
+		return nil, errors.New("credenciales inválidas")
+	}
+
+	// Verificar contraseña
+	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password))
+	if err != nil {
+		return nil, errors.New("credenciales inválidas")
+	}
+
+	// Verificar si el usuario está activo
+	if !user.Active {
+		return nil, errors.New("usuario desactivado")
+	}
+
+	// Actualizar fecha de último login
+	err = s.repo.UpdateLastLogin(ctx, user.ID)
+	if err != nil {
+		// No devolver error al cliente si falla la actualización
+		// pero registrar en logs (en un entorno real)
+	}
+
+	// Generar token de autenticación
+	return s.generateTokens(user)
+}
+
+// RefreshToken renueva un token de acceso
+func (s *UserService) RefreshToken(ctx context.Context, refreshTokenStr string) (*models.TokenResponse, error) {
+	// Validar refresh token
+	token, err := jwt.Parse(refreshTokenStr, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("método de firma inesperado")
+		}
+		return []byte(s.jwtSecret), nil
+	})
+
+	if err != nil {
+		return nil, errors.New("token inválido")
+	}
+
+	// Extraer claims
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		// Verificar tipo de token
+		if tokenType, ok := claims["type"].(string); !ok || tokenType != "refresh" {
+			return nil, errors.New("tipo de token inválido")
+		}
+
+		// Obtener ID de usuario
+		userID, ok := claims["user_id"].(string)
+		if !ok {
+			return nil, errors.New("token inválido (sin user_id)")
+		}
+
+		// Buscar usuario
+		user, err := s.GetUserByID(ctx, userID)
+		if err != nil {
+			return nil, errors.New("usuario no encontrado")
+		}
+
+		// Verificar si el usuario está activo
+		if !user.Active {
+			return nil, errors.New("usuario desactivado")
+		}
+
+		// Generar nuevos tokens
+		return s.generateTokens(user)
+	}
+
+	return nil, errors.New("token inválido")
+}
+
+// GetUserByID obtiene un usuario por su ID
+func (s *UserService) GetUserByID(ctx context.Context, id string) (*models.User, error) {
+	return s.repo.GetUserByID(ctx, id)
+}
+
+// GetAllUsers obtiene todos los usuarios
+func (s *UserService) GetAllUsers(ctx context.Context) ([]*models.User, error) {
+	return s.repo.GetAllUsers(ctx)
+}
+
+// UpdateUser actualiza un usuario
+func (s *UserService) UpdateUser(ctx context.Context, id string, update *models.UpdateUserRequest) (*models.User, error) {
+	// Obtener usuario actual
+	user, err := s.repo.GetUserByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	// Aplicar actualizaciones
+	if update.Username != "" {
+		user.Username = update.Username
+	}
+
+	if update.Email != "" {
+		user.Email = update.Email
+	}
+
+	if update.Active != nil {
+		user.Active = *update.Active
+	}
+
+	// Guardar cambios
+	err = s.repo.UpdateUser(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+
+	return user, nil
+}
+
+// DeleteUser elimina un usuario
+func (s *UserService) DeleteUser(ctx context.Context, id string) error {
+	return s.repo.DeleteUser(ctx, id)
+}
+
+// UpdateUserPermissions actualiza los permisos de un usuario para un área
+func (s *UserService) UpdateUserPermissions(ctx context.Context, userID string, areaID string, permission models.Permission) error {
+	return s.repo.UpdateUserPermissions(ctx, userID, areaID, permission)
+}
+
+// ChangePassword cambia la contraseña de un usuario
+func (s *UserService) ChangePassword(ctx context.Context, userID string, currentPassword string, newPassword string) error {
+	// Obtener usuario
+	user, err := s.repo.GetUserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	// Verificar contraseña actual
+	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword))
+	if err != nil {
+		return errors.New("contraseña actual incorrecta")
+	}
+
+	// Generar hash de la nueva contraseña
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	// Actualizar contraseña
+	user.PasswordHash = string(hashedPassword)
+
+	return s.repo.UpdateUser(ctx, user)
+}
+
+// generateTokens genera tokens de acceso y refresco
+func (s *UserService) generateTokens(user *models.User) (*models.TokenResponse, error) {
+	// Calcular tiempo de expiración
+	expirationTime := time.Now().Add(time.Duration(s.expirationHours) * time.Hour)
+
+	// Crear claims para access token
+	accessClaims := jwt.MapClaims{
+		"user_id":  user.ID.Hex(),
+		"username": user.Username,
+		"email":    user.Email,
+		"role":     user.Role,
+		"type":     "access",
+		"exp":      expirationTime.Unix(),
+	}
+
+	// Crear token de acceso
+	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims)
+	accessTokenString, err := accessToken.SignedString([]byte(s.jwtSecret))
+	if err != nil {
+		return nil, err
+	}
+
+	// Calcular tiempo de expiración para refresh token (más largo)
+	refreshExpirationTime := time.Now().Add(time.Duration(s.expirationHours*24) * time.Hour) // 24 veces más largo
+
+	// Crear claims para refresh token
+	refreshClaims := jwt.MapClaims{
+		"user_id": user.ID.Hex(),
+		"type":    "refresh",
+		"exp":     refreshExpirationTime.Unix(),
+	}
+
+	// Crear refresh token
+	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims)
+	refreshTokenString, err := refreshToken.SignedString([]byte(s.jwtSecret))
+	if err != nil {
+		return nil, err
+	}
+
+	// Crear respuesta
+	return &models.TokenResponse{
+		AccessToken:  accessTokenString,
+		RefreshToken: refreshTokenString,
+		ExpiresIn:    s.expirationHours * 3600, // Convertir horas a segundos
+		TokenType:    "Bearer",
+	}, nil
+}

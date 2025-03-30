@@ -1,0 +1,1145 @@
+import asyncio
+import json
+import logging
+import time
+import uuid
+from datetime import datetime
+from typing import Dict, List, Optional, Union, Any
+
+import aiohttp
+from bson import ObjectId
+from fastapi import HTTPException
+from motor.motor_asyncio import AsyncIOMotorDatabase
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+from config.settings import Settings
+from models.llm_provider import LLMProvider, LLMProviderCreate, LLMProviderUpdate, LLMProviderType
+
+logger = logging.getLogger(__name__)
+
+class LLMService:
+    """Servicio para gestionar y utilizar proveedores LLM con soporte MCP"""
+
+    def __init__(self, database: AsyncIOMotorDatabase, settings: Settings):
+        """Inicializar servicio con la base de datos y configuración"""
+        self.db = database
+        self.collection = database.llm_providers
+        self.settings = settings
+        self.providers = {}  # Cache de proveedores (id -> provider)
+        self.default_provider_id = None
+
+        # Nuevo: Cliente MCP para gestión de contextos
+        self.mcp_client = None
+        self.has_store_tool = False
+        self.has_find_tool = False
+
+    async def initialize(self):
+        """Inicializar servicio, proveedores y cliente MCP"""
+        await self.load_providers()
+
+        # Inicializar cliente MCP
+        try:
+            from mcp import Client
+            self.mcp_client = Client()
+            try:
+                # Conectar con servidor MCP usando SSE
+                mcp_service_url = self.settings.mcp.context_service_url
+                await self.mcp_client.connect_sse(f"{mcp_service_url}/mcp/sse")
+
+                # Verificar herramientas disponibles
+                tools = await self.mcp_client.list_tools()
+                tool_names = [t.name for t in tools]
+                logger.info(f"Conectado a MCP. Herramientas disponibles: {tool_names}")
+
+                # Verificar herramientas específicas
+                self.has_store_tool = "store_document" in tool_names
+                self.has_find_tool = "find_relevant" in tool_names
+
+                if not (self.has_store_tool and self.has_find_tool):
+                    logger.warning(f"Algunas herramientas MCP no están disponibles. Encontradas: {tool_names}")
+            except Exception as e:
+                logger.error(f"Error conectando con servidor MCP: {e}")
+                self.mcp_client = None
+        except ImportError:
+            logger.warning("Librería MCP no instalada. El cliente no estará disponible.")
+            self.mcp_client = None
+
+    async def load_providers(self):
+        """Cargar proveedores desde la base de datos"""
+        providers = await self.collection.find().to_list(length=100)
+
+        for provider_dict in providers:
+            provider = LLMProvider(**provider_dict)
+            self.providers[str(provider.id)] = provider
+
+            if provider.default:
+                self.default_provider_id = str(provider.id)
+
+        # Si no hay proveedor por defecto pero hay proveedores, usar el primero
+        if not self.default_provider_id and self.providers:
+            self.default_provider_id = next(iter(self.providers.keys()))
+
+        # Log para diagnosticar proveedores cargados
+        logger.info(f"Loaded {len(self.providers)} LLM providers. Default provider: {self.default_provider_id}")
+        for provider_id, provider in self.providers.items():
+            logger.info(f"Provider {provider_id}: {provider.name} ({provider.type}), model: {provider.model}")
+
+    def _get_provider(self, provider_id: Optional[str] = None) -> LLMProvider:
+        """
+        Obtener un proveedor LLM por su ID o el proveedor por defecto
+
+        Args:
+            provider_id: ID del proveedor (opcional)
+
+        Returns:
+            Proveedor LLM
+
+        Raises:
+            HTTPException: Si no se encuentra el proveedor
+        """
+        if not provider_id:
+            if not self.default_provider_id:
+                logger.error("No LLM provider available. Make sure to add at least one provider.")
+                raise HTTPException(
+                    status_code=404,
+                    detail="No default LLM provider configured"
+                )
+            provider_id = self.default_provider_id
+
+        provider = self.providers.get(provider_id)
+        if not provider:
+            logger.error(f"LLM provider not found: {provider_id}")
+            logger.info(f"Available providers: {list(self.providers.keys())}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"LLM provider not found: {provider_id}"
+            )
+
+        return provider
+
+    async def list_providers(self) -> List[LLMProvider]:
+        """
+        Listar todos los proveedores LLM
+
+        Returns:
+            Lista de proveedores
+        """
+        try:
+            providers = await self.collection.find().to_list(length=100)
+            return [LLMProvider(**p) for p in providers]
+        except Exception as e:
+            logger.error(f"Error listing providers: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error listing providers: {str(e)}"
+            )
+
+    async def add_provider(self, provider_data: LLMProviderCreate) -> LLMProvider:
+        """
+        Añadir un nuevo proveedor LLM
+
+        Args:
+            provider_data: Datos del proveedor
+
+        Returns:
+            Proveedor creado
+        """
+        # Validar campos según el tipo de proveedor
+        if provider_data.type in [LLMProviderType.OPENAI, LLMProviderType.ANTHROPIC]:
+            if not provider_data.api_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"API key is required for {provider_data.type} providers"
+                )
+
+        if provider_data.type == LLMProviderType.AZURE_OPENAI:
+            if not provider_data.api_key or not provider_data.api_endpoint:
+                raise HTTPException(
+                    status_code=400,
+                    detail="API key and endpoint are required for Azure OpenAI providers"
+                )
+
+        if provider_data.type == LLMProviderType.OLLAMA:
+            if not provider_data.api_endpoint:
+                raise HTTPException(
+                    status_code=400,
+                    detail="API endpoint is required for Ollama providers"
+                )
+
+        try:
+            # Si es proveedor por defecto, desactivar otros proveedores por defecto
+            if provider_data.default:
+                await self.collection.update_many(
+                    {"default": True},
+                    {"$set": {"default": False, "updated_at": datetime.utcnow()}}
+                )
+
+            # Crear proveedor
+            now = datetime.utcnow()
+            provider_dict = provider_data.dict()
+            provider_dict["created_at"] = now
+            provider_dict["updated_at"] = now
+
+            # Insertar en la base de datos
+            result = await self.collection.insert_one(provider_dict)
+
+            # Obtener proveedor creado
+            created_provider = await self.collection.find_one({"_id": result.inserted_id})
+            provider = LLMProvider(**created_provider)
+
+            # Actualizar cache
+            self.providers[str(provider.id)] = provider
+
+            # Actualizar proveedor por defecto si es necesario
+            if provider.default:
+                self.default_provider_id = str(provider.id)
+
+            logger.info(f"Provider added successfully: {provider.name} ({provider.type}), ID: {provider.id}")
+            return provider
+        except Exception as e:
+            logger.error(f"Error adding provider: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error adding provider: {str(e)}"
+            )
+
+    async def update_provider(self, provider_id: str, provider_update: LLMProviderUpdate) -> Optional[LLMProvider]:
+        """
+        Actualizar un proveedor LLM existente
+
+        Args:
+            provider_id: ID del proveedor
+            provider_update: Datos a actualizar
+
+        Returns:
+            Proveedor actualizado o None si no existe
+        """
+        try:
+            obj_id = ObjectId(provider_id)
+        except Exception as e:
+            logger.error(f"Invalid provider ID format: {provider_id}, error: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid provider ID format"
+            )
+
+        try:
+            # Verificar si el proveedor existe
+            existing = await self.collection.find_one({"_id": obj_id})
+            if not existing:
+                logger.warning(f"Provider not found for update: {provider_id}")
+                return None
+
+            # Preparar actualización
+            update_data = {k: v for k, v in provider_update.dict().items() if v is not None}
+            update_data["updated_at"] = datetime.utcnow()
+
+            # Si actualiza a proveedor por defecto, desactivar otros
+            if "default" in update_data and update_data["default"]:
+                await self.collection.update_many(
+                    {"_id": {"$ne": obj_id}, "default": True},
+                    {"$set": {"default": False, "updated_at": datetime.utcnow()}}
+                )
+
+            # Actualizar en la base de datos
+            await self.collection.update_one(
+                {"_id": obj_id},
+                {"$set": update_data}
+            )
+
+            # Obtener proveedor actualizado
+            updated_provider_dict = await self.collection.find_one({"_id": obj_id})
+            updated_provider = LLMProvider(**updated_provider_dict)
+
+            # Actualizar cache
+            self.providers[provider_id] = updated_provider
+
+            # Actualizar proveedor por defecto si es necesario
+            if updated_provider.default:
+                self.default_provider_id = provider_id
+            elif self.default_provider_id == provider_id and not updated_provider.default:
+                # Si era el proveedor por defecto y ya no lo es, encontrar otro
+                default_providers = await self.collection.find({"default": True}).to_list(length=1)
+                if default_providers:
+                    self.default_provider_id = str(default_providers[0]["_id"])
+                else:
+                    self.default_provider_id = None
+
+            logger.info(f"Provider updated successfully: {updated_provider.name} ({provider_id})")
+            return updated_provider
+        except Exception as e:
+            logger.error(f"Error updating provider: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error updating provider: {str(e)}"
+            )
+
+    async def delete_provider(self, provider_id: str) -> bool:
+        """
+        Eliminar un proveedor LLM
+
+        Args:
+            provider_id: ID del proveedor
+
+        Returns:
+            True si se eliminó correctamente
+        """
+        try:
+            obj_id = ObjectId(provider_id)
+        except Exception as e:
+            logger.error(f"Invalid provider ID format: {provider_id}, error: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid provider ID format"
+            )
+
+        try:
+            # Verificar si es el proveedor por defecto
+            provider = await self.collection.find_one({"_id": obj_id})
+            is_default = provider and provider.get("default", False)
+
+            # Eliminar de la base de datos
+            result = await self.collection.delete_one({"_id": obj_id})
+
+            if result.deleted_count == 0:
+                logger.warning(f"Provider not found for deletion: {provider_id}")
+                return False
+
+            # Eliminar de la cache
+            if provider_id in self.providers:
+                del self.providers[provider_id]
+
+            # Si era el proveedor por defecto, encontrar otro
+            if is_default:
+                default_provider = None
+                if self.providers:
+                    # Seleccionar el primer proveedor disponible como nuevo default
+                    first_provider_id = next(iter(self.providers.keys()))
+                    await self.collection.update_one(
+                        {"_id": ObjectId(first_provider_id)},
+                        {"$set": {"default": True, "updated_at": datetime.utcnow()}}
+                    )
+                    self.providers[first_provider_id].default = True
+                    self.default_provider_id = first_provider_id
+                    default_provider = self.providers[first_provider_id].name
+                else:
+                    self.default_provider_id = None
+
+                logger.info(f"Deleted default provider {provider_id}. New default: {default_provider}")
+            else:
+                logger.info(f"Provider deleted successfully: {provider_id}")
+
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting provider: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error deleting provider: {str(e)}"
+            )
+
+    async def test_provider(self, provider_id: str, prompt: str) -> Dict[str, Any]:
+        """
+        Probar un proveedor LLM con un prompt simple
+
+        Args:
+            provider_id: ID del proveedor
+            prompt: Prompt de prueba
+
+        Returns:
+            Respuesta del proveedor
+        """
+        provider = self._get_provider(provider_id)
+        logger.info(f"Testing provider {provider.name} ({provider_id}) with prompt: '{prompt[:50]}...'")
+
+        try:
+            # Ejecutar llamada al LLM
+            start_time = time.time()
+            response = await self.generate_text(
+                prompt=prompt,
+                system_prompt="Eres un asistente útil y conciso.",
+                provider=provider
+            )
+            end_time = time.time()
+
+            # Calcular latencia
+            latency_ms = int((end_time - start_time) * 1000)
+
+            # Añadir información de latencia
+            response["latency_ms"] = latency_ms
+
+            logger.info(f"Test successful. Latency: {latency_ms}ms")
+            return response
+        except Exception as e:
+            logger.error(f"Error testing provider {provider_id}: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error testing provider: {str(e)}"
+            )
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(aiohttp.ClientError)
+    )
+    async def generate_text(self,
+                            prompt: str,
+                            system_prompt: str,
+                            provider: Optional[LLMProvider] = None,
+                            provider_id: Optional[str] = None,
+                            max_tokens: Optional[int] = None,
+                            temperature: Optional[float] = None,
+                            advanced_settings: Optional[Dict[str, Any]] = None,
+                            active_contexts: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Generar texto utilizando un proveedor LLM con soporte para contextos MCP
+
+        Args:
+            prompt: Prompt principal
+            system_prompt: Prompt de sistema
+            provider: Proveedor LLM (opcional si se especifica provider_id)
+            provider_id: ID del proveedor (opcional si se especifica provider)
+            max_tokens: Número máximo de tokens (anula configuración del proveedor)
+            temperature: Temperatura (anula configuración del proveedor)
+            advanced_settings: Configuraciones avanzadas para la generación
+            active_contexts: Lista de IDs de contextos MCP a activar (nuevo)
+
+        Returns:
+            Respuesta del LLM
+        """
+        if not provider:
+            provider = self._get_provider(provider_id)
+
+        # Usar la configuración del proveedor si no se especifica
+        actual_max_tokens = max_tokens if max_tokens is not None else provider.max_tokens
+        actual_temperature = temperature if temperature is not None else provider.temperature
+
+        # Preparar respuesta base
+        response = {
+            "provider_id": str(provider.id),
+            "provider_name": provider.name,
+            "model": provider.model,
+            "text": ""
+        }
+
+        # Log de diagnóstico
+        logger.debug(f"Generating text with provider {provider.name} ({provider.type}), model: {provider.model}")
+
+        # Nuevo: Activar contextos MCP si están especificados
+        active_mcp_contexts = []
+        if active_contexts and self.mcp_client:
+            for context_id in active_contexts:
+                try:
+                    await self.mcp_client.activate_context(context_id)
+                    active_mcp_contexts.append(context_id)
+                    logger.debug(f"Contexto MCP activado: {context_id}")
+                except Exception as e:
+                    logger.warning(f"Error activando contexto MCP {context_id}: {e}")
+
+        try:
+            # Verificar si el proveedor tiene soporte nativo para MCP
+            has_mcp_native_support = provider.metadata.get("mcp_native", False)
+
+            # Ejecutar según el tipo de proveedor
+            if provider.type == LLMProviderType.OPENAI:
+                if has_mcp_native_support and active_mcp_contexts:
+                    # Usar API con soporte MCP nativo
+                    response["text"] = await self._generate_openai_mcp(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        provider=provider,
+                        active_contexts=active_mcp_contexts,
+                        max_tokens=actual_max_tokens,
+                        temperature=actual_temperature,
+                        advanced_settings=advanced_settings
+                    )
+                else:
+                    # Usar API estándar
+                    response["text"] = await self._generate_openai(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        provider=provider,
+                        max_tokens=actual_max_tokens,
+                        temperature=actual_temperature,
+                        advanced_settings=advanced_settings
+                    )
+
+            elif provider.type == LLMProviderType.AZURE_OPENAI:
+                if has_mcp_native_support and active_mcp_contexts:
+                    # Implementación para Azure con MCP
+                    response["text"] = await self._generate_azure_openai_mcp(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        provider=provider,
+                        active_contexts=active_mcp_contexts,
+                        max_tokens=actual_max_tokens,
+                        temperature=actual_temperature,
+                        advanced_settings=advanced_settings
+                    )
+                else:
+                    response["text"] = await self._generate_azure_openai(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        provider=provider,
+                        max_tokens=actual_max_tokens,
+                        temperature=actual_temperature,
+                        advanced_settings=advanced_settings
+                    )
+
+            elif provider.type == LLMProviderType.ANTHROPIC:
+                if has_mcp_native_support and active_mcp_contexts:
+                    # Anthropic Claude con soporte MCP
+                    response["text"] = await self._generate_anthropic_mcp(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        provider=provider,
+                        active_contexts=active_mcp_contexts,
+                        max_tokens=actual_max_tokens,
+                        temperature=actual_temperature,
+                        advanced_settings=advanced_settings
+                    )
+                else:
+                    response["text"] = await self._generate_anthropic(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        provider=provider,
+                        max_tokens=actual_max_tokens,
+                        temperature=actual_temperature,
+                        advanced_settings=advanced_settings
+                    )
+
+            elif provider.type == LLMProviderType.OLLAMA:
+                response["text"] = await self._generate_ollama(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    provider=provider,
+                    max_tokens=actual_max_tokens,
+                    temperature=actual_temperature,
+                    advanced_settings=advanced_settings
+                )
+
+            else:
+                logger.error(f"Unsupported provider type: {provider.type}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported provider type: {provider.type}"
+                )
+
+            # Log de éxito
+            logger.debug(f"Successfully generated text with {provider.name}. Response length: {len(response['text'])}")
+
+            return response
+
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error with {provider.type}: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Error generating text with {provider.type}: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error generating text: {str(e)}"
+            )
+        finally:
+            # Desactivar contextos MCP al finalizar
+            if active_mcp_contexts and self.mcp_client:
+                for context_id in active_mcp_contexts:
+                    try:
+                        await self.mcp_client.deactivate_context(context_id)
+                    except Exception as e:
+                        logger.warning(f"Error desactivando contexto MCP {context_id}: {e}")
+
+    async def _generate_openai(self,
+                               prompt: str,
+                               system_prompt: str,
+                               provider: LLMProvider,
+                               max_tokens: int,
+                               temperature: float,
+                               advanced_settings: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Generar texto con OpenAI
+
+        Args:
+            prompt: Prompt principal
+            system_prompt: Prompt de sistema
+            provider: Proveedor OpenAI
+            max_tokens: Número máximo de tokens
+            temperature: Temperatura
+            advanced_settings: Configuraciones avanzadas para la generación
+
+        Returns:
+            Texto generado
+        """
+        if not provider.api_key:
+            raise ValueError("API key is required for OpenAI")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {provider.api_key}"
+        }
+
+        # Añadir Organization ID si está presente en metadatos
+        if "organization_id" in provider.metadata:
+            headers["OpenAI-Organization"] = provider.metadata["organization_id"]
+
+        payload = {
+            "model": provider.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+
+        # Incorporar configuraciones avanzadas si se proporcionan
+        if advanced_settings:
+            for key, value in advanced_settings.items():
+                # Evitar sobrescribir campos críticos
+                if key not in ["model", "messages"]:
+                    payload[key] = value
+
+        timeout = aiohttp.ClientTimeout(total=self.settings.openai.timeout_seconds)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers=headers,
+                        json=payload
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"OpenAI API error: {response.status} - {error_text}")
+                        raise ValueError(f"OpenAI API error: {response.status} - {error_text}")
+
+                    response_json = await response.json()
+                    return response_json["choices"][0]["message"]["content"]
+            except aiohttp.ClientResponseError as e:
+                logger.error(f"OpenAI API response error: {e.status} - {e.message}")
+                raise ValueError(f"OpenAI API error: {e.status} - {e.message}")
+            except aiohttp.ClientError as e:
+                logger.error(f"OpenAI API connection error: {str(e)}")
+                raise
+
+    async def _generate_openai_mcp(self,
+                                   prompt: str,
+                                   system_prompt: str,
+                                   provider: LLMProvider,
+                                   active_contexts: List[str],
+                                   max_tokens: int,
+                                   temperature: float,
+                                   advanced_settings: Optional[Dict[str, Any]] = None) -> str:
+        """Generar texto con OpenAI usando conectividad MCP nativa"""
+        if not provider.api_key:
+            raise ValueError("API key is required for OpenAI")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {provider.api_key}"
+        }
+
+        # Añadir Organization ID si está presente en metadatos
+        if "organization_id" in provider.metadata:
+            headers["OpenAI-Organization"] = provider.metadata["organization_id"]
+
+        # Crear referencias a contextos MCP
+        context_refs = [{"id": ctx_id} for ctx_id in active_contexts]
+
+        payload = {
+            "model": provider.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            # Incluir contextos MCP si hay (OpenAI con soporte MCP usa el campo "tools")
+            "tools": [
+                {
+                    "type": "mcp_context",
+                    "contexts": context_refs
+                }
+            ]
+        }
+
+        # Eliminar campo tools si no hay contextos
+        if not context_refs:
+            del payload["tools"]
+
+        # Incorporar configuraciones avanzadas si se proporcionan
+        if advanced_settings:
+            for key, value in advanced_settings.items():
+                # Evitar sobrescribir campos críticos
+                if key not in ["model", "messages", "tools"]:
+                    payload[key] = value
+
+        timeout = aiohttp.ClientTimeout(total=self.settings.openai.timeout_seconds)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers=headers,
+                        json=payload
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"OpenAI API error: {response.status} - {error_text}")
+                        raise ValueError(f"OpenAI API error: {response.status} - {error_text}")
+
+                    response_json = await response.json()
+                    return response_json["choices"][0]["message"]["content"]
+            except aiohttp.ClientResponseError as e:
+                logger.error(f"OpenAI API response error: {e.status} - {e.message}")
+                raise ValueError(f"OpenAI API error: {e.status} - {e.message}")
+            except aiohttp.ClientError as e:
+                logger.error(f"OpenAI API connection error: {str(e)}")
+                raise
+
+    async def _generate_azure_openai(self,
+                                     prompt: str,
+                                     system_prompt: str,
+                                     provider: LLMProvider,
+                                     max_tokens: int,
+                                     temperature: float,
+                                     advanced_settings: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Generar texto con Azure OpenAI
+
+        Args:
+            prompt: Prompt principal
+            system_prompt: Prompt de sistema
+            provider: Proveedor Azure OpenAI
+            max_tokens: Número máximo de tokens
+            temperature: Temperatura
+            advanced_settings: Configuraciones avanzadas para la generación
+
+        Returns:
+            Texto generado
+        """
+        if not provider.api_key or not provider.api_endpoint:
+            raise ValueError("API key and endpoint are required for Azure OpenAI")
+
+        # Extraer deployment ID de los metadatos
+        deployment_id = provider.metadata.get("deployment_id", provider.model)
+        api_version = provider.metadata.get("api_version", "2023-05-15")
+
+        # URL para Azure OpenAI
+        url = f"{provider.api_endpoint}/openai/deployments/{deployment_id}/chat/completions?api-version={api_version}"
+
+        headers = {
+            "Content-Type": "application/json",
+            "api-key": provider.api_key
+        }
+
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+
+        # Incorporar configuraciones avanzadas si se proporcionan
+        if advanced_settings:
+            for key, value in advanced_settings.items():
+                if key not in ["messages"]:
+                    payload[key] = value
+
+        timeout = aiohttp.ClientTimeout(total=self.settings.openai.timeout_seconds)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.post(
+                        url,
+                        headers=headers,
+                        json=payload
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Azure OpenAI API error: {response.status} - {error_text}")
+                        raise ValueError(f"Azure OpenAI API error: {response.status} - {error_text}")
+
+                    response_json = await response.json()
+                    return response_json["choices"][0]["message"]["content"]
+            except aiohttp.ClientResponseError as e:
+                logger.error(f"Azure OpenAI API response error: {e.status} - {e.message}")
+                raise ValueError(f"Azure OpenAI API error: {e.status} - {e.message}")
+            except aiohttp.ClientError as e:
+                logger.error(f"Azure OpenAI API connection error: {str(e)}")
+                raise
+
+    async def _generate_azure_openai_mcp(self,
+                                         prompt: str,
+                                         system_prompt: str,
+                                         provider: LLMProvider,
+                                         active_contexts: List[str],
+                                         max_tokens: int,
+                                         temperature: float,
+                                         advanced_settings: Optional[Dict[str, Any]] = None) -> str:
+        """Generar texto con Azure OpenAI usando conectividad MCP nativa"""
+        if not provider.api_key or not provider.api_endpoint:
+            raise ValueError("API key and endpoint are required for Azure OpenAI")
+
+        # Extraer deployment ID de los metadatos
+        deployment_id = provider.metadata.get("deployment_id", provider.model)
+        api_version = provider.metadata.get("api_version", "2023-05-15")
+
+        # URL para Azure OpenAI
+        url = f"{provider.api_endpoint}/openai/deployments/{deployment_id}/chat/completions?api-version={api_version}"
+
+        headers = {
+            "Content-Type": "application/json",
+            "api-key": provider.api_key
+        }
+
+        # Crear referencias a contextos MCP
+        context_refs = [{"id": ctx_id} for ctx_id in active_contexts]
+
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+
+        # Incluir contextos MCP si hay (formato específico para Azure OpenAI)
+        if context_refs:
+            payload["tools"] = [
+                {
+                    "type": "mcp_context",
+                    "contexts": context_refs
+                }
+            ]
+
+        # Incorporar configuraciones avanzadas
+        if advanced_settings:
+            for key, value in advanced_settings.items():
+                if key not in ["messages", "tools"]:
+                    payload[key] = value
+
+        timeout = aiohttp.ClientTimeout(total=self.settings.openai.timeout_seconds)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.post(
+                        url,
+                        headers=headers,
+                        json=payload
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Azure OpenAI API error: {response.status} - {error_text}")
+                        raise ValueError(f"Azure OpenAI API error: {response.status} - {error_text}")
+
+                    response_json = await response.json()
+                    return response_json["choices"][0]["message"]["content"]
+            except aiohttp.ClientResponseError as e:
+                logger.error(f"Azure OpenAI API response error: {e.status} - {e.message}")
+                raise ValueError(f"Azure OpenAI API error: {e.status} - {e.message}")
+            except aiohttp.ClientError as e:
+                logger.error(f"Azure OpenAI API connection error: {str(e)}")
+                raise
+
+    async def _generate_anthropic(self,
+                                  prompt: str,
+                                  system_prompt: str,
+                                  provider: LLMProvider,
+                                  max_tokens: int,
+                                  temperature: float,
+                                  advanced_settings: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Generar texto con Anthropic
+
+        Args:
+            prompt: Prompt principal
+            system_prompt: Prompt de sistema
+            provider: Proveedor Anthropic
+            max_tokens: Número máximo de tokens
+            temperature: Temperatura
+            advanced_settings: Configuraciones avanzadas para la generación
+
+        Returns:
+            Texto generado
+        """
+        if not provider.api_key:
+            raise ValueError("API key is required for Anthropic")
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": provider.api_key,
+            "anthropic-version": "2023-06-01"
+        }
+
+        payload = {
+            "model": provider.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+
+        # Incorporar configuraciones avanzadas si se proporcionan
+        if advanced_settings:
+            for key, value in advanced_settings.items():
+                if key not in ["model", "messages"]:
+                    payload[key] = value
+
+        timeout = aiohttp.ClientTimeout(total=self.settings.anthropic.timeout_seconds)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers=headers,
+                        json=payload
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Anthropic API error: {response.status} - {error_text}")
+                        raise ValueError(f"Anthropic API error: {response.status} - {error_text}")
+
+                    response_json = await response.json()
+                    if "content" in response_json and response_json["content"]:
+                        for content_item in response_json["content"]:
+                            if content_item.get("type") == "text":
+                                return content_item.get("text", "")
+
+                    # Fallback en caso de formato inesperado
+                    return str(response_json.get("content", [{"text": ""}])[0].get("text", ""))
+            except aiohttp.ClientResponseError as e:
+                logger.error(f"Anthropic API response error: {e.status} - {e.message}")
+                raise ValueError(f"Anthropic API error: {e.status} - {e.message}")
+            except aiohttp.ClientError as e:
+                logger.error(f"Anthropic API connection error: {str(e)}")
+                raise
+
+    async def _generate_anthropic_mcp(self,
+                                      prompt: str,
+                                      system_prompt: str,
+                                      provider: LLMProvider,
+                                      active_contexts: List[str],
+                                      max_tokens: int,
+                                      temperature: float,
+                                      advanced_settings: Optional[Dict[str, Any]] = None) -> str:
+        """Generar texto con Anthropic Claude usando conectividad MCP nativa"""
+        if not provider.api_key:
+            raise ValueError("API key is required for Anthropic")
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": provider.api_key,
+            "anthropic-version": "2023-06-01"
+        }
+
+        # Obtener IDs de contexto en formato compatible con Anthropic
+        context_refs = [{"id": ctx_id} for ctx_id in active_contexts]
+
+        payload = {
+            "model": provider.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+
+        # Añadir contextos MCP si hay
+        if context_refs:
+            payload["contexts"] = context_refs
+
+        # Incorporar configuraciones avanzadas si se proporcionan
+        if advanced_settings:
+            for key, value in advanced_settings.items():
+                # Evitar sobrescribir campos críticos
+                if key not in ["model", "messages", "contexts"]:
+                    payload[key] = value
+
+        timeout = aiohttp.ClientTimeout(total=self.settings.anthropic.timeout_seconds)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers=headers,
+                        json=payload
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Anthropic API error: {response.status} - {error_text}")
+                        raise ValueError(f"Anthropic API error: {response.status} - {error_text}")
+
+                    response_json = await response.json()
+                    if "content" in response_json and response_json["content"]:
+                        for content_item in response_json["content"]:
+                            if content_item.get("type") == "text":
+                                return content_item.get("text", "")
+
+                    # Fallback en caso de formato inesperado
+                    return str(response_json.get("content", [{"text": ""}])[0].get("text", ""))
+            except aiohttp.ClientResponseError as e:
+                logger.error(f"Anthropic API response error: {e.status} - {e.message}")
+                raise ValueError(f"Anthropic API error: {e.status} - {e.message}")
+            except aiohttp.ClientError as e:
+                logger.error(f"Anthropic API connection error: {str(e)}")
+                raise
+
+    async def _generate_ollama(self,
+                               prompt: str,
+                               system_prompt: str,
+                               provider: LLMProvider,
+                               max_tokens: int,
+                               temperature: float,
+                               advanced_settings: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Generar texto con Ollama (local)
+
+        Args:
+            prompt: Prompt principal
+            system_prompt: Prompt de sistema
+            provider: Proveedor Ollama
+            max_tokens: Número máximo de tokens
+            temperature: Temperatura
+            advanced_settings: Configuraciones avanzadas para la generación
+
+        Returns:
+            Texto generado
+        """
+        if not provider.api_endpoint:
+            raise ValueError("API endpoint is required for Ollama")
+
+        # Construir URL completa
+        api_url = provider.api_endpoint
+        if not api_url.endswith("/api/chat"):
+            # Comprobar si termina con /
+            if not api_url.endswith("/"):
+                api_url = f"{api_url}/"
+            api_url = f"{api_url}api/chat"
+
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": provider.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": temperature
+            }
+        }
+
+        # Incorporar configuraciones avanzadas si se proporcionan
+        if advanced_settings:
+            for key, value in advanced_settings.items():
+                if key == "options" and isinstance(value, dict):
+                    payload["options"].update(value)
+                elif key not in ["model", "messages", "options"]:
+                    payload[key] = value
+
+        timeout = aiohttp.ClientTimeout(total=self.settings.ollama.timeout_seconds)
+
+        logger.debug(f"Connecting to Ollama at {api_url}")
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.post(
+                        api_url,
+                        headers=headers,
+                        json=payload
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Ollama API error: {response.status} - {error_text}")
+                        raise ValueError(f"Ollama API error: {response.status} - {error_text}")
+
+                    response_json = await response.json()
+                    return response_json["message"]["content"]
+            except aiohttp.ClientResponseError as e:
+                logger.error(f"Ollama API response error: {e.status} - {e.message}")
+                raise ValueError(f"Ollama API error: {e.status} - {e.message}")
+            except aiohttp.ClientError as e:
+                logger.error(f"Ollama API connection error: {str(e)}")
+                raise
+
+    # Implementación para buscar información relevante con herramienta find_relevant
+    async def find_relevant_information(self, query: str, embedding_type: str = "general",
+                                        owner_id: Optional[str] = None, area_id: Optional[str] = None,
+                                        limit: int = 5) -> List[str]:
+        """
+        Buscar información relevante usando la herramienta MCP find_relevant
+
+        Args:
+            query: Consulta para buscar información
+            embedding_type: Tipo de embedding (general o personal)
+            owner_id: ID del propietario (para conocimiento personal)
+            area_id: ID del área (para filtrar por área)
+            limit: Número máximo de resultados
+
+        Returns:
+            Lista de resultados relevantes o mensaje de error
+        """
+        if not self.mcp_client or not self.has_find_tool:
+            logger.warning("MCP client not available or find_relevant tool not found")
+            return ["[MCP tools not available for retrieval]"]
+
+        try:
+            # Preparar parámetros para la herramienta
+            tool_params = {
+                "query": query,
+                "embedding_type": embedding_type,
+                "limit": limit
+            }
+
+            if owner_id:
+                tool_params["owner_id"] = owner_id
+
+            if area_id:
+                tool_params["area_id"] = area_id
+
+            # Llamar a la herramienta find_relevant
+            results = await self.mcp_client.call_tool("find_relevant", tool_params)
+            return results
+        except Exception as e:
+            logger.error(f"Error calling find_relevant MCP tool: {e}")
+            return [f"Error retrieving information: {str(e)}"]
+
+    # Implementación para almacenar documento con herramienta store_document
+    async def store_document(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Almacenar documento usando la herramienta MCP store_document
+
+        Args:
+            text: Texto a almacenar
+            metadata: Metadatos adicionales
+
+        Returns:
+            Confirmación o mensaje de error
+        """
+        if not self.mcp_client or not self.has_store_tool:
+            logger.warning("MCP client not available or store_document tool not found")
+            return "[MCP tools not available for storage]"
+
+        try:
+            # Preparar parámetros para la herramienta
+            tool_params = {
+                "information": text
+            }
+
+            if metadata:
+                tool_params["metadata"] = metadata
+
+            # Llamar a la herramienta store_document
+            result = await self.mcp_client.call_tool("store_document", tool_params)
+            return result
+        except Exception as e:
+            logger.error(f"Error calling store_document MCP tool: {e}")
+            return f"Error storing document: {str(e)}"

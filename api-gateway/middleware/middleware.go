@@ -1,0 +1,196 @@
+package middleware
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v4"
+)
+
+// RequestLogger middleware para registrar detalles de las solicitudes
+func RequestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Tiempo de inicio
+		startTime := time.Now()
+
+		// Procesar la solicitud
+		c.Next()
+
+		// Tiempo de finalización y duración
+		endTime := time.Now()
+		latency := endTime.Sub(startTime)
+
+		// Registrar detalles de la solicitud
+		log.Printf("[%s] %s %s %d %s",
+			c.Request.Method,
+			c.Request.URL.Path,
+			c.ClientIP(),
+			c.Writer.Status(),
+			latency.String(),
+		)
+	}
+}
+
+// ErrorHandler middleware para manejar errores de forma centralizada
+func ErrorHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Next()
+
+		// Si ya hay una respuesta, no hacer nada
+		if c.Writer.Written() {
+			return
+		}
+
+		// Si hay errores, responder con el primero
+		if len(c.Errors) > 0 {
+			err := c.Errors[0]
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+	}
+}
+
+// AuthMiddleware estructura para el middleware de autenticación
+type AuthMiddleware struct {
+	Secret string
+}
+
+// NewAuthMiddleware crea una nueva instancia del middleware de autenticación
+func NewAuthMiddleware(secret string) *AuthMiddleware {
+	return &AuthMiddleware{
+		Secret: secret,
+	}
+}
+
+// Claims estructura para los claims del JWT
+type Claims struct {
+	UserID string `json:"user_id"`
+	Role   string `json:"role"`
+	jwt.RegisteredClaims
+}
+
+// Authenticate middleware para verificar autenticación
+func (am *AuthMiddleware) Authenticate() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Obtener token del header Authorization
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token de autorización no proporcionado"})
+			return
+		}
+
+		// El formato debe ser "Bearer <token>"
+		parts := strings.Split(authHeader, " ")
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "formato de token inválido"})
+			return
+		}
+
+		tokenStr := parts[1]
+
+		// Parsear y validar el token
+		token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+			// Asegurar que el método de firma sea HMAC
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("método de firma inesperado: %v", token.Header["alg"])
+			}
+			return []byte(am.Secret), nil
+		})
+
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token inválido: " + err.Error()})
+			return
+		}
+
+		// Extraer claims
+		if claims, ok := token.Claims.(*Claims); ok && token.Valid {
+			// Añadir información de usuario al contexto
+			c.Set("userID", claims.UserID)
+			c.Set("userRole", claims.Role)
+			c.Next()
+		} else {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token inválido"})
+			return
+		}
+	}
+}
+
+// AdminMiddleware estructura para el middleware de administración
+type AdminMiddleware struct {
+	UserServiceURL string
+}
+
+// NewAdminMiddleware crea una nueva instancia del middleware de administración
+func NewAdminMiddleware(userServiceURL string) *AdminMiddleware {
+	return &AdminMiddleware{
+		UserServiceURL: userServiceURL,
+	}
+}
+
+// AdminOnly middleware para verificar si el usuario es administrador
+func (am *AdminMiddleware) AdminOnly() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Obtener rol del contexto
+		role, exists := c.Get("userRole")
+		if !exists {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "usuario no autenticado"})
+			return
+		}
+
+		// Verificar si es admin
+		if role == "admin" {
+			c.Next()
+			return
+		}
+
+		// Verificar con el servicio de usuarios
+		userID, _ := c.Get("userID")
+		userIDStr := userID.(string)
+
+		// Crear solicitud al servicio de usuarios
+		reqBody, _ := json.Marshal(map[string]string{
+			"user_id": userIDStr,
+		})
+
+		// Llamar al endpoint de verificación de admin
+		resp, err := http.Post(
+			am.UserServiceURL+"/users/verify-admin",
+			"application/json",
+			bytes.NewBuffer(reqBody),
+		)
+
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "error al verificar permisos de administrador"})
+			return
+		}
+		defer resp.Body.Close()
+
+		// Leer respuesta
+		body, _ := io.ReadAll(resp.Body)
+
+		// Verificar respuesta
+		var result map[string]interface{}
+		if err := json.Unmarshal(body, &result); err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "error al procesar respuesta de verificación"})
+			return
+		}
+
+		// Si es admin, continuar
+		if isAdmin, ok := result["is_admin"].(bool); ok && isAdmin {
+			c.Next()
+			return
+		}
+
+		// Si no es admin, denegar acceso
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "acceso denegado: se requieren permisos de administrador"})
+	}
+}

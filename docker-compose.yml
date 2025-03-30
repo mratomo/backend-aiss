@@ -1,0 +1,221 @@
+version: '3.8'
+
+services:
+  # API Gateway (Go)
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - ENVIRONMENT=production
+      - AUTH_SECRET=${AUTH_SECRET}
+      - CORS_ALLOWED_ORIGINS=*
+    depends_on:
+      - user-service
+      - document-service
+      - context-service
+      - embedding-service
+      - rag-agent
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+  # User Service (Go)
+  user-service:
+    build:
+      context: ./core-services/user-service
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+      - ENVIRONMENT=production
+      - AUTH_SECRET=${AUTH_SECRET}
+      - ADMIN_INITIAL_PASSWORD=${ADMIN_INITIAL_PASSWORD:-admin123}
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_knowledge_system
+    depends_on:
+      - mongodb
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+  # Document Service (Go)
+  document-service:
+    build:
+      context: ./core-services/document-service
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+      - ENVIRONMENT=production
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_knowledge_system
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_USE_SSL=false
+      - MINIO_SHARED_BUCKET=shared-documents
+      - MINIO_PERSONAL_BUCKET=personal-documents
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+    depends_on:
+      - mongodb
+      - minio
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+  # Context Service (Python)
+  context-service:
+    build:
+      context: ./mcp-services/context-service
+      dockerfile: Dockerfile
+    ports:
+      - "8083:8083"
+    environment:
+      - PORT=8083
+      - ENVIRONMENT=production
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_knowledge_system
+      - MCP_API_URL=${MCP_API_URL:-http://rag-agent:8085/api/v1/mcp}
+      - MCP_API_KEY=${MCP_API_KEY:-}
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+    depends_on:
+      - mongodb
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+  # Embedding Service (Python - GPU)
+  embedding-service:
+    build:
+      context: ./mcp-services/embedding-service
+      dockerfile: Dockerfile
+    ports:
+      - "8084:8084"
+    environment:
+      - PORT=8084
+      - ENVIRONMENT=production
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_knowledge_system
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION_GENERAL=general_knowledge
+      - QDRANT_COLLECTION_PERSONAL=personal_knowledge
+      - GENERAL_EMBEDDING_MODEL=${GENERAL_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L12-v2}
+      - PERSONAL_EMBEDDING_MODEL=${PERSONAL_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L12-v2}
+      - USE_GPU=${USE_GPU:-true}
+      - MCP_SERVICE_URL=http://context-service:8083
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - mongodb
+      - qdrant
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+  # RAG Agent (Python)
+  rag-agent:
+    build:
+      context: ./rag-agent
+      dockerfile: Dockerfile
+    ports:
+      - "8085:8085"
+    environment:
+      - PORT=8085
+      - ENVIRONMENT=production
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_knowledge_system
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+      - DOCUMENT_SERVICE_URL=http://document-service:8082
+      - CONTEXT_SERVICE_URL=http://context-service:8083
+      - OPENAI_DEFAULT_MODEL=${OPENAI_DEFAULT_MODEL:-gpt-4o}
+      - ANTHROPIC_DEFAULT_MODEL=${ANTHROPIC_DEFAULT_MODEL:-claude-3-opus-20240229}
+      - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-llama3}
+    depends_on:
+      - mongodb
+      - embedding-service
+      - context-service
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+  # MongoDB
+  mongodb:
+    image: mongo:6.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb-data:/data/db
+      - ./db/mongodb/mongodb:/docker-entrypoint-initdb.d/init-mongo.js:ro
+    environment:
+      - MONGO_INITDB_DATABASE=mcp_knowledge_system
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+  # Qdrant Vector Database
+  qdrant:
+    image: qdrant/qdrant:v1.5.0
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+      - ./db/qdrant/qdrant:/qdrant/config/production.yaml:ro
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+  # MinIO Object Storage
+  minio:
+    image: minio/minio:RELEASE.2023-06-02T21-20-33Z
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+    command: server /data --console-address ":9001"
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+  # MinIO Setup (creates buckets)
+  minio-setup:
+    image: minio/mc:RELEASE.2023-06-03T01-45-28Z
+    depends_on:
+      - minio
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc config host add myminio http://minio:9000 ${MINIO_ACCESS_KEY:-minioadmin} ${MINIO_SECRET_KEY:-minioadmin};
+      /usr/bin/mc mb --ignore-existing myminio/shared-documents;
+      /usr/bin/mc mb --ignore-existing myminio/personal-documents;
+      /usr/bin/mc anonymous set download myminio/shared-documents;
+      exit 0;
+      "
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge
+
+volumes:
+  mongodb-data:
+  qdrant-data:
+  minio-data:
