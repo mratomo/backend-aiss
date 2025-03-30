@@ -17,7 +17,6 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 	userHandler := handlers.NewUserHandler(cfg.Services.UserService)
 	docHandler := handlers.NewDocumentHandler(cfg.Services.DocumentService)
 	contextHandler := handlers.NewContextHandler(cfg.Services.ContextService)
-	embeddingHandler := handlers.NewEmbeddingHandler(cfg.Services.EmbeddingService)
 	ragHandler := handlers.NewRAGHandler(cfg.Services.RagAgent)
 	llmSettingsHandler := handlers.NewLLMSettingsHandler(cfg.Services.RagAgent)
 
@@ -47,6 +46,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 		{
 			admin.GET("", userHandler.GetAllUsers)
 			admin.GET("/:id", userHandler.GetUserByID)
+			admin.POST("", userHandler.Register)         // NUEVO: Crear usuario como admin
+			admin.PUT("/:id", userHandler.UpdateUser)    // NUEVO: Actualizar cualquier usuario
+			admin.DELETE("/:id", userHandler.DeleteUser) // NUEVO: Eliminar usuario
 			admin.PUT("/:id/permissions", userHandler.UpdatePermissions)
 		}
 	}
@@ -79,11 +81,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 		docs.GET("/personal", docHandler.ListPersonalDocuments)
 		docs.POST("/personal", docHandler.UploadPersonalDocument)
 		docs.GET("/personal/:id", docHandler.GetPersonalDocument)
+		docs.GET("/personal/:id/content", docHandler.GetPersonalDocumentContent)
 		docs.DELETE("/personal/:id", docHandler.DeletePersonalDocument)
 
 		// Documentos compartidos (lectura para todos)
 		docs.GET("/shared", docHandler.ListSharedDocuments)
 		docs.GET("/shared/:id", docHandler.GetSharedDocument)
+		docs.GET("/shared/:id/content", docHandler.GetSharedDocumentContent)
 
 		// Administración de documentos compartidos (solo admin)
 		admin := docs.Group("/admin")
@@ -93,6 +97,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 			admin.PUT("/shared/:id", docHandler.UpdateSharedDocument)
 			admin.DELETE("/shared/:id", docHandler.DeleteSharedDocument)
 		}
+	}
+
+	// Rutas para búsqueda de documentos
+	search := router.Group("/search")
+	search.Use(authMiddleware.Authenticate())
+	{
+		search.GET("", docHandler.SearchDocuments) // NUEVO: Ruta de búsqueda de documentos
 	}
 
 	// Rutas para consultas RAG
@@ -116,7 +127,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 		llm.DELETE("/providers/:id", ragHandler.DeleteProvider)
 		llm.POST("/providers/:id/test", ragHandler.TestProvider)
 
-		// Nuevas rutas para configuración de system prompt global
+		// Rutas para configuración de system prompt global
 		llm.GET("/settings/system-prompt", llmSettingsHandler.GetSystemPrompt)
 		llm.PUT("/settings/system-prompt", llmSettingsHandler.UpdateSystemPrompt)
 		llm.POST("/settings/system-prompt/reset", llmSettingsHandler.ResetSystemPrompt)

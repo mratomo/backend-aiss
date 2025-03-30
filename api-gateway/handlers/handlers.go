@@ -58,6 +58,13 @@ func (h *UserHandler) GetCurrentUser(c *gin.Context) {
 
 // UpdateUser actualiza un usuario
 func (h *UserHandler) UpdateUser(c *gin.Context) {
+	// Si es una ruta de admin, usar el ID del parámetro
+	if c.Param("id") != "" {
+		proxyRequest(c, h.serviceURL+"/users/"+c.Param("id"), "PUT")
+		return
+	}
+
+	// Si no, usar el ID del usuario actual
 	userID, exists := c.Get("userID")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "no autorizado"})
@@ -65,6 +72,11 @@ func (h *UserHandler) UpdateUser(c *gin.Context) {
 	}
 
 	proxyRequest(c, h.serviceURL+"/users/"+userID.(string), "PUT")
+}
+
+// DeleteUser elimina un usuario (admin)
+func (h *UserHandler) DeleteUser(c *gin.Context) {
+	proxyRequest(c, h.serviceURL+"/users/"+c.Param("id"), "DELETE")
 }
 
 // ChangePassword cambia la contraseña de un usuario
@@ -160,6 +172,11 @@ func (h *DocumentHandler) DeleteSharedDocument(c *gin.Context) {
 	proxyRequest(c, h.serviceURL+"/shared/"+c.Param("id"), "DELETE")
 }
 
+// SearchDocuments busca documentos
+func (h *DocumentHandler) SearchDocuments(c *gin.Context) {
+	proxyRequest(c, h.serviceURL+"/search", "GET")
+}
+
 // ContextHandler maneja solicitudes relacionadas con áreas y contextos
 type ContextHandler struct {
 	serviceURL string
@@ -210,13 +227,6 @@ func (h *ContextHandler) UpdateAreaSystemPrompt(c *gin.Context) {
 // EmbeddingHandler maneja solicitudes relacionadas con embeddings
 type EmbeddingHandler struct {
 	serviceURL string
-}
-
-// NewEmbeddingHandler crea un nuevo manejador de embeddings
-func NewEmbeddingHandler(serviceURL string) *EmbeddingHandler {
-	return &EmbeddingHandler{
-		serviceURL: serviceURL,
-	}
 }
 
 // RAGHandler maneja solicitudes relacionadas con el agente RAG
