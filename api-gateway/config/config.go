@@ -42,7 +42,8 @@ func LoadConfig() (*Config, error) {
 	// Valores por defecto
 	viper.SetDefault("port", "8080")
 	viper.SetDefault("environment", "development")
-	viper.SetDefault("corsAllowedOrigins", []string{"*"})
+	// Configuración más segura para CORS - en producción debería ser más restrictiva
+	viper.SetDefault("corsAllowedOrigins", []string{"http://localhost:3000", "https://app.domain.com"})
 	viper.SetDefault("jwtExpirationHours", 24)
 
 	// Servicios

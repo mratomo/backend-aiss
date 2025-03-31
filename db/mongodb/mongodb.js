@@ -3,6 +3,9 @@
 
 db = db.getSiblingDB('mcp_knowledge_system');
 
+// También inicializar la base de datos para las sesiones de terminal
+let terminalDb = db.getSiblingDB('terminal_sessions');
+
 // Crear colecciones
 db.createCollection('users');
 db.createCollection('documents');
@@ -78,5 +81,43 @@ if (!llmSettingsExists) {
     });
     print('Configuración LLM inicial creada');
 }
+
+// Crear colecciones para terminal_sessions
+terminalDb.createCollection('sessions');
+terminalDb.createCollection('commands');
+terminalDb.createCollection('bookmarks');
+terminalDb.createCollection('contexts');
+
+// Índices para sessions
+terminalDb.sessions.createIndex({ 'session_id': 1 }, { unique: true });
+terminalDb.sessions.createIndex({ 'user_id': 1 });
+terminalDb.sessions.createIndex({ 'status': 1 });
+terminalDb.sessions.createIndex({ 'created_at': 1 });
+terminalDb.sessions.createIndex({ 'last_active': 1 });
+terminalDb.sessions.createIndex({ 'target_info.hostname': 1 });
+terminalDb.sessions.createIndex({ 'target_info.os_detected': 1 });
+
+// Índices para commands
+terminalDb.commands.createIndex({ 'command_id': 1 }, { unique: true });
+terminalDb.commands.createIndex({ 'session_id': 1 });
+terminalDb.commands.createIndex({ 'user_id': 1 });
+terminalDb.commands.createIndex({ 'timestamp': 1 });
+terminalDb.commands.createIndex({ 'exit_code': 1 });
+terminalDb.commands.createIndex({ 'is_suggested': 1 });
+terminalDb.commands.createIndex({ 'tagged': 1 });
+terminalDb.commands.createIndex({ 'error_detected': 1 });
+terminalDb.commands.createIndex({ 'command': 'text' });
+
+// Índices para bookmarks
+terminalDb.bookmarks.createIndex({ 'bookmark_id': 1 }, { unique: true });
+terminalDb.bookmarks.createIndex({ 'command_id': 1 });
+terminalDb.bookmarks.createIndex({ 'session_id': 1 });
+terminalDb.bookmarks.createIndex({ 'user_id': 1 });
+terminalDb.bookmarks.createIndex({ 'created_at': 1 });
+
+// Índices para contexts
+terminalDb.contexts.createIndex({ 'session_id': 1 }, { unique: true });
+terminalDb.contexts.createIndex({ 'user_id': 1 });
+terminalDb.contexts.createIndex({ 'last_updated': 1 });
 
 print('Inicialización de la base de datos MongoDB completada');

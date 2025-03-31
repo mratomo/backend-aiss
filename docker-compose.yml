@@ -1,5 +1,3 @@
-
-
 services:
   # API Gateway (Go)
   api-gateway:
@@ -11,8 +9,9 @@ services:
     environment:
       - PORT=8080
       - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET:-please_change_this_in_production}
-      - CORS_ALLOWED_ORIGINS=*
+      - AUTH_SECRET=${AUTH_SECRET}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://app.domain.com}
+      - TERMINAL_GATEWAY_URL=http://terminal-gateway-service:8090
     depends_on:
       user-service:
         condition: service_started
@@ -23,6 +22,12 @@ services:
       embedding-service:
         condition: service_started
       rag-agent:
+        condition: service_started
+      db-connection-service:
+        condition: service_started
+      schema-discovery-service:
+        condition: service_started
+      terminal-gateway-service:
         condition: service_started
     networks:
       - mcp-network
@@ -44,8 +49,8 @@ services:
     environment:
       - PORT=8081
       - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET:-please_change_this_in_production}
-      - ADMIN_INITIAL_PASSWORD=${ADMIN_INITIAL_PASSWORD:-admin123}
+      - AUTH_SECRET=${AUTH_SECRET}
+      - ADMIN_INITIAL_PASSWORD=${ADMIN_INITIAL_PASSWORD}
       - MONGODB_URI=mongodb://mongodb:27017
       - MONGODB_DATABASE=mcp_knowledge_system
     depends_on:
@@ -74,9 +79,9 @@ services:
       - MONGODB_URI=mongodb://mongodb:27017
       - MONGODB_DATABASE=mcp_knowledge_system
       - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
-      - MINIO_USE_SSL=false
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_USE_SSL=${MINIO_USE_SSL:-false}
       - MINIO_SHARED_BUCKET=shared-documents
       - MINIO_PERSONAL_BUCKET=personal-documents
       - EMBEDDING_SERVICE_URL=http://embedding-service:8084
@@ -115,6 +120,7 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
+      # Eliminamos la dependencia circular hacia embedding-service
     networks:
       - mcp-network
     restart: unless-stopped
@@ -125,7 +131,7 @@ services:
       retries: 3
       start_period: 20s
 
-  # Embedding Service (Python - GPU)
+  # Embedding Service (Python - GPU with CPU fallback)
   embedding-service:
     build:
       context: ./mcp-services/embedding-service
@@ -142,12 +148,17 @@ services:
       - QDRANT_COLLECTION_PERSONAL=personal_knowledge
       - GENERAL_EMBEDDING_MODEL=${GENERAL_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L12-v2}
       - PERSONAL_EMBEDDING_MODEL=${PERSONAL_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L12-v2}
-      - USE_GPU=true
+      - USE_GPU=${USE_GPU:-true}
       - MCP_SERVICE_URL=http://context-service:8083
     entrypoint: >
       /bin/sh -c "
-      nvidia-smi > /dev/null 2>&1 || (echo 'GPU not available. Make sure nvidia drivers and nvidia-container-toolkit are installed!' && exit 1)
-      echo 'GPU is available, proceeding with service start.'
+      if nvidia-smi > /dev/null 2>&1; then
+        echo 'GPU detected, proceeding with GPU-accelerated service.'
+        export USE_GPU=true
+      else
+        echo 'GPU not available, falling back to CPU mode.'
+        export USE_GPU=false
+      fi
       python main.py
       "
     deploy:
@@ -157,11 +168,15 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+              options:
+                fail: false # No falla si no hay GPU
     depends_on:
       mongodb:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+      qdrant-setup:
+        condition: service_completed_successfully
     networks:
       - mcp-network
     restart: unless-stopped
@@ -190,6 +205,13 @@ services:
       - OPENAI_DEFAULT_MODEL=${OPENAI_DEFAULT_MODEL:-gpt-4o}
       - ANTHROPIC_DEFAULT_MODEL=${ANTHROPIC_DEFAULT_MODEL:-claude-3-opus-20240229}
       - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-llama3}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://localhost:11434}
+      - USE_MCP_TOOLS=${USE_MCP_TOOLS:-true}
+      - PREFER_DIRECT_MCP=${PREFER_DIRECT_MCP:-true}
+      - DB_CONNECTIONS_URL=http://db-connection-service:8086
+      - SCHEMA_DISCOVERY_URL=http://schema-discovery-service:8087
     depends_on:
       mongodb:
         condition: service_healthy
@@ -205,6 +227,215 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
+
+  # DB Connection Service (Python)
+  db-connection-service:
+    build:
+      context: ./db-services/db-connection-service
+      dockerfile: Dockerfile
+    ports:
+      - "8086:8086"
+    environment:
+      - PORT=8086
+      - ENVIRONMENT=production
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_knowledge_system
+      - DB_ENCRYPTION_KEY=${DB_ENCRYPTION_KEY}
+      - HASH_SALT=${HASH_SALT}
+      - SCHEMA_DISCOVERY_URL=http://schema-discovery-service:8087
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+      
+  # Schema Discovery Service (Python)
+  schema-discovery-service:
+    build:
+      context: ./db-services/schema-discovery-service
+      dockerfile: Dockerfile
+    ports:
+      - "8087:8087"
+    environment:
+      - PORT=8087
+      - ENVIRONMENT=production
+      - DB_CONNECTION_URL=http://db-connection-service:8086
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+      - SCHEMA_DISCOVERY_TIMEOUT=120
+      - MAX_TABLES_FOR_SAMPLE=30
+      - MAX_ROWS_PER_TABLE=100
+    # Removed circular dependency on db-connection-service
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8087/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Terminal Gateway Service (Go)
+  terminal-gateway-service:
+    build:
+      context: ./terminal-services/terminal-gateway-service
+      dockerfile: Dockerfile
+    ports:
+      - "8090:8090"
+    environment:
+      - PORT=8090
+      - ENVIRONMENT=production
+      - AUTH_SECRET=${AUTH_SECRET}
+      - SESSION_SERVICE_URL=http://terminal-session-service:8091
+      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8092
+      - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8093
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://app.domain.com}
+      - SSH_KEY_DIR=/app/keys
+    volumes:
+      - terminal-ssh-keys:/app/keys
+    depends_on:
+      terminal-session-service:
+        condition: service_started
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Terminal Session Service (Go)
+  terminal-session-service:
+    build:
+      context: ./terminal-services/terminal-session-service
+      dockerfile: Dockerfile
+    ports:
+      - "8091:8091"
+    environment:
+      - PORT=8091
+      - ENVIRONMENT=production
+      - AUTH_SECRET=${AUTH_SECRET}
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=terminal_sessions
+      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8092
+      - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8093
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://app.domain.com}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Terminal Context Aggregator (Python)
+  terminal-context-aggregator:
+    build:
+      context: ./terminal-services/terminal-context-aggregator
+      dockerfile: Dockerfile
+    ports:
+      - "8092:8092"
+    environment:
+      - PORT=8092
+      - ENVIRONMENT=production
+      - AUTH_SECRET=${AUTH_SECRET}
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+      - MCP_SERVICE_URL=http://context-service:8083
+      - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8093
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=terminal_sessions
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      embedding-service:
+        condition: service_started
+      context-service:
+        condition: service_started
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Terminal Suggestion Service (Python)
+  terminal-suggestion-service:
+    build:
+      context: ./terminal-services/terminal-suggestion-service
+      dockerfile: Dockerfile
+    ports:
+      - "8093:8093"
+    environment:
+      - PORT=8093
+      - ENVIRONMENT=production
+      - AUTH_SECRET=${AUTH_SECRET}
+      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8092
+      - MCP_SERVICE_URL=http://context-service:8083
+      - LLM_SERVICE_URL=http://rag-agent:8085/api/v1/llm
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=terminal_sessions
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      rag-agent:
+        condition: service_started
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8093/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Ollama - Local LLM (CUDA/ROCM support)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+              options:
+                fail: false
+    networks:
+      - mcp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
       start_period: 30s
 
   # MongoDB
@@ -245,6 +476,23 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
+      
+  # Qdrant Collections Setup
+  qdrant-setup:
+    image: alpine:3.18
+    volumes:
+      - ./db/qdrant/init_collections.sh:/init_collections.sh:ro
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION_GENERAL=general_knowledge
+      - QDRANT_COLLECTION_PERSONAL=personal_knowledge
+      - VECTOR_SIZE=384
+    entrypoint: ["/bin/sh", "/init_collections.sh"]
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    networks:
+      - mcp-network
 
   # MinIO Object Storage
   minio:
@@ -255,8 +503,8 @@ services:
     volumes:
       - minio-data:/data
     environment:
-      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
     command: server /data --console-address ":9001"
     networks:
       - mcp-network
@@ -275,11 +523,11 @@ services:
       minio:
         condition: service_healthy
     environment:
-      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
     entrypoint: >
       /bin/sh -c "
-      until /usr/bin/mc config host add myminio http://minio:9000 ${MINIO_ACCESS_KEY:-minioadmin} ${MINIO_SECRET_KEY:-minioadmin}; do
+      until /usr/bin/mc config host add myminio http://minio:9000 ${MINIO_ACCESS_KEY} ${MINIO_SECRET_KEY}; do
         echo 'Waiting for MinIO to be available...'
         sleep 2
       done;
@@ -300,3 +548,5 @@ volumes:
   mongodb-data:
   qdrant-data:
   minio-data:
+  ollama-data:
+  terminal-ssh-keys:

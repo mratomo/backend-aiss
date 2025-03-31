@@ -112,15 +112,29 @@ func (am *AuthMiddleware) Authenticate() gin.HandlerFunc {
 		}
 
 		// Extraer claims
-		if claims, ok := token.Claims.(*Claims); ok && token.Valid {
-			// Añadir información de usuario al contexto
-			c.Set("userID", claims.UserID)
-			c.Set("userRole", claims.Role)
-			c.Next()
-		} else {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token inválido"})
-			return
-		}
+			// Extraer claims
+			if claims, ok := token.Claims.(*Claims); ok && token.Valid {
+				// Verificar explícitamente la expiración del token
+				if claims.ExpiresAt \!= nil && time.Now().After(claims.ExpiresAt.Time) {
+					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token expirado"})
+					return
+				}
+
+				// Verificar que el token no sea usado antes de su tiempo de inicio
+				if claims.IssuedAt \!= nil && time.Now().Before(claims.IssuedAt.Time) {
+					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token no válido todavía"})
+					return
+				}
+				
+				// Añadir información de usuario al contexto
+				c.Set("userID", claims.UserID)
+				c.Set("userRole", claims.Role)
+				c.Set("tokenExpiresAt", claims.ExpiresAt.Time)
+				c.Next()
+			} else {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token inválido"})
+				return
+			}
 	}
 }
 

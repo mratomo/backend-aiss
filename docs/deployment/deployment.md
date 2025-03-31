@@ -1,294 +1,285 @@
-# Instrucciones de Despliegue
+# Guía de Despliegue
 
-Este documento proporciona instrucciones detalladas para desplegar el Sistema de Gestión de Conocimiento con Model Context Protocol (MCP) utilizando Docker y Docker Compose.
+## Requisitos del Sistema
 
-## Requisitos Previos
+### Hardware Recomendado
+- **CPU**: 4+ núcleos (8+ para entornos de producción)
+- **RAM**: 8GB mínimo (16GB+ recomendado, especialmente si se utilizan modelos locales)
+- **Almacenamiento**: 20GB mínimo (depende del volumen de documentos)
+- **GPU**: Opcional pero recomendado para el servicio de embeddings
 
-### Hardware
-- CPU: Mínimo 4 núcleos (recomendado 8+)
-- RAM: Mínimo 16GB (recomendado 32GB+)
-- Almacenamiento: Mínimo 50GB SSD
-- GPU: Recomendada NVIDIA con CUDA compatible (para servicio de embeddings)
+### Software Requerido
+- **Docker**: v20.10.0+
+- **Docker Compose**: v2.0.0+
+- **Git**: Para clonar el repositorio
 
-### Software
-- Docker Engine 24.0.0+
-- Docker Compose 2.20.0+
-- NVIDIA Driver (si va a usar GPU)
-- NVIDIA Container Toolkit (si va a usar GPU)
+## Preparación del Entorno
 
-## Estructura del Proyecto
+### 1. Clonar el Repositorio
 
-Asegúrese de tener la estructura de directorios del proyecto como se muestra a continuación:
-
-```
-mcp-knowledge-system/
-├── api-gateway/
-│   ├── Dockerfile
-│   ├── go.mod
-│   ├── go.sum
-│   ├── main.go
-│   └── ...
-├── core-services/
-│   ├── user-service/
-│   │   ├── Dockerfile
-│   │   └── ...
-│   └── document-service/
-│       ├── Dockerfile
-│       └── ...
-├── mcp-services/
-│   ├── context-service/
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt
-│   │   └── ...
-│   └── embedding-service/
-│       ├── Dockerfile
-│       ├── requirements.txt
-│       └── ...
-├── rag-agent/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── ...
-├── docker-compose.yml
-└── .env
+```bash
+git clone https://github.com/yourusername/backend-aiss.git
+cd backend-aiss
 ```
 
-## Configuración
+### 2. Configuración de Variables de Entorno
 
-### Variables de Entorno
+Crear un archivo `.env` en la raíz del proyecto basado en `.env.example`:
 
-Cree un archivo `.env` en el directorio raíz con las siguientes variables (ajuste los valores según sus necesidades):
+```bash
+cp .env.example .env
+```
+
+Editar el archivo `.env` con los valores apropiados:
 
 ```
-# Autenticación
-AUTH_SECRET=your_auth_secret_key_here
-ADMIN_INITIAL_PASSWORD=secure_admin_password
+# Configuración General
+ENVIRONMENT=production
+LOG_LEVEL=info
 
-# MinIO
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
+# Configuración API Gateway
+API_GATEWAY_PORT=8080
+JWT_SECRET=your-secure-jwt-secret
+JWT_EXPIRATION=30m
+REFRESH_TOKEN_EXPIRATION=7d
 
-# Modelos de Embeddings
-GENERAL_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L12-v2
-PERSONAL_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L12-v2
+# Configuración MongoDB
+MONGODB_URI=mongodb://mongo:27017
+MONGODB_DATABASE=aiss_backend
+MONGODB_USER=admin
+MONGODB_PASSWORD=secure-password
+
+# Configuración Qdrant
+QDRANT_URL=http://qdrant:6333
+QDRANT_API_KEY=
+
+# Configuración Embedding Service
+GENERAL_EMBEDDING_MODEL=BAAI/bge-large-en-v1.5
+PERSONAL_EMBEDDING_MODEL=BAAI/bge-large-en-v1.5
 USE_GPU=true
+USE_FP16=true
 
-# Modelos LLM
-OPENAI_DEFAULT_MODEL=gpt-4o
-ANTHROPIC_DEFAULT_MODEL=claude-3-opus-20240229
-OLLAMA_DEFAULT_MODEL=llama3
+# Configuración MinIO
+MINIO_ROOT_USER=minioadmin
+MINIO_ROOT_PASSWORD=minioadmin
+MINIO_BUCKET=documents
+
+# Configuración de LLM (opcional)
+DEFAULT_LLM_PROVIDER=openai
+OPENAI_API_KEY=your-openai-key
+ANTHROPIC_API_KEY=your-anthropic-key
+
+# Configuración de Ollama (opcional)
+OLLAMA_HOST=http://ollama:11434
+
+# Configuración CORS
+CORS_ALLOWED_ORIGINS=http://localhost:3000,https://app.yourcompany.com
 ```
 
-### Configuración GPU (Opcional)
+## Despliegue del Sistema
 
-Si va a utilizar GPU para el servicio de embeddings:
-
-1. Asegúrese de tener instalado el driver NVIDIA y NVIDIA Container Toolkit:
+### Construcción y Arranque de Servicios
 
 ```bash
-# Verificar instalación del driver NVIDIA
-nvidia-smi
-
-# Instalar NVIDIA Container Toolkit (Ubuntu)
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
-curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
-curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
-sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
-sudo systemctl restart docker
-```
-
-2. Verifique que Docker puede acceder a la GPU:
-
-```bash
-docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
-```
-
-## Pasos de Despliegue
-
-### 1. Construir Imágenes
-
-Navegue al directorio raíz del proyecto y construya todas las imágenes:
-
-```bash
+# Construcción de imágenes
 docker-compose build
-```
 
-Este proceso puede tardar varios minutos dependiendo de su conexión a Internet y el hardware disponible.
-
-### 2. Iniciar los Servicios
-
-Una vez construidas las imágenes, inicie los servicios:
-
-```bash
+# Arranque de todos los servicios
 docker-compose up -d
 ```
 
-La opción `-d` ejecuta los contenedores en segundo plano.
-
-### 3. Verificar el Despliegue
-
-Verifique que todos los servicios estén ejecutándose correctamente:
+### Verificación del Despliegue
 
 ```bash
+# Verificar que todos los contenedores están en ejecución
 docker-compose ps
+
+# Verificar logs
+docker-compose logs -f
 ```
 
-También puede verificar los logs de cada servicio:
+### Inicialización de Bases de Datos
+
+Las colecciones de MongoDB y Qdrant se inicializan automáticamente. Si necesitas ejecutar scripts de inicialización manualmente:
 
 ```bash
-# Ver logs de todos los servicios
-docker-compose logs
+# Inicializar MongoDB
+docker-compose exec mongodb mongosh --file /docker-entrypoint-initdb.d/mongodb.js
 
-# Ver logs de un servicio específico
-docker-compose logs api-gateway
+# Inicializar Qdrant
+docker-compose exec qdrant curl -X POST http://localhost:6333/collections -H "Content-Type: application/json" -d @/docker-entrypoint-initdb.d/qdrant-collections.json
 ```
 
-### 4. Verificar Conectividad
+## Estructura de Despliegue
 
-Pruebe el punto de entrada del API Gateway:
+### Diagrama de Contenedores
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Docker Compose Network                  │
+│                                                             │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐         │
+│  │  API    │  │  User   │  │Document │  │Terminal │         │
+│  │ Gateway │  │ Service │  │ Service │  │ Gateway │         │
+│  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘         │
+│       │            │            │            │              │
+│  ┌────▼────┐  ┌────▼────┐  ┌────▼────┐  ┌────▼────┐         │
+│  │ Context │  │Embedding│  │  RAG    │  │Terminal │         │
+│  │ Service │  │ Service │  │  Agent  │  │ Session │         │
+│  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘         │
+│       │            │            │            │              │
+│  ┌────▼────┐  ┌────▼────┐  ┌────▼────┐  ┌────▼────┐         │
+│  │ MongoDB │  │ Qdrant  │  │ MinIO   │  │ Ollama  │         │
+│  └─────────┘  └─────────┘  └─────────┘  └─────────┘         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Puertos Expuestos
+
+- **8080**: API Gateway
+- **8081**: User Service (interno)
+- **8082**: Document Service (interno)
+- **8083**: Context Service (interno)
+- **8084**: Embedding Service (interno)
+- **8085**: RAG Agent (interno)
+- **8086**: Terminal Gateway (interno)
+- **8087**: Terminal Session Service (interno)
+- **9000**: MinIO API (interno)
+- **9001**: MinIO Console (opcional, expuesto para administración)
+- **6333**: Qdrant API (interno)
+- **6334**: Qdrant UI (opcional, expuesto para administración)
+- **27017**: MongoDB (interno)
+- **11434**: Ollama API (interno)
+
+## Configuración de Alta Disponibilidad (Entorno de Producción)
+
+Para entornos de producción con alta disponibilidad:
+
+### Escalado de Servicios
 
 ```bash
-curl http://localhost:8080/health
+# Escalar servicios críticos
+docker-compose up -d --scale api-gateway=2 --scale document-service=2 --scale embedding-service=2
 ```
 
-Debería recibir una respuesta como:
+### Configuración con Docker Swarm
 
-```json
-{"status":"ok"}
-```
-
-### 5. Configuración Inicial
-
-#### 5.1. Acceso al Administrador
-
-El sistema crea automáticamente un usuario administrador al iniciar por primera vez con estas credenciales:
-
-- **Username**: admin
-- **Password**: El valor de `ADMIN_INITIAL_PASSWORD` en el archivo `.env` (o `admin123` si no se especificó)
-
-#### 5.2. Configurar Proveedor LLM
-
-Después de iniciar sesión como administrador, configure al menos un proveedor LLM:
+Para entornos más grandes, utiliza Docker Swarm:
 
 ```bash
-# Ejemplo: Configurar OpenAI como proveedor
-curl -X POST http://localhost:8080/llm/providers \
-  -H "Authorization: Bearer <token_admin>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "OpenAI GPT-4",
-    "type": "openai",
-    "api_key": "sk-your_openai_key",
-    "model": "gpt-4o",
-    "default": true,
-    "temperature": 0.0,
-    "max_tokens": 4096
-  }'
+# Inicializar Swarm
+docker swarm init
+
+# Desplegar el stack
+docker stack deploy -c docker-compose.prod.yml aiss-backend
 ```
 
-## Mantenimiento
+### Balanceo de Carga
 
-### Detener los Servicios
+Añadir un balanceador de carga (como Nginx o Traefik) delante del API Gateway:
 
-Para detener todos los servicios:
+```nginx
+# Ejemplo de configuración de Nginx
+upstream api_gateway {
+    server api-gateway-1:8080;
+    server api-gateway-2:8080;
+}
+
+server {
+    listen 80;
+    server_name api.yourcompany.com;
+
+    location / {
+        proxy_pass http://api_gateway;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+## Monitoreo y Mantenimiento
+
+### Monitoreo de Servicios
+
+Configurar Prometheus y Grafana para monitoreo:
 
 ```bash
+# Iniciar stack de monitoreo
+docker-compose -f docker-compose.monitoring.yml up -d
+```
+
+### Backup y Recuperación
+
+```bash
+# Backup de MongoDB
+docker-compose exec mongodb mongodump --out /backup/$(date +%Y-%m-%d)
+
+# Backup de Qdrant
+docker-compose exec qdrant curl -X GET http://localhost:6333/collections/general_knowledge/snapshot?snapshot=/backup/qdrant_$(date +%Y-%m-%d).snapshot
+```
+
+### Actualización del Sistema
+
+```bash
+# Obtener últimos cambios
+git pull
+
+# Reconstruir y actualizar servicios
 docker-compose down
-```
-
-### Respaldos
-
-Es recomendable realizar respaldos periódicos de los volúmenes de datos:
-
-```bash
-# Crear directorio de respaldos
-mkdir -p backups
-
-# Respaldar MongoDB
-docker run --rm -v mcp-knowledge-system_mongodb-data:/data -v $(pwd)/backups:/backup \
-  ubuntu tar cvf /backup/mongodb.js-backup.tar /data
-
-# Respaldar Qdrant
-docker run --rm -v mcp-knowledge-system_qdrant-data:/data -v $(pwd)/backups:/backup \
-  ubuntu tar cvf /backup/qdrant.yaml-backup.tar /data
-
-# Respaldar MinIO
-docker run --rm -v mcp-knowledge-system_minio-data:/data -v $(pwd)/backups:/backup \
-  ubuntu tar cvf /backup/init.sh-backup.tar /data
-```
-
-### Actualización
-
-Para actualizar el sistema:
-
-1. Detenga los servicios:
-```bash
-docker-compose down
-```
-
-2. Actualice el código fuente
-
-3. Reconstruya las imágenes:
-```bash
 docker-compose build
-```
-
-4. Inicie los servicios nuevamente:
-```bash
 docker-compose up -d
 ```
 
 ## Solución de Problemas
 
-### Problemas de Conexión
+### Problema: Servicios que no inician
 
-Si los servicios no pueden comunicarse entre sí:
-
-1. Verifique que todos los servicios estén en la misma red:
+Verificar logs del servicio específico:
 ```bash
-docker network inspect mcp-knowledge-system_mcp-network
+docker-compose logs <service-name>
 ```
 
-2. Verifique que los nombres de host en la configuración coincidan con los nombres de los servicios en `docker-compose.yml`
+### Problema: Errores de conexión entre servicios
 
-### Problemas con GPU
-
-Si el servicio de embeddings no puede acceder a la GPU:
-
-1. Verifique que NVIDIA Container Toolkit esté instalado correctamente
-2. Verifique que el servicio en `docker-compose.yml` tenga la configuración correcta para GPU
-3. Pruebe ejecutar un contenedor CUDA simple:
+Verificar configuración de red y variables de entorno:
 ```bash
-docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
+docker-compose config
+docker network inspect backend-aiss_default
 ```
 
-### Logs de Servicios
+### Problema: Alto uso de memoria
 
-Revise los logs para obtener más información sobre errores:
-
-```bash
-# Ver los últimos 100 líneas de log de un servicio específico
-docker-compose logs --tail=100 embedding-service
-```
-
-## Monitoreo y Escalabilidad
-
-### Monitoreo
-
-Para un entorno de producción, se recomienda configurar herramientas de monitoreo:
-
-- Prometheus para métricas
-- Grafana para visualización
-- ELK Stack para logs centralizados
-
-### Escalabilidad
-
-El sistema puede escalar horizontalmente:
-
-1. Para servicios sin estado (como API Gateway), puede aumentar el número de réplicas:
+Ajustar límites de memoria en docker-compose.yml:
 ```yaml
-api-gateway:
-  deploy:
-    replicas: 3
+services:
+  embedding-service:
+    deploy:
+      resources:
+        limits:
+          memory: 4G
 ```
 
-2. Para servicios con estado, considere implementar soluciones de alta disponibilidad para las bases de datos (MongoDB, Qdrant)
+### Problema: Errores en la generación de embeddings
+
+Verificar configuración del servicio de embeddings:
+```bash
+docker-compose logs embedding-service
+```
+
+## Consideraciones de Seguridad
+
+1. **Cambiar todas las contraseñas por defecto** en el archivo `.env`
+2. **Configurar HTTPS** para el API Gateway
+3. **Restringir CORS** a dominios específicos
+4. **Rotar regularmente** las claves JWT
+5. **Configurar autenticación** para MongoDB, Qdrant y MinIO
+6. **Limitar acceso a la red Docker** desde el exterior
+7. **Utilizar secretos de Docker** para información sensible
+
+## Más Información
+
+Para más detalles sobre configuraciones específicas y avanzadas, consultar:
+
+- [Configuración Avanzada de Servicios](../advanced/services-config.md)
+- [Integración con Servicios Externos](../integration/external-services.md)
+- [Guía de Actualización](../maintenance/upgrade-guide.md)

@@ -1,7 +1,14 @@
 from datetime import datetime
+from enum import Enum
 from typing import Dict, List, Optional, Union, Any
 
 from pydantic import BaseModel, Field
+
+class QueryType(str, Enum):
+    """Tipos de consultas"""
+    RAG = "rag"                # Consulta RAG tradicional
+    DB = "db"                  # Consulta a base de datos
+    HYBRID = "hybrid"          # Consulta híbrida (RAG + DB)
 
 # Modelos para solicitudes de consulta
 
@@ -51,6 +58,46 @@ class Source(BaseModel):
     score: float = Field(..., description="Puntuación de relevancia")
 
 
+class LLMUsage(BaseModel):
+    """Información de uso de LLM"""
+    model: str
+    provider: str
+    tokens_prompt: int
+    tokens_completion: int
+    cost: Optional[float] = None
+
+
+class ContentChunk(BaseModel):
+    """Fragmento de contenido recuperado"""
+    text: str
+    source: str
+    relevance_score: float
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class GeneratedDBQuery(BaseModel):
+    """Consulta generada para base de datos"""
+    connection_id: str
+    connection_name: str
+    query_text: str
+
+
+class QueryResult(BaseModel):
+    """Resultado de una consulta"""
+    id: str
+    query: str
+    answer: str
+    query_type: QueryType = QueryType.RAG
+    has_error: bool = False
+    error_message: Optional[str] = None
+    execution_time_ms: int
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    relevance_score: Optional[float] = None
+    content_chunks: Optional[List[ContentChunk]] = None
+    llm_usage: Optional[LLMUsage] = None
+    generated_queries: Optional[List[GeneratedDBQuery]] = None
+
+
 class QueryResponse(BaseModel):
     """Respuesta a una consulta RAG"""
     query: str = Field(..., description="Consulta original")
@@ -61,6 +108,8 @@ class QueryResponse(BaseModel):
     processing_time_ms: int = Field(..., description="Tiempo de procesamiento en ms")
     query_id: str = Field(..., description="ID único de la consulta")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+    query_type: QueryType = QueryType.RAG
+    generated_queries: Optional[List[GeneratedDBQuery]] = None
 
 
 class QueryHistoryItem(BaseModel):
@@ -81,6 +130,9 @@ class QueryHistoryItem(BaseModel):
     max_tokens: Optional[int] = Field(None, description="Número máximo de tokens utilizado")
     advanced_settings: Optional[Dict[str, Any]] = Field(None, description="Configuraciones avanzadas utilizadas")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadatos adicionales")
+    query_type: QueryType = Field(QueryType.RAG, description="Tipo de consulta")
+    generated_queries: Optional[List[Dict[str, Any]]] = Field(None, description="Consultas generadas para BD")
+    agent_id: Optional[str] = Field(None, description="ID del agente DB utilizado")
 
 
 class QueryHistoryResponse(BaseModel):
@@ -93,6 +145,9 @@ class QueryHistoryResponse(BaseModel):
     model: str
     processing_time_ms: int
     created_at: datetime
+    query_type: QueryType = QueryType.RAG
+    generated_queries: Optional[List[GeneratedDBQuery]] = None
+    agent_id: Optional[str] = None
 
     @classmethod
     def from_db_model(cls, item: Dict[str, Any]) -> "QueryHistoryResponse":
@@ -107,6 +162,17 @@ class QueryHistoryResponse(BaseModel):
                 score=source.get("score", 0.0)
             ))
 
+        # Convertir consultas generadas si existen
+        generated_queries = None
+        if item.get("generated_queries"):
+            generated_queries = []
+            for query in item.get("generated_queries", []):
+                generated_queries.append(GeneratedDBQuery(
+                    connection_id=query.get("connection_id", ""),
+                    connection_name=query.get("connection_name", ""),
+                    query_text=query.get("query_text", "")
+                ))
+
         return cls(
             query_id=item.get("query_id", ""),
             query=item.get("query", ""),
@@ -115,5 +181,16 @@ class QueryHistoryResponse(BaseModel):
             llm_provider=item.get("llm_provider_name", ""),
             model=item.get("model", ""),
             processing_time_ms=item.get("processing_time_ms", 0),
-            created_at=item.get("created_at", datetime.utcnow())
+            created_at=item.get("created_at", datetime.utcnow()),
+            query_type=item.get("query_type", QueryType.RAG),
+            generated_queries=generated_queries,
+            agent_id=item.get("agent_id")
         )
+
+
+class DBQueryRequest(BaseModel):
+    """Solicitud de consulta a base de datos"""
+    agent_id: str
+    query: str
+    connections: Optional[List[str]] = None
+    options: Optional[Dict[str, Any]] = None

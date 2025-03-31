@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -327,7 +328,15 @@ func (h *LLMSettingsHandler) ResetSystemPrompt(c *gin.Context) {
 	proxyRequest(c, url, "POST")
 }
 
+// Estructura para la respuesta del proxy
+type ProxyResponse struct {
+	StatusCode int         `json:"status_code"`
+	Body       interface{} `json:"body"`
+	Headers    http.Header `json:"headers"`
+}
+
 // proxyRequest es una función auxiliar para reenviar solicitudes a servicios internos
+// versión original que se utiliza en los handlers existentes
 func proxyRequest(c *gin.Context, url string, method string) {
 	// Leer body de la solicitud
 	body, err := io.ReadAll(c.Request.Body)
@@ -383,6 +392,97 @@ func proxyRequest(c *gin.Context, url string, method string) {
 
 	// Enviar respuesta al cliente
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
+}
+
+// Nueva versión de proxyRequest que acepta un parámetro de datos y devuelve una respuesta estructurada
+// Esta versión es utilizada por los nuevos handlers de DB
+func proxyRequest(c *gin.Context, url string, method string, data interface{}) ProxyResponse {
+	var reqBody []byte
+	var err error
+
+	// Si hay datos, convertirlos a JSON
+	if data != nil {
+		reqBody, err = json.Marshal(data)
+		if err != nil {
+			return ProxyResponse{
+				StatusCode: http.StatusInternalServerError,
+				Body:       gin.H{"error": "Error al serializar datos: " + err.Error()},
+			}
+		}
+	} else if method != "GET" && method != "DELETE" {
+		// Si no hay datos pero el método requiere body, leer del request
+		reqBody, err = io.ReadAll(c.Request.Body)
+		if err != nil {
+			return ProxyResponse{
+				StatusCode: http.StatusBadRequest,
+				Body:       gin.H{"error": "Error al leer body: " + err.Error()},
+			}
+		}
+	}
+
+	// Crear solicitud al servicio interno
+	req, err := http.NewRequest(method, url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return ProxyResponse{
+			StatusCode: http.StatusInternalServerError,
+			Body:       gin.H{"error": "Error al crear solicitud: " + err.Error()},
+		}
+	}
+
+	// Establecer Content-Type si hay datos
+	if len(reqBody) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	// Copiar el token de autenticación si existe
+	if auth := c.GetHeader("Authorization"); auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+
+	// Copiar query params
+	req.URL.RawQuery = c.Request.URL.RawQuery
+
+	// Realizar solicitud
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ProxyResponse{
+			StatusCode: http.StatusInternalServerError,
+			Body:       gin.H{"error": "Error al llamar al servicio: " + err.Error()},
+		}
+	}
+	defer func(Body io.ReadCloser) {
+		if err := Body.Close(); err != nil {
+			log.Printf("Error closing response body: %v", err)
+		}
+	}(resp.Body)
+
+	// Leer respuesta
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ProxyResponse{
+			StatusCode: http.StatusInternalServerError,
+			Body:       gin.H{"error": "Error al leer respuesta: " + err.Error()},
+		}
+	}
+
+	// Parsear respuesta JSON si existe
+	var responseObj interface{}
+	if len(respBody) > 0 && resp.Header.Get("Content-Type") == "application/json" {
+		err = json.Unmarshal(respBody, &responseObj)
+		if err != nil {
+			// Si falla el parsing, devolver el body como string
+			responseObj = string(respBody)
+		}
+	} else {
+		responseObj = string(respBody)
+	}
+
+	return ProxyResponse{
+		StatusCode: resp.StatusCode,
+		Body:       responseObj,
+		Headers:    resp.Header,
+	}
 }
 
 // proxyMultipartRequest maneja específicamente solicitudes multipart/form-data

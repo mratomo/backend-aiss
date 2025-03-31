@@ -1,4 +1,4 @@
-# Ejemplos de Uso del Sistema de Gestión de Conocimiento con MCP
+1# Ejemplos de Uso del Sistema de Gestión de Conocimiento con MCP
 
 Este documento proporciona ejemplos prácticos para utilizar el Sistema de Gestión de Conocimiento con Model Context Protocol (MCP). Los ejemplos incluyen tanto comandos curl como snippets de código en diferentes lenguajes de programación.
 
@@ -1224,3 +1224,837 @@ El HTML básico para la interfaz anterior sería:
 ```
 
 Este ejemplo completo demuestra cómo interactuar con todos los componentes del sistema de gestión de conocimiento: autenticación, gestión de áreas de conocimiento, subida de documentos, y consultas RAG con la interfaz de usuario correspondiente.
+
+## 7. Integración con Terminal
+
+La integración con terminal permite interactuar con servidores remotos a través de una interfaz web, con características como sugerencias inteligentes y sesiones compartidas.
+
+### Crear una Sesión SSH
+
+**curl:**
+```bash
+curl -X POST http://localhost:8080/api/v1/terminal/sessions \
+  -H "Authorization: Bearer TOKEN_AQUI" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_host": "server.example.com",
+    "port": 22,
+    "username": "admin",
+    "auth_method": "key",
+    "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----",
+    "passphrase": "",
+    "options": {
+      "terminal_type": "xterm-256color",
+      "window_size": {
+        "cols": 80,
+        "rows": 24
+      }
+    }
+  }'
+```
+
+**JavaScript:**
+```javascript
+async function createTerminalSession(token, host, username, privateKey) {
+  const response = await fetch('http://localhost:8080/api/v1/terminal/sessions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      target_host: host,
+      port: 22,
+      username: username,
+      auth_method: 'key',
+      private_key: privateKey,
+      passphrase: '',
+      options: {
+        terminal_type: 'xterm-256color',
+        window_size: {
+          cols: 80,
+          rows: 24
+        }
+      }
+    })
+  });
+  
+  return await response.json();
+}
+
+// Uso
+const token = localStorage.getItem('token');
+const privateKey = document.getElementById('privateKeyInput').value;
+
+createTerminalSession(token, 'server.example.com', 'admin', privateKey)
+  .then(session => {
+    console.log('Sesión creada:', session);
+    connectToTerminal(session.id, session.websocket_url);
+  })
+  .catch(error => {
+    console.error('Error al crear sesión:', error);
+  });
+```
+
+### Conectar al WebSocket del Terminal
+
+```javascript
+function connectToTerminal(sessionId, websocketUrl) {
+  // Inicializar xterm.js
+  const terminal = new Terminal({
+    cursorBlink: true,
+    theme: {
+      background: '#1e1e1e',
+      foreground: '#f0f0f0'
+    }
+  });
+  
+  // Montar terminal en el DOM
+  terminal.open(document.getElementById('terminal-container'));
+  
+  // Conectar al WebSocket
+  const ws = new WebSocket(websocketUrl);
+  
+  // Manejo de eventos WebSocket
+  ws.onopen = () => {
+    console.log('Conexión establecida');
+    
+    // Manejar entrada del usuario
+    terminal.onData(data => {
+      ws.send(JSON.stringify({
+        type: 'terminal_input',
+        data: { data: data }
+      }));
+    });
+    
+    // Manejar redimensionamiento
+    terminal.onResize(size => {
+      ws.send(JSON.stringify({
+        type: 'resize',
+        data: {
+          cols: size.cols,
+          rows: size.rows
+        }
+      }));
+    });
+  };
+  
+  // Recibir datos del servidor
+  ws.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    
+    switch (message.type) {
+      case 'terminal_output':
+        terminal.write(message.data.data);
+        break;
+        
+      case 'suggestion_available':
+        displaySuggestion(message.data);
+        break;
+        
+      case 'session_status':
+        updateSessionStatus(message.data);
+        break;
+        
+      case 'error':
+        displayError(message.data.message);
+        break;
+    }
+  };
+  
+  // Manejar desconexión
+  ws.onclose = () => {
+    terminal.writeln('\r\n\nConexión cerrada');
+    terminal.options.cursorBlink = false;
+    terminal.refresh();
+  };
+  
+  // Manejar errores
+  ws.onerror = (error) => {
+    console.error('Error de WebSocket:', error);
+    terminal.writeln('\r\n\nError de conexión');
+  };
+  
+  // Función para mostrar sugerencias
+  function displaySuggestion(suggestion) {
+    const suggestionElement = document.getElementById('suggestion-container');
+    suggestionElement.innerHTML = `
+      <div class="suggestion">
+        <div class="suggestion-title">Sugerencia:</div>
+        <div class="suggestion-command">${suggestion.command}</div>
+        <div class="suggestion-description">${suggestion.description}</div>
+        <button class="apply-suggestion" data-id="${suggestion.id}">Aplicar</button>
+      </div>
+    `;
+    suggestionElement.style.display = 'block';
+    
+    document.querySelector('.apply-suggestion').addEventListener('click', () => {
+      ws.send(JSON.stringify({
+        type: 'execute_suggestion',
+        data: { suggestion_id: suggestion.id }
+      }));
+      suggestionElement.style.display = 'none';
+    });
+  }
+  
+  // Función para actualizar estado de sesión
+  function updateSessionStatus(status) {
+    const statusElement = document.getElementById('session-status');
+    statusElement.textContent = `Estado: ${status.state}`;
+    statusElement.className = `status-${status.state.toLowerCase()}`;
+  }
+  
+  // Función para mostrar errores
+  function displayError(message) {
+    const errorElement = document.createElement('div');
+    errorElement.className = 'terminal-error';
+    errorElement.textContent = message;
+    document.getElementById('terminal-container').appendChild(errorElement);
+    
+    setTimeout(() => {
+      errorElement.remove();
+    }, 5000);
+  }
+  
+  return {
+    terminal,
+    websocket: ws,
+    sessionId
+  };
+}
+```
+
+### Compartir una Sesión de Terminal
+
+**curl:**
+```bash
+curl -X POST http://localhost:8080/api/v1/terminal/sessions/session123/participants \
+  -H "Authorization: Bearer TOKEN_AQUI" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user456",
+    "access_level": "observer",
+    "expiration": "2023-05-15T23:59:59Z",
+    "message": "Por favor, revisa la configuración del servidor"
+  }'
+```
+
+**JavaScript:**
+```javascript
+async function shareTerminalSession(token, sessionId, userId, accessLevel, message) {
+  const response = await fetch(`http://localhost:8080/api/v1/terminal/sessions/${sessionId}/participants`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      user_id: userId,
+      access_level: accessLevel, // 'observer' o 'collaborator'
+      expiration: new Date(Date.now() + 86400000).toISOString(), // 24 horas
+      message: message
+    })
+  });
+  
+  return await response.json();
+}
+
+// Uso
+const token = localStorage.getItem('token');
+const sessionId = currentSession.id;
+
+shareTerminalSession(token, sessionId, 'user456', 'observer', 'Por favor, revisa la configuración del servidor')
+  .then(result => {
+    console.log('Sesión compartida:', result);
+    displayShareLink(result.invite_link);
+  })
+  .catch(error => {
+    console.error('Error al compartir sesión:', error);
+  });
+
+function displayShareLink(link) {
+  const linkContainer = document.getElementById('share-link-container');
+  linkContainer.innerHTML = `
+    <div class="share-link">
+      <p>Enlace para compartir:</p>
+      <input type="text" value="${link}" readonly />
+      <button onclick="navigator.clipboard.writeText('${link}')">Copiar</button>
+    </div>
+  `;
+  linkContainer.style.display = 'block';
+}
+```
+
+## 8. Flujo de Trabajo Completo de Terminal
+
+```javascript
+// Integración completa de terminal en una aplicación web
+class TerminalManager {
+  constructor(apiBaseUrl, token) {
+    this.apiBaseUrl = apiBaseUrl;
+    this.token = token;
+    this.activeSessions = new Map();
+    this.selectedSessionId = null;
+  }
+  
+  // Inicializar la UI del terminal
+  async initialize() {
+    this.sessionListElement = document.getElementById('terminal-sessions');
+    this.terminalContainerElement = document.getElementById('terminal-container');
+    this.newSessionForm = document.getElementById('new-session-form');
+    
+    // Cargar sesiones existentes
+    await this.loadSessions();
+    
+    // Event listeners
+    this.newSessionForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.createNewSession();
+    });
+    
+    document.getElementById('share-session-btn').addEventListener('click', () => {
+      this.showShareDialog();
+    });
+    
+    document.getElementById('close-session-btn').addEventListener('click', () => {
+      this.closeCurrentSession();
+    });
+  }
+  
+  // Cargar sesiones existentes
+  async loadSessions() {
+    try {
+      const response = await fetch(`${this.apiBaseUrl}/api/v1/terminal/sessions`, {
+        headers: {
+          'Authorization': `Bearer ${this.token}`
+        }
+      });
+      
+      const sessions = await response.json();
+      this.sessionListElement.innerHTML = '';
+      
+      sessions.forEach(session => {
+        this.addSessionToList(session);
+      });
+      
+      if (sessions.length > 0) {
+        this.selectSession(sessions[0].id);
+      }
+    } catch (error) {
+      console.error('Error al cargar sesiones:', error);
+      this.showNotification('error', 'No se pudieron cargar las sesiones');
+    }
+  }
+  
+  // Añadir sesión a la lista
+  addSessionToList(session) {
+    const sessionItem = document.createElement('div');
+    sessionItem.className = 'session-item';
+    sessionItem.dataset.id = session.id;
+    sessionItem.innerHTML = `
+      <div class="session-name">${session.target_host} (${session.username})</div>
+      <div class="session-status ${session.status.toLowerCase()}">${session.status}</div>
+    `;
+    
+    sessionItem.addEventListener('click', () => {
+      this.selectSession(session.id);
+    });
+    
+    this.sessionListElement.appendChild(sessionItem);
+  }
+  
+  // Seleccionar una sesión
+  async selectSession(sessionId) {
+    // Desactivar sesión actual
+    if (this.selectedSessionId) {
+      const currentItem = document.querySelector(`.session-item[data-id="${this.selectedSessionId}"]`);
+      if (currentItem) currentItem.classList.remove('active');
+      
+      // Desconectar si existe una conexión activa
+      const activeSession = this.activeSessions.get(this.selectedSessionId);
+      if (activeSession && activeSession.websocket) {
+        activeSession.websocket.close();
+      }
+    }
+    
+    // Marcar nueva sesión como activa
+    this.selectedSessionId = sessionId;
+    const newItem = document.querySelector(`.session-item[data-id="${sessionId}"]`);
+    if (newItem) newItem.classList.add('active');
+    
+    // Verificar si ya tenemos la sesión en memoria
+    if (!this.activeSessions.has(sessionId)) {
+      try {
+        // Obtener URL del WebSocket
+        const response = await fetch(`${this.apiBaseUrl}/api/v1/terminal/sessions/${sessionId}/connect`, {
+          headers: {
+            'Authorization': `Bearer ${this.token}`
+          }
+        });
+        
+        const connectionInfo = await response.json();
+        
+        // Conectar al terminal
+        this.connectToTerminal(sessionId, connectionInfo.websocket_url);
+      } catch (error) {
+        console.error('Error al conectar a la sesión:', error);
+        this.showNotification('error', 'No se pudo conectar a la sesión de terminal');
+      }
+    } else {
+      // Si ya existe la sesión, mostrarla
+      this.showTerminal(sessionId);
+    }
+  }
+  
+  // Conectar al terminal vía WebSocket
+  connectToTerminal(sessionId, websocketUrl) {
+    // Limpiar contenedor
+    this.terminalContainerElement.innerHTML = '';
+    
+    // Crear nuevo elemento para este terminal
+    const terminalElement = document.createElement('div');
+    terminalElement.className = 'terminal';
+    terminalElement.dataset.id = sessionId;
+    this.terminalContainerElement.appendChild(terminalElement);
+    
+    // Inicializar xterm.js
+    const terminal = new Terminal({
+      cursorBlink: true,
+      theme: {
+        background: '#1e1e1e',
+        foreground: '#f0f0f0'
+      }
+    });
+    
+    terminal.open(terminalElement);
+    
+    // Conectar WebSocket
+    const ws = new WebSocket(websocketUrl);
+    
+    ws.onopen = () => {
+      terminal.writeln('Conexión establecida');
+      
+      // Manejar entrada del usuario
+      terminal.onData(data => {
+        ws.send(JSON.stringify({
+          type: 'terminal_input',
+          data: { data: data }
+        }));
+      });
+      
+      // Manejar redimensionamiento
+      terminal.onResize(size => {
+        ws.send(JSON.stringify({
+          type: 'resize',
+          data: { cols: size.cols, rows: size.rows }
+        }));
+      });
+      
+      // Redimensionar ahora
+      const { cols, rows } = terminal.options;
+      ws.send(JSON.stringify({
+        type: 'resize',
+        data: { cols, rows }
+      }));
+    };
+    
+    ws.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      
+      switch (message.type) {
+        case 'terminal_output':
+          terminal.write(message.data.data);
+          break;
+          
+        case 'suggestion_available':
+          this.displaySuggestion(message.data, ws);
+          break;
+          
+        case 'session_status':
+          this.updateSessionStatus(sessionId, message.data.state);
+          break;
+      }
+    };
+    
+    ws.onclose = () => {
+      terminal.writeln('\r\n\nConexión cerrada');
+      this.updateSessionStatus(sessionId, 'disconnected');
+    };
+    
+    ws.onerror = (error) => {
+      console.error('Error de WebSocket:', error);
+      terminal.writeln('\r\n\nError de conexión');
+    };
+    
+    // Guardar referencia a esta sesión
+    this.activeSessions.set(sessionId, {
+      terminal,
+      websocket: ws,
+      element: terminalElement
+    });
+    
+    // Mostrar este terminal y ocultar los demás
+    this.showTerminal(sessionId);
+  }
+  
+  // Mostrar terminal específico
+  showTerminal(sessionId) {
+    // Ocultar todos los terminales
+    document.querySelectorAll('.terminal').forEach(el => {
+      el.style.display = 'none';
+    });
+    
+    // Mostrar el terminal seleccionado
+    const sessionTerminal = document.querySelector(`.terminal[data-id="${sessionId}"]`);
+    if (sessionTerminal) {
+      sessionTerminal.style.display = 'block';
+      
+      // Dar foco al terminal
+      const session = this.activeSessions.get(sessionId);
+      if (session && session.terminal) {
+        session.terminal.focus();
+      }
+    }
+  }
+  
+  // Crear nueva sesión
+  async createNewSession() {
+    const host = document.getElementById('host-input').value;
+    const port = parseInt(document.getElementById('port-input').value) || 22;
+    const username = document.getElementById('username-input').value;
+    const authMethod = document.querySelector('input[name="auth-method"]:checked').value;
+    
+    let authData = {};
+    if (authMethod === 'password') {
+      authData = {
+        auth_method: 'password',
+        password: document.getElementById('password-input').value
+      };
+    } else {
+      authData = {
+        auth_method: 'key',
+        private_key: document.getElementById('key-input').value,
+        passphrase: document.getElementById('passphrase-input').value
+      };
+    }
+    
+    try {
+      const response = await fetch(`${this.apiBaseUrl}/api/v1/terminal/sessions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          target_host: host,
+          port: port,
+          username: username,
+          ...authData,
+          options: {
+            terminal_type: 'xterm-256color',
+            window_size: {
+              cols: 80,
+              rows: 24
+            }
+          }
+        })
+      });
+      
+      const session = await response.json();
+      
+      // Añadir a la lista
+      this.addSessionToList(session);
+      
+      // Seleccionar la nueva sesión
+      this.selectSession(session.id);
+      
+      // Limpiar form
+      this.newSessionForm.reset();
+      
+      // Mostrar notificación
+      this.showNotification('success', 'Sesión creada correctamente');
+    } catch (error) {
+      console.error('Error al crear sesión:', error);
+      this.showNotification('error', 'No se pudo crear la sesión');
+    }
+  }
+  
+  // Compartir sesión actual
+  showShareDialog() {
+    if (!this.selectedSessionId) {
+      this.showNotification('error', 'No hay sesión seleccionada');
+      return;
+    }
+    
+    const dialog = document.getElementById('share-dialog');
+    dialog.style.display = 'block';
+    
+    document.getElementById('share-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const userId = document.getElementById('share-user-id').value;
+      const accessLevel = document.querySelector('input[name="access-level"]:checked').value;
+      const message = document.getElementById('share-message').value;
+      
+      try {
+        const response = await fetch(`${this.apiBaseUrl}/api/v1/terminal/sessions/${this.selectedSessionId}/participants`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this.token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            user_id: userId,
+            access_level: accessLevel,
+            expiration: new Date(Date.now() + 86400000).toISOString(),
+            message: message
+          })
+        });
+        
+        const result = await response.json();
+        
+        // Mostrar enlace
+        document.getElementById('share-link').value = result.invite_link;
+        document.getElementById('share-link-container').style.display = 'block';
+        
+        this.showNotification('success', 'Sesión compartida correctamente');
+      } catch (error) {
+        console.error('Error al compartir sesión:', error);
+        this.showNotification('error', 'No se pudo compartir la sesión');
+      }
+    });
+  }
+  
+  // Cerrar sesión actual
+  async closeCurrentSession() {
+    if (!this.selectedSessionId) {
+      this.showNotification('error', 'No hay sesión seleccionada');
+      return;
+    }
+    
+    try {
+      await fetch(`${this.apiBaseUrl}/api/v1/terminal/sessions/${this.selectedSessionId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${this.token}`
+        }
+      });
+      
+      // Cerrar WebSocket
+      const session = this.activeSessions.get(this.selectedSessionId);
+      if (session && session.websocket) {
+        session.websocket.close();
+      }
+      
+      // Eliminar del DOM
+      document.querySelector(`.session-item[data-id="${this.selectedSessionId}"]`).remove();
+      document.querySelector(`.terminal[data-id="${this.selectedSessionId}"]`).remove();
+      
+      // Eliminar de la memoria
+      this.activeSessions.delete(this.selectedSessionId);
+      
+      // Resetear selección
+      this.selectedSessionId = null;
+      
+      this.showNotification('success', 'Sesión cerrada correctamente');
+      
+      // Seleccionar otra sesión si hay disponibles
+      const firstSession = document.querySelector('.session-item');
+      if (firstSession) {
+        this.selectSession(firstSession.dataset.id);
+      }
+    } catch (error) {
+      console.error('Error al cerrar sesión:', error);
+      this.showNotification('error', 'No se pudo cerrar la sesión');
+    }
+  }
+  
+  // Mostrar sugerencia
+  displaySuggestion(suggestion, websocket) {
+    const suggestionElement = document.getElementById('suggestion-container');
+    suggestionElement.innerHTML = `
+      <div class="suggestion">
+        <div class="suggestion-title">Sugerencia:</div>
+        <div class="suggestion-command">${suggestion.command}</div>
+        <div class="suggestion-description">${suggestion.description}</div>
+        <div class="suggestion-buttons">
+          <button class="apply-suggestion">Aplicar</button>
+          <button class="dismiss-suggestion">Descartar</button>
+        </div>
+      </div>
+    `;
+    suggestionElement.style.display = 'block';
+    
+    // Ejecutar sugerencia
+    suggestionElement.querySelector('.apply-suggestion').addEventListener('click', () => {
+      websocket.send(JSON.stringify({
+        type: 'execute_suggestion',
+        data: { suggestion_id: suggestion.id }
+      }));
+      suggestionElement.style.display = 'none';
+    });
+    
+    // Descartar sugerencia
+    suggestionElement.querySelector('.dismiss-suggestion').addEventListener('click', () => {
+      suggestionElement.style.display = 'none';
+    });
+  }
+  
+  // Actualizar estado de sesión
+  updateSessionStatus(sessionId, status) {
+    const sessionItem = document.querySelector(`.session-item[data-id="${sessionId}"]`);
+    if (sessionItem) {
+      const statusElement = sessionItem.querySelector('.session-status');
+      statusElement.textContent = status;
+      statusElement.className = `session-status ${status.toLowerCase()}`;
+    }
+  }
+  
+  // Mostrar notificación
+  showNotification(type, message) {
+    const notification = document.createElement('div');
+    notification.className = `notification ${type}`;
+    notification.textContent = message;
+    
+    document.body.appendChild(notification);
+    
+    setTimeout(() => {
+      notification.classList.add('show');
+    }, 10);
+    
+    setTimeout(() => {
+      notification.classList.remove('show');
+      setTimeout(() => {
+        notification.remove();
+      }, 300);
+    }, 3000);
+  }
+}
+
+// Uso de la clase
+document.addEventListener('DOMContentLoaded', () => {
+  const token = localStorage.getItem('token');
+  if (token) {
+    const terminalManager = new TerminalManager('http://localhost:8080', token);
+    terminalManager.initialize();
+  } else {
+    window.location.href = '/login.html';
+  }
+});
+```
+
+La implementación HTML para soportar este código:
+
+```html
+<div class="terminal-container-wrapper">
+  <div class="sessions-panel">
+    <h3>Sesiones</h3>
+    <div id="terminal-sessions" class="sessions-list">
+      <!-- Sessions will be loaded here -->
+    </div>
+    <div class="session-actions">
+      <button id="new-session-btn" class="btn-primary">Nueva</button>
+      <button id="share-session-btn" class="btn-secondary">Compartir</button>
+      <button id="close-session-btn" class="btn-danger">Cerrar</button>
+    </div>
+  </div>
+  
+  <div class="main-terminal-panel">
+    <div id="terminal-container" class="terminal-output">
+      <!-- Terminal will be rendered here -->
+    </div>
+    <div id="suggestion-container" class="suggestions">
+      <!-- Suggestions will appear here -->
+    </div>
+  </div>
+  
+  <div id="new-session-dialog" class="dialog">
+    <div class="dialog-content">
+      <h3>Nueva Sesión SSH</h3>
+      <form id="new-session-form">
+        <div class="form-group">
+          <label for="host-input">Host:</label>
+          <input id="host-input" type="text" required>
+        </div>
+        <div class="form-group">
+          <label for="port-input">Puerto:</label>
+          <input id="port-input" type="number" value="22">
+        </div>
+        <div class="form-group">
+          <label for="username-input">Usuario:</label>
+          <input id="username-input" type="text" required>
+        </div>
+        <div class="form-group">
+          <label>Método de autenticación:</label>
+          <div class="radio-group">
+            <input id="auth-password" type="radio" name="auth-method" value="password" checked>
+            <label for="auth-password">Contraseña</label>
+            <input id="auth-key" type="radio" name="auth-method" value="key">
+            <label for="auth-key">Clave SSH</label>
+          </div>
+        </div>
+        <div id="password-auth" class="auth-method">
+          <div class="form-group">
+            <label for="password-input">Contraseña:</label>
+            <input id="password-input" type="password">
+          </div>
+        </div>
+        <div id="key-auth" class="auth-method" style="display: none;">
+          <div class="form-group">
+            <label for="key-input">Clave privada:</label>
+            <textarea id="key-input" rows="5"></textarea>
+          </div>
+          <div class="form-group">
+            <label for="passphrase-input">Passphrase (si aplica):</label>
+            <input id="passphrase-input" type="password">
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">Conectar</button>
+          <button type="button" class="btn-secondary close-dialog">Cancelar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  
+  <div id="share-dialog" class="dialog">
+    <div class="dialog-content">
+      <h3>Compartir Sesión</h3>
+      <form id="share-form">
+        <div class="form-group">
+          <label for="share-user-id">ID de usuario:</label>
+          <input id="share-user-id" type="text" required>
+        </div>
+        <div class="form-group">
+          <label>Nivel de acceso:</label>
+          <div class="radio-group">
+            <input id="access-observer" type="radio" name="access-level" value="observer" checked>
+            <label for="access-observer">Observador</label>
+            <input id="access-collaborator" type="radio" name="access-level" value="collaborator">
+            <label for="access-collaborator">Colaborador</label>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="share-message">Mensaje:</label>
+          <textarea id="share-message" rows="2"></textarea>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">Compartir</button>
+          <button type="button" class="btn-secondary close-dialog">Cancelar</button>
+        </div>
+      </form>
+      <div id="share-link-container" style="display: none;">
+        <div class="form-group">
+          <label for="share-link">Enlace para compartir:</label>
+          <div class="share-link-field">
+            <input id="share-link" type="text" readonly>
+            <button onclick="navigator.clipboard.writeText(document.getElementById('share-link').value)">Copiar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+```
+
+Este ejemplo completo demuestra cómo interactuar con todos los componentes del sistema, incluyendo la integración con terminal para conectarse a servidores remotos, compartir sesiones y recibir sugerencias inteligentes.
