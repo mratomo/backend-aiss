@@ -19,7 +19,55 @@ class SecurityService:
             security_settings: Configuración de seguridad
         """
         self.sensitive_keywords = security_settings.sensitive_keywords
-        self.injection_patterns = [re.compile(pattern) for pattern in security_settings.injection_patterns]
+        
+        # Patrones mejorados para detectar inyecciones SQL comunes
+        enhanced_patterns = [
+            # Comentarios SQL -- pueden ser usados para eludir validaciones
+            r'--.*$',
+            # Comentarios tipo bloque /* ... */
+            r'/\*.*?\*/',
+            # Manipulación de comillas (indicador de posible inyección)
+            r"'\s*OR\s*'.*?'?\s*=\s*'.*?'",
+            r'"\s*OR\s*".*?"?\s*=\s*".*?"',
+            # UNION SELECT comúnmente usado en inyecciones
+            r'UNION\s+ALL\s+SELECT',
+            r'UNION\s+SELECT',
+            # Ejecución de comandos
+            r';\s*EXEC\s+',
+            r';\s*EXECUTE\s+',
+            # Terminación y adición de comandos nuevos
+            r';\s*(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER)',
+            # Bypass de autenticación típico
+            r"'\s*OR\s*[\"'0-9]+(=|<>|<|>)[\"'0-9]+",
+            # Manipulación de tipo LIKE para eludir filtros
+            r"LIKE\s+[\"']%.*?[\"']",
+            # Intentos de obtener versión o información de sistema
+            r'VERSION\s*\(\s*\)',
+            r'DATABASE\s*\(\s*\)',
+            # Consultas de fuerza bruta a información de schema
+            r'FROM\s+information_schema\.',
+            r'FROM\s+pg_catalog\.',
+            r'FROM\s+sys\.',
+            # Ataques de tiempo
+            r'SLEEP\s*\(\s*\d+\s*\)',
+            r'WAITFOR\s+DELAY',
+            r'pg_sleep',
+            # Procedimientos almacenados peligrosos
+            r'xp_cmdshell',
+            # Inyecciones NoSQL específicas
+            r'\$where\s*:',
+            r'\$regex\s*:',
+            r'{\s*\$ne\s*:',
+        ]
+        
+        # Combinar los patrones definidos en la configuración con los mejorados
+        all_patterns = security_settings.injection_patterns + enhanced_patterns
+        
+        # Compilar patrones para búsqueda eficiente
+        self.injection_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in all_patterns]
+        
+        # Registrar número de patrones para diagnóstico
+        logger.info(f"Inicializado SecurityService con {len(self.injection_patterns)} patrones de detección")
     
     def validate_query(self, query: str, db_type: DBType) -> bool:
         """

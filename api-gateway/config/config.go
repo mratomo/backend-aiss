@@ -42,8 +42,18 @@ func LoadConfig() (*Config, error) {
 	// Valores por defecto
 	viper.SetDefault("port", "8080")
 	viper.SetDefault("environment", "development")
-	// Configuración más segura para CORS - en producción debería ser más restrictiva
-	viper.SetDefault("corsAllowedOrigins", []string{"http://localhost:3000", "https://app.domain.com"})
+	// CORS configuración específica por ambiente
+	viper.SetDefault("environments", map[string]interface{}{
+		"development": map[string]interface{}{
+			"corsAllowedOrigins": []string{"http://localhost:3000", "http://localhost:8000"},
+		},
+		"staging": map[string]interface{}{
+			"corsAllowedOrigins": []string{"https://staging.app.domain.com"},
+		},
+		"production": map[string]interface{}{
+			"corsAllowedOrigins": []string{"https://app.domain.com"},
+		},
+	})
 	viper.SetDefault("jwtExpirationHours", 24)
 
 	// Servicios
@@ -71,11 +81,48 @@ func LoadConfig() (*Config, error) {
 		viper.Set("authSecret", authSecret)
 	}
 
+	// Obtener el ambiente actual
+	environment := viper.GetString("environment")
+
+	// Obtener orígenes CORS permitidos según el ambiente
+	var corsAllowedOrigins []string
+
+	// Intentar obtener configuración de ambiente específico
+	envSpecificConfig := viper.GetStringMap(fmt.Sprintf("environments.%s", environment))
+	if envSpecificConfig != nil && envSpecificConfig["corsAllowedOrigins"] != nil {
+		// Si hay configuración específica para este ambiente, usarla
+		if origins, ok := envSpecificConfig["corsAllowedOrigins"].([]string); ok {
+			corsAllowedOrigins = origins
+		} else if originsList, ok := envSpecificConfig["corsAllowedOrigins"].([]interface{}); ok {
+			// Convertir de []interface{} a []string
+			for _, origin := range originsList {
+				if str, ok := origin.(string); ok {
+					corsAllowedOrigins = append(corsAllowedOrigins, str)
+				}
+			}
+		}
+	}
+
+	// Si no se encontró configuración específica, usar valor por defecto
+	if len(corsAllowedOrigins) == 0 {
+		corsAllowedOrigins = viper.GetStringSlice("corsAllowedOrigins")
+		if len(corsAllowedOrigins) == 0 && environment == "production" {
+			// En producción, si no hay configuración, ser más restrictivo
+			corsAllowedOrigins = []string{"https://app.domain.com"}
+		} else if len(corsAllowedOrigins) == 0 {
+			// En otros ambientes, permitir localhost por defecto
+			corsAllowedOrigins = []string{"http://localhost:3000"}
+		}
+	}
+
+	// Log para seguridad - importante saber qué orígenes se están permitiendo
+	log.Printf("CORS allowed origins for %s environment: %v", environment, corsAllowedOrigins)
+
 	// Crear y devolver la configuración
 	return &Config{
 		Port:               viper.GetString("port"),
-		Environment:        viper.GetString("environment"),
-		CorsAllowedOrigins: viper.GetStringSlice("corsAllowedOrigins"),
+		Environment:        environment,
+		CorsAllowedOrigins: corsAllowedOrigins,
 		AuthSecret:         viper.GetString("authSecret"),
 		JWTExpirationHours: viper.GetInt("jwtExpirationHours"),
 		Services: ServiceEndpoints{

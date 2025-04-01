@@ -1,17 +1,21 @@
 services:
-  # API Gateway (Go)
+
+  # API Gateway (Go) - No expuesto externamente, solo accesible desde la red Docker
   api-gateway:
     build:
       context: ./api-gateway
       dockerfile: Dockerfile
-    ports:
-      - "8080:8080"
+    # Sin puertos expuestos al host (solo accesible dentro de la red Docker)
+    # Para desarrollo y debugging, descomentar:
+    # ports:
+    #   - "127.0.0.1:8080:8080"  # Solo accesible desde localhost
     environment:
       - PORT=8080
       - ENVIRONMENT=production
       - AUTH_SECRET=${AUTH_SECRET}
-      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://app.domain.com}
+      - CORS_ALLOWED_ORIGINS=* # Permitir cualquier origen (seguro con proxy inverso)
       - TERMINAL_GATEWAY_URL=http://terminal-gateway-service:8090
+      - APP_ENVIRONMENT=production # Para decisiones de seguridad
     depends_on:
       user-service:
         condition: service_started

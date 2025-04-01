@@ -3,12 +3,13 @@ package routes
 import (
 	"github.com/gin-gonic/gin"
 
+	"api-gateway/config"
 	"api-gateway/handlers"
 	"api-gateway/middleware"
 )
 
 // SetupRoutes configura todas las rutas de la aplicación
-func SetupRoutes(router *gin.Engine) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 	// Middleware global
 	router.Use(middleware.Logger())
 	router.Use(middleware.CORS())
@@ -102,11 +103,11 @@ func SetupRoutes(router *gin.Engine) {
 			dbAgents.POST("", middleware.AdminRequired(), handlers.CreateDBAgent)
 			dbAgents.PUT("/:id", middleware.AdminRequired(), handlers.UpdateDBAgent)
 			dbAgents.DELETE("/:id", middleware.AdminRequired(), handlers.DeleteDBAgent)
-			
+
 			// Configuración de prompts para agentes
 			dbAgents.GET("/:id/prompts", handlers.GetDBAgentPrompts)
 			dbAgents.PUT("/:id/prompts", middleware.AdminRequired(), handlers.UpdateDBAgentPrompts)
-			
+
 			// Asignación de conexiones a agentes
 			dbAgents.GET("/:id/connections", handlers.GetDBAgentConnections)
 			dbAgents.POST("/:id/connections", middleware.AdminRequired(), handlers.AssignDBConnectionToAgent)
@@ -139,5 +140,13 @@ func SetupRoutes(router *gin.Engine) {
 	{
 		admin.GET("/system/status", handlers.GetSystemStatus)
 		admin.GET("/system/logs", handlers.GetSystemLogs)
+
+		// Configuración del sistema
+		systemConfig := admin.Group("/system/config")
+		{
+			// CORS - Especialmente útil para entornos locales
+			systemConfig.GET("/cors", handlers.ConfigHandlerInstance.GetCorsConfig)
+			systemConfig.PUT("/cors", handlers.ConfigHandlerInstance.UpdateCorsConfig)
+		}
 	}
 }

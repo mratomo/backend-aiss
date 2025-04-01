@@ -2,6 +2,7 @@ package main
 
 import (
 	"api-gateway/config"
+	"api-gateway/handlers"
 	"api-gateway/middleware"
 	"api-gateway/routes"
 	"context"
@@ -32,15 +33,21 @@ func main() {
 	// Inicializar router
 	router := gin.Default()
 
-	// Configurar CORS
-	router.Use(cors.New(cors.Config{
-		AllowOrigins:     cfg.CorsAllowedOrigins,
-		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: true,
-		MaxAge:           12 * time.Hour,
-	}))
+	// Inicializar el manejador de configuración (para CORS dinámico)
+	configHandler := handlers.NewConfigHandler(&cfg.CorsAllowedOrigins, cfg.Environment, "config/config.yaml")
+	log.Printf("Configuración CORS inicial: %v", cfg.CorsAllowedOrigins)
+
+	// Configurar CORS - versión permisiva para configuración con proxy inverso
+	corsConfig := cors.DefaultConfig()
+	corsConfig.AllowAllOrigins = true // Permitir cualquier origen (seguro con proxy inverso)
+	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+	corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization"}
+	corsConfig.ExposeHeaders = []string{"Content-Length"}
+	corsConfig.AllowCredentials = true
+	corsConfig.MaxAge = 12 * time.Hour
+
+	// Aplicar configuración CORS
+	router.Use(cors.New(corsConfig))
 
 	// Middleware global
 	router.Use(middleware.RequestLogger())

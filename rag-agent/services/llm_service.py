@@ -27,6 +27,15 @@ class LLMService:
         self.settings = settings
         self.providers = {}  # Cache de proveedores (id -> provider)
         self.default_provider_id = None
+        
+        # Sistema de limitación de tasa para prevenir uso excesivo
+        self.rate_limits = {
+            # id_proveedor -> {contador, timestamp_ultimo_reset, limite_por_hora}
+            # Se inicializará para cada proveedor cuando se carguen
+        }
+        
+        # Tiempo entre resets de contadores de uso (1 hora)
+        self.rate_limit_reset_interval = 3600  # segundos
 
         # Nuevo: Cliente MCP para gestión de contextos
         self.mcp_client = None
@@ -70,10 +79,33 @@ class LLMService:
 
         for provider_dict in providers:
             provider = LLMProvider(**provider_dict)
-            self.providers[str(provider.id)] = provider
+            provider_id = str(provider.id)
+            self.providers[provider_id] = provider
 
             if provider.default:
-                self.default_provider_id = str(provider.id)
+                self.default_provider_id = provider_id
+                
+            # Inicializar limitación de tasa para este proveedor
+            # Obtener límite por hora de los metadatos o usar un valor predeterminado según el tipo
+            rate_limit_per_hour = provider.metadata.get("rate_limit_per_hour", 0)
+            
+            # Si no hay límite configurado, establecer valores predeterminados según el proveedor
+            if rate_limit_per_hour <= 0:
+                if provider.type == LLMProviderType.OPENAI:
+                    rate_limit_per_hour = 100  # Límite conservador para OpenAI
+                elif provider.type == LLMProviderType.ANTHROPIC:
+                    rate_limit_per_hour = 60   # Límite conservador para Anthropic
+                elif provider.type == LLMProviderType.AZURE_OPENAI:
+                    rate_limit_per_hour = 200  # Límite más alto para Azure (configurable)
+                else:
+                    rate_limit_per_hour = 30   # Valor predeterminado conservador
+            
+            # Registrar límite en estructura de control
+            self.rate_limits[provider_id] = {
+                "count": 0,
+                "last_reset": time.time(),
+                "limit_per_hour": rate_limit_per_hour
+            }
 
         # Si no hay proveedor por defecto pero hay proveedores, usar el primero
         if not self.default_provider_id and self.providers:
@@ -82,7 +114,9 @@ class LLMService:
         # Log para diagnosticar proveedores cargados
         logger.info(f"Loaded {len(self.providers)} LLM providers. Default provider: {self.default_provider_id}")
         for provider_id, provider in self.providers.items():
-            logger.info(f"Provider {provider_id}: {provider.name} ({provider.type}), model: {provider.model}")
+            rate_limit = self.rate_limits[provider_id]["limit_per_hour"]
+            logger.info(f"Provider {provider_id}: {provider.name} ({provider.type}), model: {provider.model}, " +
+                        f"rate limit: {rate_limit} calls/hour")
 
     def _get_provider(self, provider_id: Optional[str] = None) -> LLMProvider:
         """
@@ -151,6 +185,9 @@ class LLMService:
                     status_code=400,
                     detail=f"API key is required for {provider_data.type} providers"
                 )
+            
+            # Validar formato de API key
+            self._validate_api_key_format(provider_data.type, provider_data.api_key)
 
         if provider_data.type == LLMProviderType.AZURE_OPENAI:
             if not provider_data.api_key or not provider_data.api_endpoint:
@@ -158,12 +195,29 @@ class LLMService:
                     status_code=400,
                     detail="API key and endpoint are required for Azure OpenAI providers"
                 )
+            
+            # Validar formato de API key de Azure
+            self._validate_api_key_format(provider_data.type, provider_data.api_key)
+            
+            # Validar URL del endpoint
+            if not provider_data.api_endpoint.startswith(("https://", "http://")):
+                raise HTTPException(
+                    status_code=400,
+                    detail="API endpoint must be a valid URL starting with http:// or https://"
+                )
 
         if provider_data.type == LLMProviderType.OLLAMA:
             if not provider_data.api_endpoint:
                 raise HTTPException(
                     status_code=400,
                     detail="API endpoint is required for Ollama providers"
+                )
+            
+            # Validar URL del endpoint
+            if not provider_data.api_endpoint.startswith(("https://", "http://")):
+                raise HTTPException(
+                    status_code=400,
+                    detail="API endpoint must be a valid URL starting with http:// or https://"
                 )
 
         try:
@@ -337,6 +391,53 @@ class LLMService:
                 detail=f"Error deleting provider: {str(e)}"
             )
 
+    def _validate_api_key_format(self, provider_type: LLMProviderType, api_key: str) -> bool:
+        """
+        Validación de formato de API keys
+        
+        Args:
+            provider_type: Tipo de proveedor LLM
+            api_key: API key a validar
+            
+        Returns:
+            True si el formato es válido, de lo contrario lanza una excepción
+            
+        Raises:
+            HTTPException: Si el formato de la API key no es válido
+        """
+        if not api_key or len(api_key.strip()) < 8:
+            raise HTTPException(
+                status_code=400,
+                detail=f"API key for {provider_type} is too short or invalid"
+            )
+            
+        if provider_type == LLMProviderType.OPENAI:
+            # OpenAI API keys comienzan con "sk-" y tienen un largo estándar
+            if not api_key.startswith("sk-") or len(api_key) < 30:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid OpenAI API key format. Keys should start with 'sk-' and be at least 30 characters"
+                )
+        
+        elif provider_type == LLMProviderType.ANTHROPIC:
+            # Anthropic API keys generalmente comienzan con "sk-ant-" o tienen formato específico
+            if not (api_key.startswith("sk-ant-") or api_key.startswith("a-")) or len(api_key) < 20:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid Anthropic API key format. Keys should start with 'sk-ant-' or 'a-'"
+                )
+                
+        elif provider_type == LLMProviderType.AZURE_OPENAI:
+            # Azure API keys tienen un formato específico (generalmente alfanumérico)
+            if not api_key.replace("-", "").isalnum() or len(api_key) < 20:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid Azure OpenAI API key format"
+                )
+        
+        # Si pasó todas las validaciones
+        return True
+    
     async def test_provider(self, provider_id: str, prompt: str) -> Dict[str, Any]:
         """
         Probar un proveedor LLM con un prompt simple
@@ -376,6 +477,61 @@ class LLMService:
                 detail=f"Error testing provider: {str(e)}"
             )
 
+    async def _check_rate_limit(self, provider_id: str) -> bool:
+        """
+        Verifica y actualiza los límites de tasa para un proveedor
+        
+        Args:
+            provider_id: ID del proveedor
+            
+        Returns:
+            True si se permite la solicitud, False si se excedió el límite
+            
+        Raises:
+            HTTPException: Si se excedió el límite de tasa
+        """
+        # Si no existe en rate_limits, inicializarlo
+        if provider_id not in self.rate_limits:
+            self.rate_limits[provider_id] = {
+                "count": 0,
+                "last_reset": time.time(),
+                "limit_per_hour": 50  # Valor conservador por defecto
+            }
+            
+        rate_limit_info = self.rate_limits[provider_id]
+        current_time = time.time()
+        
+        # Comprobar si es hora de reiniciar el contador
+        if current_time - rate_limit_info["last_reset"] >= self.rate_limit_reset_interval:
+            # Reiniciar contador
+            rate_limit_info["count"] = 0
+            rate_limit_info["last_reset"] = current_time
+            logger.info(f"Rate limit counter reset for provider {provider_id}")
+        
+        # Verificar si excedió el límite
+        if rate_limit_info["count"] >= rate_limit_info["limit_per_hour"]:
+            next_reset = rate_limit_info["last_reset"] + self.rate_limit_reset_interval
+            time_remaining = int(next_reset - current_time)
+            
+            logger.warning(f"Rate limit exceeded for provider {provider_id}. " +
+                           f"Limit: {rate_limit_info['limit_per_hour']} requests/hour. " +
+                           f"Reset in {time_remaining} seconds.")
+            
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded. Try again in {time_remaining} seconds or use another provider."
+            )
+        
+        # Incrementar contador
+        rate_limit_info["count"] += 1
+        
+        # Si está llegando al 80% del límite, registrar advertencia
+        if rate_limit_info["count"] >= 0.8 * rate_limit_info["limit_per_hour"]:
+            logger.warning(f"Provider {provider_id} at {rate_limit_info['count']}/{rate_limit_info['limit_per_hour']} " +
+                           f"requests ({int(rate_limit_info['count'] * 100 / rate_limit_info['limit_per_hour'])}% of hourly limit)")
+        
+        return True
+    
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
@@ -408,6 +564,12 @@ class LLMService:
         """
         if not provider:
             provider = self._get_provider(provider_id)
+            
+        # Obtener y validar el provider_id
+        current_provider_id = str(provider.id)
+        
+        # Verificar límite de tasa antes de proceder
+        await self._check_rate_limit(current_provider_id)
 
         # Usar la configuración del proveedor si no se especifica
         actual_max_tokens = max_tokens if max_tokens is not None else provider.max_tokens

@@ -40,8 +40,16 @@ class EncryptionService:
             
             # Si la clave no está en formato correcto, derivarla
             if not encryption_key.endswith("="):
-                # Derive a key using PBKDF2
-                salt = b"db-connection-service"  # Use a constant salt for reproducibility
+                # Generar un salt único para esta instancia específica
+                # Usamos una combinación de timestamp y datos aleatorios
+                instance_id = str(time.time()).encode() + os.urandom(8)
+                # Crear un hash determinístico pero único para esta instancia
+                instance_hash = hashes.Hash(hashes.SHA256())
+                instance_hash.update(instance_id)
+                salt = instance_hash.finalize()[:16]  # Usar los primeros 16 bytes como salt
+                
+                logger.info(f"Generando nueva clave con salt único para esta instancia")
+                
                 kdf = PBKDF2HMAC(
                     algorithm=hashes.SHA256(),
                     length=32,
@@ -72,8 +80,8 @@ class EncryptionService:
             return text
         
         if not self.is_available:
-            logger.warning("Encryption service not available, using encoded text")
-            return f"encoded_{base64.b64encode(text.encode()).decode()}"
+            logger.error("Encryption service not available - refusing to proceed with insecure operation")
+            raise ValueError("Encryption service is required but not available. Cannot proceed with sensitive data.")
         
         try:
             # Encriptar
@@ -81,8 +89,8 @@ class EncryptionService:
             return base64.b64encode(encrypted).decode()
         except Exception as e:
             logger.error(f"Error encrypting text: {e}")
-            # Fallback seguro
-            return f"encoded_{base64.b64encode(text.encode()).decode()}"
+            # No intentar un fallback inseguro, reportar el error
+            raise ValueError(f"Error durante encriptación: {e}. Operación abortada por seguridad.")
     
     def decrypt(self, encrypted_text: str) -> str:
         """

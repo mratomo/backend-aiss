@@ -27,11 +27,28 @@ func RequestLogger() gin.HandlerFunc {
 		endTime := time.Now()
 		latency := endTime.Sub(startTime)
 
+		// Detectar si la solicitud proviene del proxy inverso
+		realIP := c.GetHeader("X-Real-IP")
+		forwardedFor := c.GetHeader("X-Forwarded-For")
+
+		// Determinar la IP del cliente (proxy o directa)
+		clientIP := c.ClientIP()
+		if realIP != "" {
+			clientIP = realIP
+		} else if forwardedFor != "" {
+			// X-Forwarded-For puede contener múltiples IPs (proxies en cadena)
+			ips := strings.Split(forwardedFor, ",")
+			if len(ips) > 0 {
+				// Usar la primera IP, que es la del cliente original
+				clientIP = strings.TrimSpace(ips[0])
+			}
+		}
+
 		// Registrar detalles de la solicitud
 		log.Printf("[%s] %s %s %d %s",
 			c.Request.Method,
 			c.Request.URL.Path,
-			c.ClientIP(),
+			clientIP,
 			c.Writer.Status(),
 			latency.String(),
 		)
@@ -112,29 +129,59 @@ func (am *AuthMiddleware) Authenticate() gin.HandlerFunc {
 		}
 
 		// Extraer claims
-			// Extraer claims
-			if claims, ok := token.Claims.(*Claims); ok && token.Valid {
-				// Verificar explícitamente la expiración del token
-				if claims.ExpiresAt \!= nil && time.Now().After(claims.ExpiresAt.Time) {
-					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token expirado"})
-					return
-				}
-
-				// Verificar que el token no sea usado antes de su tiempo de inicio
-				if claims.IssuedAt \!= nil && time.Now().Before(claims.IssuedAt.Time) {
-					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token no válido todavía"})
-					return
-				}
-				
-				// Añadir información de usuario al contexto
-				c.Set("userID", claims.UserID)
-				c.Set("userRole", claims.Role)
-				c.Set("tokenExpiresAt", claims.ExpiresAt.Time)
-				c.Next()
-			} else {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token inválido"})
+		if claims, ok := token.Claims.(*Claims); ok && token.Valid {
+			// Verificar explícitamente la expiración del token
+			if claims.ExpiresAt != nil && time.Now().After(claims.ExpiresAt.Time) {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token expirado"})
 				return
 			}
+
+			// Verificar que el token no sea usado antes de su tiempo de inicio
+			if claims.IssuedAt != nil && time.Now().Before(claims.IssuedAt.Time) {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token no válido todavía"})
+				return
+			}
+
+			// Verificar el emisor del token (issuer)
+			expectedIssuer := "backend-aiss"
+			if claims.Issuer != expectedIssuer {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token de emisor no válido"})
+				return
+			}
+
+			// Verificar la audiencia del token
+			validAudience := false
+			expectedAudience := "aiss-client"
+			if claims.Audience != nil {
+				for _, aud := range claims.Audience {
+					if aud == expectedAudience {
+						validAudience = true
+						break
+					}
+				}
+			}
+
+			if !validAudience {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token con audiencia no válida"})
+				return
+			}
+
+			// Verificar ID único (jti) para prevenir reutilización
+			if claims.ID == "" {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token sin identificador único"})
+				return
+			}
+
+			// Añadir información de usuario al contexto
+			c.Set("userID", claims.UserID)
+			c.Set("userRole", claims.Role)
+			c.Set("tokenExpiresAt", claims.ExpiresAt.Time)
+			c.Set("tokenID", claims.ID)
+			c.Next()
+		} else {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token inválido"})
+			return
+		}
 	}
 }
 

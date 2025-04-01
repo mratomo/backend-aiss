@@ -1,0 +1,36 @@
+# Frontend Dockerfile con configuración de proxy inverso
+# Este archivo debe colocarse en el directorio frontend/ y nombrarse como Dockerfile
+
+# Etapa de construcción
+FROM node:18 as build
+
+WORKDIR /app
+
+# Copiar archivos de dependencias
+COPY package*.json ./
+RUN npm install
+
+# Copiar código fuente
+COPY . .
+
+# Construir la aplicación
+RUN npm run build
+
+# Etapa de producción con Nginx
+FROM nginx:alpine
+
+# Copiar la configuración de Nginx
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Copiar archivos estáticos del frontend desde la etapa de construcción
+COPY --from=build /app/build /usr/share/nginx/html
+
+# Configurar permisos adecuados
+RUN chown -R nginx:nginx /usr/share/nginx/html && \
+    chmod -R 755 /usr/share/nginx/html
+
+# Puertos expuestos
+EXPOSE 80 443
+
+# Comando de inicio
+CMD ["nginx", "-g", "daemon off;"]

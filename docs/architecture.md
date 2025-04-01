@@ -42,6 +42,80 @@
 └────────────────────────────────────────────────────────────────────┘
 ```
 
+## Configuración de Red Docker
+
+El sistema utiliza una arquitectura de red Docker segura donde el backend está aislado de la red externa, con un proxy inverso en el frontend para la comunicación.
+
+### Estructura de Red
+
+```
+   Internet/Red Externa
+          |
+          ↓
+  +---------------+
+  |   Frontend    | ← Los usuarios se conectan aquí (puerto 80/443)
+  | (Nginx/Proxy) |
+  +-------+-------+
+          |
+          ↓
+  +---------------+
+  |  API Gateway  | ← No expuesto externamente, solo accesible desde la red Docker
+  +-------+-------+
+          |
+          ↓
++------------------+
+| Servicios Internos | ← Solo accesibles dentro de la red Docker
++------------------+
+```
+
+### Nombres de Servicio Docker
+
+Los servicios están disponibles en la red Docker interna con estos nombres de host:
+
+| Servicio                        | Nombre de Host Docker      | Puerto Interno |
+|---------------------------------|----------------------------|----------------|
+| API Gateway                     | api-gateway                | 8080           |
+| Servicio de Usuarios            | user-service               | 8081           |
+| Servicio de Documentos          | document-service           | 8082           |
+| Servicio de Contexto MCP        | context-service            | 8083           |
+| Servicio de Embedding           | embedding-service          | 8084           |
+| Servicio RAG                    | rag-agent                  | 8085           |
+| Gateway de Terminal             | terminal-gateway-service   | 8086           |
+| Servicio de Sesión Terminal     | terminal-session-service   | 8087           |
+| Servicio de Sugerencias         | terminal-suggestion-service| 8088           |
+| Servicio de Conexión a BD       | db-connection-service      | 8089           |
+| Servicio de Descubrimiento      | schema-discovery-service   | 8090           |
+
+### Comunicación Frontend-Backend
+
+El frontend debe configurarse para utilizar un proxy inverso (Nginx) que redirija todas las solicitudes de API a la API Gateway dentro de la red Docker. Ejemplo de configuración:
+
+```nginx
+# Dentro del archivo nginx.conf del frontend
+location /api/ {
+    proxy_pass http://api-gateway:8080/api/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection 'upgrade';
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_cache_bypass $http_upgrade;
+}
+
+# Para conexiones WebSocket a terminal
+location /ws/ {
+    proxy_pass http://terminal-gateway-service:8086/ws/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 86400;
+}
+```
+
+Para más detalles sobre la configuración del proxy, consulte [Configuración Docker con Proxy Inverso](deployment/docker-proxy-config.md).
+
 ## Descripción de los Componentes
 
 ### API Gateway
@@ -205,6 +279,19 @@
 - **Documentos y Objetos**: Acceso a través de firmados URLs presignadas
 - **Sincronización**: Combinación de modelos síncronos (peticiones directas) y asíncronos para operaciones largas
 
+## Seguridad
+
+Los aspectos de seguridad principales incluyen:
+
+1. **Autenticación**: JWT con validación completa (emisor, audiencia, ID único)
+2. **Autorización**: Control de acceso basado en roles (RBAC)
+3. **Encriptación en tránsito**: HTTPS y WSS para conexiones externas
+4. **Encriptación de datos sensibles**: Para credenciales de base de datos y tokens
+5. **Aislamiento de red Docker**: API Gateway y servicios no expuestos externamente
+6. **Protección contra inyección SQL**: Validación avanzada de consultas
+7. **Validación de API keys**: Para proveedores LLM externos
+8. **Limitación de tasa**: Para prevenir uso excesivo de APIs externas
+
 ## Escalabilidad
 
 El sistema está diseñado para ser escalado horizontalmente:
@@ -214,3 +301,17 @@ El sistema está diseñado para ser escalado horizontalmente:
 - Servicios stateless donde sea posible
 - API Gateway con capacidad de balanceo de carga
 - Servicios de procesamiento pesado (como el Embedding Service) configurados para scale-out automático
+
+## Referencia a Documentación Detallada
+
+Para información más detallada sobre componentes específicos, consulte:
+
+- [Servicios Core](services/core-services.md)
+- [Servicios de Terminal](services/terminal-services.md)
+- [Servicios de MCP](services/mcp-services.md)
+- [Servicios de BD](services/db-services.md)
+- [Agente RAG](services/rag-agent.md)
+- [Integración de Bases de Datos](integration/db-integration.md)
+- [Integración de Terminal](integration/terminal-integration.md)
+- [Seguridad](security/security.md)
+- [Despliegue](deployment/deployment.md)

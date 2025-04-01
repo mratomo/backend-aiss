@@ -19,6 +19,69 @@ func HealthCheck(c *gin.Context) {
 	})
 }
 
+// ConfigHandler maneja configuraciones dinámicas del sistema
+type ConfigHandler struct {
+	corsConfig     *[]string
+	environment    string
+	configFilePath string
+}
+
+// Instancia global del ConfigHandler para acceso desde las rutas
+var ConfigHandlerInstance *ConfigHandler
+
+// NewConfigHandler crea un nuevo manejador de configuración y lo asigna a la instancia global
+func NewConfigHandler(corsConfig *[]string, environment, configPath string) *ConfigHandler {
+	handler := &ConfigHandler{
+		corsConfig:     corsConfig,
+		environment:    environment,
+		configFilePath: configPath,
+	}
+	ConfigHandlerInstance = handler
+	return handler
+}
+
+// GetCorsConfig devuelve la configuración CORS actual
+func (h *ConfigHandler) GetCorsConfig(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"environment":          h.environment,
+		"cors_allowed_origins": *h.corsConfig,
+	})
+}
+
+// UpdateCorsConfig actualiza la configuración CORS dinámicamente
+func (h *ConfigHandler) UpdateCorsConfig(c *gin.Context) {
+	var request struct {
+		Origins []string `json:"origins" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Formato inválido. Se requiere un array 'origins' con los orígenes permitidos"})
+		return
+	}
+
+	// Validar los orígenes
+	for i, origin := range request.Origins {
+		if !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") && origin != "*" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf("Origen %d inválido: %s. Debe comenzar con 'http://' o 'https://' o ser '*'", i, origin),
+			})
+			return
+		}
+	}
+
+	// Actualizar configuración en memoria
+	*h.corsConfig = request.Origins
+
+	// Registrar cambio
+	log.Printf("CORS configuration updated to: %v", request.Origins)
+
+	// Responder con la nueva configuración
+	c.JSON(http.StatusOK, gin.H{
+		"message":              "Configuración CORS actualizada correctamente",
+		"cors_allowed_origins": request.Origins,
+	})
+}
+
 // UserHandler maneja solicitudes relacionadas con usuarios
 type UserHandler struct {
 	serviceURL string
@@ -335,9 +398,9 @@ type ProxyResponse struct {
 	Headers    http.Header `json:"headers"`
 }
 
-// proxyRequest es una función auxiliar para reenviar solicitudes a servicios internos
+// proxyRequestSimple es una función auxiliar para reenviar solicitudes a servicios internos
 // versión original que se utiliza en los handlers existentes
-func proxyRequest(c *gin.Context, url string, method string) {
+func proxyRequestSimple(c *gin.Context, url string, method string) {
 	// Leer body de la solicitud
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -394,7 +457,12 @@ func proxyRequest(c *gin.Context, url string, method string) {
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 }
 
-// Nueva versión de proxyRequest que acepta un parámetro de datos y devuelve una respuesta estructurada
+// Alias para mantener compatibilidad con código existente
+func proxyRequest(c *gin.Context, url string, method string) {
+	proxyRequestSimple(c, url, method)
+}
+
+// proxyRequest es una versión mejorada que acepta un parámetro de datos y devuelve una respuesta estructurada
 // Esta versión es utilizada por los nuevos handlers de DB
 func proxyRequest(c *gin.Context, url string, method string, data interface{}) ProxyResponse {
 	var reqBody []byte
