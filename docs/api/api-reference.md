@@ -719,6 +719,32 @@ Obtiene las conversaciones del usuario actual.
 }
 ```
 
+### POST /api/v1/rag/feedback
+
+Envía feedback sobre una respuesta RAG.
+
+**Request:**
+```json
+{
+  "query_id": "query123",
+  "rating": 4,
+  "comment": "Respuesta precisa pero podría incluir más detalles",
+  "feedback_type": "relevance"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "feedback_id": "feedback123",
+    "query_id": "query123",
+    "created_at": "2023-01-03T00:15:00Z"
+  }
+}
+```
+
 ## LLM (Modelos de Lenguaje)
 
 ### GET /api/v1/llm/providers
@@ -1134,6 +1160,30 @@ Obtiene sugerencias para comandos.
 }
 ```
 
+### POST /api/v1/terminal/feedback
+
+Envía feedback sobre sugerencias de comandos.
+
+**Request:**
+```json
+{
+  "suggestion_id": "sug123",
+  "was_used": true,
+  "rating": 5,
+  "comment": "Excelente sugerencia, resolvió mi problema"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "message": "Feedback received successfully"
+  }
+}
+```
+
 ## Ollama
 
 ### GET /api/v1/ollama/models
@@ -1223,3 +1273,4 @@ Actualiza la configuración de Ollama.
     "num_thread": 8
   }
 }
+```

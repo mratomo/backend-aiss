@@ -85,6 +85,7 @@ Los servicios están disponibles en la red Docker interna con estos nombres de h
 | Servicio de Sugerencias         | terminal-suggestion-service| 8088           |
 | Servicio de Conexión a BD       | db-connection-service      | 8089           |
 | Servicio de Descubrimiento      | schema-discovery-service   | 8090           |
+| Servicio de Contexto Terminal   | terminal-context-aggregator| 8091           |
 
 ### Comunicación Frontend-Backend
 
@@ -179,7 +180,7 @@ Para más detalles sobre la configuración del proxy, consulte [Configuración D
   - Gestión de conversaciones y control de contexto
 
 ### Terminal Services
-- **Tecnología**: Go
+- **Tecnología**: Go/Python
 - **Función**: Integración con terminal y shell
 - **Responsabilidades**:
   - Gestión de sesiones SSH
@@ -188,7 +189,7 @@ Para más detalles sobre la configuración del proxy, consulte [Configuración D
   - Integración con Context Service
 
 ### DB Services
-- **Tecnología**: Go y Python
+- **Tecnología**: Python
 - **Función**: Integración con bases de datos externas
 - **Responsabilidades**:
   - Conexión a diferentes tipos de bases de datos
@@ -270,6 +271,32 @@ Para más detalles sobre la configuración del proxy, consulte [Configuración D
                                   │ Command   │◀───│ Context   │
                                   │ Analysis  │    │ Service   │
                                   └───────────┘    └───────────┘
+```
+
+### 4. Integración con Base de Datos Externa
+
+```
+┌───────────┐    ┌───────────┐    ┌───────────┐    ┌───────────┐
+│  Cliente  │───▶│ API       │───▶│ DB        │───▶│ DB Conn   │
+│           │    │ Gateway   │    │ Agent     │    │ Service   │
+└───────────┘    └───────────┘    └───────────┘    └───────────┘
+                                        │                │
+                                        │                ▼
+                                        │          ┌───────────┐
+                                        │          │ Base de   │
+                                        │          │ Datos     │
+                                        │          └───────────┘
+                                        │                │
+                                        │                ▼
+                                        │          ┌───────────┐
+                                        │          │ Schema    │
+                                        │          │ Discovery │
+                                        │          └───────────┘
+                                        ▼
+                                  ┌───────────┐
+                                  │ RAG Agent │
+                                  │ (LLM)     │
+                                  └───────────┘
 ```
 
 ## Comunicación entre Servicios

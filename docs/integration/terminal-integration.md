@@ -127,9 +127,9 @@ Servicio que mantiene el estado y metadatos de las sesiones:
 - **Estadísticas de uso**: Métricas sobre sesiones y comandos
 - **Gestión de permisos**: Control de acceso a sesiones compartidas
 
-### Context Service Integration
+### Integración con Servicio de Contexto
 
-Integración con el servicio de contexto para mejorar la experiencia:
+Integración con el Servicio de Contexto para mejorar la experiencia:
 
 - **Análisis semántico**: Comprensión de comandos y su propósito
 - **Conocimiento contextual**: Relaciona comandos con áreas de conocimiento

@@ -1,136 +1,91 @@
-# AISS - Advanced Intelligent Search System
+# Backend AISS
 
-AISS is a microservices-based RAG (Retrieval Augmented Generation) system that combines document management, vector search, and LLM-powered natural language querying with advanced database connectivity capabilities.
+![Versión](https://img.shields.io/badge/versión-0.1.0-blue.svg)
+![Licencia](https://img.shields.io/badge/licencia-MIT-green.svg)
 
-## System Overview
+Sistema distribuido para gestión de conocimiento con capacidades RAG (Generación Aumentada por Recuperación) que implementa el Model Context Protocol (MCP).
 
-AISS is designed to be a comprehensive knowledge management platform that allows users to:
+## Características Principales
 
-1. Store, process, and retrieve documents through vector search
-2. Connect to various database systems and automatically discover schemas
-3. Query both document repositories and databases using natural language
-4. Use local or cloud-based LLMs for processing queries
+- 🔐 **Gestión de usuarios y autenticación**
+- 📄 **Procesamiento y almacenamiento de documentos**
+- 🔍 **Generación y búsqueda de embeddings**
+- 🤖 **Integración con modelos de lenguaje (LLMs)**
+- 🧠 **Gestión de contextos y áreas de conocimiento**
+- 💾 **Integración con bases de datos externas**
+- 💻 **Funcionalidades de terminal interactiva**
 
-The system is composed of multiple microservices built with Go and Python, containerized with Docker, and designed to work together to provide a seamless experience.
+## Arquitectura
 
-## Key Features
-
-### Document Management
-- Upload and manage documents of various formats (PDF, DOCX, TXT, etc.)
-- Organize documents into knowledge areas
-- Automatic content extraction and embedding generation
-- Personal and shared document repositories
-
-### Database Integration
-- Connect to multiple database types (PostgreSQL, MySQL, MongoDB, etc.)
-- Secure credential management with encryption
-- Automatic schema discovery and vectorization
-- Agent-based natural language to SQL conversion
-
-### RAG Capabilities
-- Hybrid RAG combining document search and database querying
-- Customizable system prompts for specific use cases
-- Context management for improved responses
-- Source attribution and relevance scoring
-
-### LLM Integration
-- Support for multiple LLM providers (OpenAI, Anthropic, local models)
-- Local LLM support via Ollama with GPU acceleration
-- Configurable parameters (temperature, max tokens, etc.)
-- Administration interface for model management
-
-### Technical Features
-- Microservices architecture for scalability
-- API Gateway for unified access control
-- JWT-based authentication and authorization
-- Vectorized search with Qdrant
-- Document storage with MinIO
-- MongoDB for structured data storage
-- GPU acceleration with fallback to CPU processing
-
-## Architecture
-
-The system is composed of the following components:
-
-### Core Services (Go)
-- **API Gateway**: Central entry point for all requests, handles routing and authentication
-- **User Service**: Manages user accounts and authentication
-- **Document Service**: Handles document upload, storage, and retrieval
-
-### MCP Services (Python)
-- **Context Service**: Manages context for RAG queries
-- **Embedding Service**: Generates embeddings for documents and queries
-
-### Database Services (Python)
-- **DB Connection Service**: Manages database connections and credentials
-- **Schema Discovery Service**: Analyzes database schemas and generates vectorized representations
-
-### Agent Services (Python)
-- **RAG Agent**: Core service that processes queries using both document and database sources
-
-### Support Services
-- **MongoDB**: Primary database for structured data
-- **Qdrant**: Vector database for semantic search
-- **MinIO**: Object storage for documents
-- **Ollama**: Optional local LLM service with GPU support
-
-## Getting Started
-
-### Prerequisites
-- Docker and Docker Compose
-- NVIDIA drivers and NVIDIA Container Toolkit (optional, for GPU acceleration)
-- 16GB+ RAM recommended (32GB+ for optimal performance)
-- GPU recommended for embedding generation and local LLM usage
-
-### Quick Start
-1. Clone the repository
-2. Create a `.env` file based on the example provided
-3. Run `docker-compose up -d`
-4. Access the API at `http://localhost:8080`
-
-Detailed deployment instructions can be found in the [Deployment Guide](docs/deployment/deployment.md).
-
-## API Documentation
-
-The system exposes a comprehensive REST API for all operations. See the [API Reference](docs/api/api-reference.md) for details.
-
-## Example Usage
-
-See the [Examples](docs/examples/examples.md) for code samples and usage patterns.
-
-## Development
-
-### Project Structure
 ```
-├── api-gateway/          # Go service for API routing
-├── core-services/        # Core Go services
-│   ├── user-service/     # User management service
-│   └── document-service/ # Document management service
-├── mcp-services/         # Model Context Protocol services
-│   ├── context-service/  # Context management (Python)
-│   └── embedding-service/# Embedding generation (Python)
-├── db-services/          # Database integration services
-│   ├── db-connection-service/    # Database connection management
-│   └── schema-discovery-service/ # Schema analysis and vectorization
-├── rag-agent/            # Query processing service
-├── db/                   # Database initialization scripts
-│   ├── mongodb/          # MongoDB scripts
-│   ├── minio/            # MinIO initialization
-│   └── qdrant/           # Qdrant configuration
-├── docs/                 # Documentation
-└── docker-compose.yml    # Service configuration
+┌───────────────┐     ┌───────────────┐     ┌───────────────┐
+│  API Gateway  │────▶│ Servicios Core│────▶│ Servicios MCP │
+└───────────────┘     └───────────────┘     └───────────────┘
+        │                     │                     │
+        ▼                     ▼                     ▼
+┌───────────────┐     ┌───────────────┐     ┌───────────────┐
+│   Frontend    │     │ Bases de Datos│     │  Agente RAG   │
+└───────────────┘     └───────────────┘     └───────────────┘
 ```
 
-### Local Development Setup
-1. Install the required dependencies for each service
-2. Run MongoDB, MinIO, and Qdrant locally or via Docker
-3. Configure environment variables for each service
-4. Run each service individually in development mode
+## Inicio Rápido
 
-## Contributing
+### Requisitos
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+- Docker y Docker Compose (v20.10.0+)
+- Git
 
-## License
+### Instalación
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+1. Clonar el repositorio:
+   ```bash
+   git clone https://github.com/your-organization/backend-aiss.git
+   cd backend-aiss
+   ```
+
+2. Crear archivo de configuración:
+   ```bash
+   cp .env.example .env
+   ```
+
+3. Iniciar los servicios:
+   ```bash
+   docker-compose up -d
+   ```
+
+4. Verificar que todos los servicios estén funcionando:
+   ```bash
+   docker-compose ps
+   ```
+
+La API estará disponible en http://localhost:8080
+
+## Documentación
+
+Consulte nuestra [documentación completa](docs/README.md) para información detallada sobre:
+
+- [Arquitectura del Sistema](docs/architecture.md)
+- [Guía de Instalación y Configuración](docs/deployment/deployment.md)
+- [Referencia de API](docs/api/api-reference.md)
+- [Servicios del Sistema](docs/services/)
+- [Seguridad](docs/security/security.md)
+- [Ejemplos de Uso](docs/examples/examples.md)
+- [Guía de Desarrollo](docs/development/development-guide.md)
+- [Monitoreo y Mantenimiento](docs/operations/monitoring.md)
+- [Glosario de Términos](docs/glosario.md)
+
+## Solución de Problemas
+
+Consulte nuestra [guía de solución de problemas](docs/operations/troubleshooting.md) para resolver los problemas más comunes.
+
+## Contribuir
+
+Si desea contribuir al proyecto, por favor consulte nuestra [guía de contribución](docs/contributing.md).
+
+## Licencia
+
+Este proyecto está licenciado bajo la Licencia MIT - vea el archivo [LICENSE](LICENSE) para más detalles.
+
+## Contacto
+
+Para preguntas o soporte, por favor abra un issue en este repositorio.

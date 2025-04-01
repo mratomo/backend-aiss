@@ -1,27 +1,27 @@
-# RAG Agent
+# Agente RAG
 
 ## Visión General
 
-El RAG Agent (Retrieval Augmented Generation) es un componente clave del sistema que implementa capacidades de generación de respuestas aumentadas con recuperación de contexto. Este servicio coordina la recuperación de información relevante desde la base de conocimiento y utiliza modelos de lenguaje de gran escala (LLM) para generar respuestas precisas, contextuales y basadas en evidencia.
+El Agente RAG (Generación Aumentada por Recuperación) es un componente clave del sistema que implementa capacidades de generación de respuestas aumentadas con recuperación de contexto. Este servicio coordina la recuperación de información relevante desde la base de conocimiento y utiliza Modelos de Lenguaje de Gran Escala (LLM) para generar respuestas precisas, contextuales y basadas en evidencia.
 
 ## Arquitectura
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        RAG Agent Service                         │
+│                        Servicio Agente RAG                      │
 │                                                                 │
 │  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐     │
 │  │                │  │                │  │                │     │
-│  │ Query Service  │  │  Retrieval     │  │  LLM Service   │     │
-│  │                │  │  Service       │  │                │     │
+│  │ Servicio de    │  │  Servicio de   │  │  Servicio LLM  │     │
+│  │ Consultas      │  │  Recuperación  │  │                │     │
 │  └───────┬────────┘  └───────┬────────┘  └───────┬────────┘     │
 │          │                   │                   │              │
 │          └───────────┬───────┘                   │              │
 │                      │                           │              │
 │  ┌────────────────┐  │                   ┌───────┴────────┐     │
 │  │                │  │                   │                │     │
-│  │   Context      │◀─┘                   │  LLM Provider  │     │
-│  │   Service      │                      │  Connector     │     │
+│  │   Servicio de  │◀─┘                   │  Conector de   │     │
+│  │   Contexto     │                      │  Proveedor LLM │     │
 │  │                │                      │                │     │
 │  └────────────────┘                      └────────────────┘     │
 │                                                                 │
@@ -30,7 +30,7 @@ El RAG Agent (Retrieval Augmented Generation) es un componente clave del sistema
 
 ## Componentes Principales
 
-### Query Service
+### Servicio de Consultas
 
 Gestiona las consultas de los usuarios y coordina el proceso de generación de respuestas.
 
@@ -41,18 +41,18 @@ Gestiona las consultas de los usuarios y coordina el proceso de generación de r
 - Aplicar filtros y restricciones a las consultas
 - Implementar estrategias de reintento y recuperación de errores
 
-### Retrieval Service
+### Servicio de Recuperación
 
 Recupera información relevante desde la base de conocimiento para aumentar la respuesta.
 
 **Responsabilidades:**
-- Comunicación con Context Service para búsqueda de información
+- Comunicación con Servicio de Contexto para búsqueda de información
 - Selección de estrategia de búsqueda óptima según tipo de consulta
 - Filtrado y reordenamiento de resultados por relevancia
 - Combinación de resultados de diferentes fuentes
 - Optimización del contexto recuperado para maximizar relevancia
 
-### LLM Service
+### Servicio LLM
 
 Gestiona la comunicación con diferentes proveedores de modelos de lenguaje.
 
@@ -63,7 +63,7 @@ Gestiona la comunicación con diferentes proveedores de modelos de lenguaje.
 - Monitoreo de uso y costes de LLM
 - Implementación de mecanismos de fallback entre proveedores
 
-### LLM Provider Connector
+### Conector de Proveedor LLM
 
 Implementa la conexión con proveedores específicos de LLM.
 
@@ -79,8 +79,8 @@ Implementa la conexión con proveedores específicos de LLM.
 ```
 ┌────────────┐      ┌───────────────┐      ┌───────────────┐
 │            │      │               │      │               │
-│   Usuario  │─────▶│ Query Service │─────▶│   Retrieval   │
-│            │      │               │      │   Service     │
+│   Usuario  │─────▶│ Servicio de   │─────▶│  Servicio de  │
+│            │      │ Consultas     │      │  Recuperación │
 └────────────┘      └───────────────┘      └───────┬───────┘
                            │                       │
                            │                       │
@@ -88,15 +88,15 @@ Implementa la conexión con proveedores específicos de LLM.
                            │                       ▼
 ┌────────────┐      ┌───────────────┐      ┌───────────────┐
 │            │      │               │      │               │
-│  Respuesta │◀─────│  LLM Service  │◀─────│   Context     │
-│            │      │               │      │   Service     │
+│  Respuesta │◀─────│ Servicio LLM  │◀─────│  Servicio de  │
+│            │      │               │      │  Contexto     │
 └────────────┘      └───────────────┘      └───────────────┘
 ```
 
 ### 1. Recepción y Análisis de Consulta
 
 1. El usuario envía una consulta al sistema
-2. Query Service recibe la consulta y analiza:
+2. El Servicio de Consultas recibe la consulta y analiza:
    - Tipo de consulta (informativa, acción, etc.)
    - Entidades y conceptos clave
    - Contexto de conversación previo
@@ -104,8 +104,8 @@ Implementa la conexión con proveedores específicos de LLM.
 
 ### 2. Recuperación de Contexto
 
-1. Retrieval Service formula una estrategia de búsqueda basada en el análisis
-2. Comunica con Context Service/Embedding Service para:
+1. El Servicio de Recuperación formula una estrategia de búsqueda basada en el análisis
+2. Comunica con Servicio de Contexto/Servicio de Embeddings para:
    - Búsqueda semántica por similitud vector
    - Búsqueda por palabras clave cuando es relevante
    - Filtrado por área de conocimiento y metadatos
@@ -117,7 +117,7 @@ Implementa la conexión con proveedores específicos de LLM.
 
 ### 3. Generación de Respuesta
 
-1. LLM Service prepara el prompt con:
+1. El Servicio LLM prepara el prompt con:
    - Consulta original
    - Contexto recuperado
    - Instrucciones específicas para el LLM
@@ -275,13 +275,13 @@ MAX_RELEVANT_HISTORY=5
 SIMILARITY_THRESHOLD=0.75
 ```
 
-## Estrategias de Retrieval
+## Estrategias de Recuperación
 
 El servicio implementa varias estrategias de recuperación que pueden combinarse:
 
 ### Búsqueda por Similitud Semántica
 
-Utiliza embeddings para encontrar contenido semánticamente similar a la consulta:
+Utiliza embeddings (representaciones vectoriales) para encontrar contenido semánticamente similar a la consulta:
 
 ```python
 # Pseudocódigo
@@ -300,7 +300,7 @@ def semantic_search(query, area_id=None, limit=10):
     return results
 ```
 
-### Rerank con Feedback del LLM
+### Reordenamiento con Retroalimentación del LLM
 
 Mejora los resultados pidiendo al LLM que los reordene por relevancia:
 
