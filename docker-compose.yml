@@ -12,8 +12,8 @@ services:
     environment:
       - PORT=8080
       - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET}
-      - CORS_ALLOWED_ORIGINS=* # Permitir cualquier origen (seguro con proxy inverso)
+      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-https://app.domain.com,http://localhost:3000} # Restringir orígenes para mayor seguridad
       - TERMINAL_GATEWAY_URL=http://terminal-gateway-service:8090
       - APP_ENVIRONMENT=production # Para decisiones de seguridad
     depends_on:
@@ -53,7 +53,7 @@ services:
     environment:
       - PORT=8081
       - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET}
+      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
       - ADMIN_INITIAL_PASSWORD=${ADMIN_INITIAL_PASSWORD}
       - MONGODB_URI=mongodb://mongodb:27017
       - MONGODB_DATABASE=mcp_knowledge_system
@@ -153,7 +153,8 @@ services:
       - GENERAL_EMBEDDING_MODEL=${GENERAL_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L12-v2}
       - PERSONAL_EMBEDDING_MODEL=${PERSONAL_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L12-v2}
       - USE_GPU=${USE_GPU:-true}
-      - MCP_SERVICE_URL=http://context-service:8083
+      # Eliminamos dependencia circular con context-service
+      # - MCP_SERVICE_URL=http://context-service:8083
     entrypoint: >
       /bin/sh -c "
       if nvidia-smi > /dev/null 2>&1; then
@@ -245,8 +246,8 @@ services:
       - ENVIRONMENT=production
       - MONGODB_URI=mongodb://mongodb:27017
       - MONGODB_DATABASE=mcp_knowledge_system
-      - DB_ENCRYPTION_KEY=${DB_ENCRYPTION_KEY}
-      - HASH_SALT=${HASH_SALT}
+      - DB_ENCRYPTION_KEY=${DB_ENCRYPTION_KEY:-XFn4TJvQNwP2BzLrAkRs9pC7SgH6Uy8m}
+      - HASH_SALT=${HASH_SALT:-gN7MP8jsLAFb5wHV3D2kYxRuTqE9zJcX}
       - SCHEMA_DISCOVERY_URL=http://schema-discovery-service:8087
       - EMBEDDING_SERVICE_URL=http://embedding-service:8084
     depends_on:
@@ -301,7 +302,7 @@ services:
     environment:
       - PORT=8090
       - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET}
+      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
       - SESSION_SERVICE_URL=http://terminal-session-service:8091
       - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8092
       - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8093
@@ -332,7 +333,7 @@ services:
     environment:
       - PORT=8091
       - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET}
+      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
       - MONGODB_URI=mongodb://mongodb:27017
       - MONGODB_DATABASE=terminal_sessions
       - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8092
@@ -361,7 +362,7 @@ services:
     environment:
       - PORT=8092
       - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET}
+      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
       - EMBEDDING_SERVICE_URL=http://embedding-service:8084
       - MCP_SERVICE_URL=http://context-service:8083
       - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8093
@@ -394,7 +395,7 @@ services:
     environment:
       - PORT=8093
       - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET}
+      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
       - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8092
       - MCP_SERVICE_URL=http://context-service:8083
       - LLM_SERVICE_URL=http://rag-agent:8085/api/v1/llm

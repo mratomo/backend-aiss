@@ -679,6 +679,40 @@ class LLMService:
                     advanced_settings=advanced_settings
                 )
 
+            elif provider.type == "anthropic":
+                # Implementación nativa de MCP para Anthropic (Claude)
+                if mcp_enabled and active_contexts:
+                    logger.info(f"Using native MCP for Anthropic with {len(active_contexts)} contexts")
+                    response = await self._generate_anthropic_mcp(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        provider=provider,
+                        active_contexts=active_contexts,
+                        max_tokens=actual_max_tokens,
+                        temperature=actual_temperature,
+                        advanced_settings=advanced_settings
+                    )
+                else:
+                    logger.info(f"Using standard API for Anthropic")
+                    response = await self._generate_anthropic(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        provider=provider,
+                        max_tokens=actual_max_tokens,
+                        temperature=actual_temperature,
+                        advanced_settings=advanced_settings
+                    )
+            elif provider.type == "ollama":
+                # Ollama no admite MCP nativo, usar siempre API estándar
+                logger.info(f"Using standard API for Ollama (MCP not supported)")
+                response = await self._generate_ollama(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    provider=provider,
+                    max_tokens=actual_max_tokens,
+                    temperature=actual_temperature,
+                    advanced_settings=advanced_settings
+                )
             else:
                 logger.error(f"Unsupported provider type: {provider.type}")
                 raise HTTPException(
@@ -931,6 +965,76 @@ class LLMService:
                 logger.error(f"Azure OpenAI API connection error: {str(e)}")
                 raise
 
+    async def _generate_anthropic_mcp(self,
+                                       prompt: str,
+                                       system_prompt: str,
+                                       provider: LLMProvider,
+                                       active_contexts: List[str],
+                                       max_tokens: int,
+                                       temperature: float,
+                                       advanced_settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Generar texto con Anthropic Claude usando conectividad MCP nativa"""
+        if not provider.api_key:
+            raise ValueError("API key is required for Anthropic")
+
+        url = "https://api.anthropic.com/v1/messages"
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": provider.api_key,
+            "anthropic-version": "2023-06-01"
+        }
+
+        # Crear referencias a contextos MCP
+        context_refs = [{"id": ctx_id} for ctx_id in active_contexts]
+
+        # Configurar el payload para Anthropic
+        payload = {
+            "model": provider.model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "system": system_prompt,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "metadata": {
+                "mcp_contexts": context_refs
+            }
+        }
+
+        # Añadir configuraciones avanzadas si existen
+        if advanced_settings:
+            for key, value in advanced_settings.items():
+                if key not in payload:
+                    payload[key] = value
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status != 200:
+                        error_data = await response.text()
+                        logger.error(f"Anthropic API error: {response.status} - {error_data}")
+                        raise HTTPException(
+                            status_code=response.status,
+                            detail=f"Anthropic API error: {error_data}"
+                        )
+                    
+                    response_data = await response.json()
+                    
+                    return {
+                        "text": response_data["content"][0]["text"],
+                        "model": provider.model,
+                        "provider": "anthropic",
+                        "usage": {
+                            "prompt_tokens": response_data.get("usage", {}).get("input_tokens", 0),
+                            "completion_tokens": response_data.get("usage", {}).get("output_tokens", 0),
+                            "total_tokens": response_data.get("usage", {}).get("input_tokens", 0) + 
+                                          response_data.get("usage", {}).get("output_tokens", 0)
+                        }
+                    }
+        except aiohttp.ClientError as e:
+            logger.error(f"Anthropic API connection error: {str(e)}")
+            raise
+            
     async def _generate_azure_openai_mcp(self,
                                          prompt: str,
                                          system_prompt: str,

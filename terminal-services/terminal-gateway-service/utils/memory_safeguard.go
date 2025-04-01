@@ -22,11 +22,14 @@ type MemorySafeguard struct {
 	statsLock            sync.RWMutex
 	bytesProcessed       int64
 	lastCleanupTime      time.Time
+
+	// Buffer pool para optimizar el uso de memoria
+	bufferPool sync.Pool
 }
 
 // NewMemorySafeguard creates a new memory safeguard
 func NewMemorySafeguard() *MemorySafeguard {
-	return &MemorySafeguard{
+	ms := &MemorySafeguard{
 		cleanupRequest:       make(chan struct{}, 1),
 		cleanupDone:          make(chan struct{}, 1),
 		memoryCheckInterval:  30 * time.Second,
@@ -35,6 +38,18 @@ func NewMemorySafeguard() *MemorySafeguard {
 		maxBufferSize:        50 << 20, // 50MB default buffer limit
 		lastCleanupTime:      time.Now(),
 	}
+
+	// Inicializar el pool de buffers
+	// Usar un tamaño inicial común para comandos de terminal (4KB)
+	const initialBufferSize = 4 * 1024
+	ms.bufferPool = sync.Pool{
+		New: func() interface{} {
+			buffer := make([]byte, 0, initialBufferSize)
+			return &buffer
+		},
+	}
+
+	return ms
 }
 
 // Start starts the memory safeguard
@@ -49,7 +64,7 @@ func (ms *MemorySafeguard) Stop() {
 		// Signal cleanup one last time and wait for completion
 		ms.cleanupRequest <- struct{}{}
 		<-ms.cleanupDone
-		
+
 		// Close channels
 		close(ms.cleanupRequest)
 		close(ms.cleanupDone)
@@ -81,13 +96,13 @@ func (ms *MemorySafeguard) monitorMemory() {
 			}
 			ms.performCleanup()
 			ms.cleanupDone <- struct{}{}
-			
+
 		case <-ticker.C:
 			// Regular interval check
 			if ms.stopped.Load() {
 				return
 			}
-			
+
 			if ms.shouldCleanup() {
 				ms.performCleanup()
 			}
@@ -99,18 +114,18 @@ func (ms *MemorySafeguard) monitorMemory() {
 func (ms *MemorySafeguard) shouldCleanup() bool {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	
+
 	// Check if we've exceeded our memory threshold
 	if float64(memStats.Alloc) > float64(ms.totalAllocLimit)*ms.memoryThresholdRatio {
 		return true
 	}
-	
+
 	// Check if we should periodically clean up anyway
 	ms.statsLock.RLock()
 	timeSinceLastCleanup := time.Since(ms.lastCleanupTime)
 	bytesProcessed := ms.bytesProcessed
 	ms.statsLock.RUnlock()
-	
+
 	// If we've processed a lot of data or it's been a while since last cleanup
 	return bytesProcessed > ms.maxBufferSize || timeSinceLastCleanup > 5*time.Minute
 }
@@ -120,20 +135,20 @@ func (ms *MemorySafeguard) performCleanup() {
 	// Get pre-cleanup stats
 	var memStatsBefore runtime.MemStats
 	runtime.ReadMemStats(&memStatsBefore)
-	
+
 	// Run garbage collection
 	debug.FreeOSMemory()
-	
+
 	// Get post-cleanup stats
 	var memStatsAfter runtime.MemStats
 	runtime.ReadMemStats(&memStatsAfter)
-	
+
 	// Reset counters
 	ms.statsLock.Lock()
 	ms.bytesProcessed = 0
 	ms.lastCleanupTime = time.Now()
 	ms.statsLock.Unlock()
-	
+
 	// Log cleanup results
 	freedBytes := int64(memStatsBefore.Alloc - memStatsAfter.Alloc)
 	if freedBytes > 0 {
@@ -147,15 +162,27 @@ func (ms *MemorySafeguard) AddBytesProcessed(bytes int64) {
 	if bytes <= 0 {
 		return
 	}
-	
+
 	ms.statsLock.Lock()
 	ms.bytesProcessed += bytes
 	ms.statsLock.Unlock()
-	
+
 	// Check if we need to request a cleanup
 	if ms.bytesProcessed > ms.maxBufferSize {
 		ms.RequestCleanup()
 	}
+}
+
+// GetBuffer obtiene un buffer del pool para reutilización
+func (ms *MemorySafeguard) GetBuffer() *[]byte {
+	return ms.bufferPool.Get().(*[]byte)
+}
+
+// ReturnBuffer devuelve un buffer al pool cuando ya no se necesita
+func (ms *MemorySafeguard) ReturnBuffer(buffer *[]byte) {
+	// Resetear el buffer para reutilización
+	*buffer = (*buffer)[:0]
+	ms.bufferPool.Put(buffer)
 }
 
 // SetMaxBufferSize sets the maximum buffer size before cleanup

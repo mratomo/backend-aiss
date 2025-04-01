@@ -439,32 +439,35 @@ func proxyRequestSimple(c *gin.Context, url string, method string) {
 		}
 	}(resp.Body)
 
-	// Leer respuesta
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "error al leer respuesta: " + err.Error()})
-		return
-	}
-
-	// Copiar headers de respuesta
+	// Implementar streaming para archivos grandes
+	// Copiar headers de respuesta primero
 	for key, values := range resp.Header {
 		for _, value := range values {
 			c.Header(key, value)
 		}
 	}
 
-	// Enviar respuesta al cliente
-	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
+	// Establecer el código de estado
+	c.Status(resp.StatusCode)
+
+	// Streaming de respuesta directamente al cliente
+	// Esto es más eficiente para archivos grandes ya que no carga todo en memoria
+	_, err = io.Copy(c.Writer, resp.Body)
+	if err != nil {
+		// Ya hemos enviado cabeceras, no podemos enviar un JSON de error ahora
+		log.Printf("Error streaming response: %v", err)
+		return
+	}
 }
 
 // Alias para mantener compatibilidad con código existente
-func proxyRequest(c *gin.Context, url string, method string) {
-	proxyRequestSimple(c, url, method)
+func proxyRequestSimple(c *gin.Context, url string, method string) {
+	proxyRequestBasic(c, url, method)
 }
 
-// proxyRequest es una versión mejorada que acepta un parámetro de datos y devuelve una respuesta estructurada
+// proxyRequestWithData es una versión mejorada que acepta un parámetro de datos y devuelve una respuesta estructurada
 // Esta versión es utilizada por los nuevos handlers de DB
-func proxyRequest(c *gin.Context, url string, method string, data interface{}) ProxyResponse {
+func proxyRequestWithData(c *gin.Context, url string, method string, data interface{}) ProxyResponse {
 	var reqBody []byte
 	var err error
 
@@ -594,20 +597,23 @@ func proxyMultipartRequest(c *gin.Context, url string) {
 		}
 	}(resp.Body)
 
-	// Leer respuesta
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "error al leer respuesta: " + err.Error()})
-		return
-	}
-
-	// Copiar headers de respuesta
+	// Implementar streaming para archivos grandes
+	// Copiar headers de respuesta primero
 	for key, values := range resp.Header {
 		for _, value := range values {
 			c.Header(key, value)
 		}
 	}
 
-	// Enviar respuesta al cliente
-	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
+	// Establecer el código de estado
+	c.Status(resp.StatusCode)
+
+	// Streaming de respuesta directamente al cliente
+	// Esto es más eficiente para archivos grandes ya que no carga todo en memoria
+	_, err = io.Copy(c.Writer, resp.Body)
+	if err != nil {
+		// Ya hemos enviado cabeceras, no podemos enviar un JSON de error ahora
+		log.Printf("Error streaming response: %v", err)
+		return
+	}
 }

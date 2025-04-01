@@ -37,9 +37,12 @@ func main() {
 	configHandler := handlers.NewConfigHandler(&cfg.CorsAllowedOrigins, cfg.Environment, "config/config.yaml")
 	log.Printf("Configuración CORS inicial: %v", cfg.CorsAllowedOrigins)
 
-	// Configurar CORS - versión permisiva para configuración con proxy inverso
+	// Configurar CORS - versión restrictiva para configuración más segura
 	corsConfig := cors.DefaultConfig()
-	corsConfig.AllowAllOrigins = true // Permitir cualquier origen (seguro con proxy inverso)
+
+	// Usar AllowOrigins en lugar de AllowAllOrigins para mayor seguridad
+	corsConfig.AllowOrigins = cfg.CorsAllowedOrigins
+
 	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 	corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization"}
 	corsConfig.ExposeHeaders = []string{"Content-Length"}

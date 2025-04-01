@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/base64"
+	"sync"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,8 @@ type SSHManager struct {
 	// WebSocket clients tracking for broadcasting events
 	wsClients       map[string][]*websocket.Conn  // Map sessionID -> array of websocket connections
 	wsClientsMutex  sync.RWMutex                  // Mutex for wsClients map
+	// Control de concurrencia
+	workerPool      chan struct{}                 // Semáforo para limitar goroutines concurrentes
 }
 
 // NewSSHManager creates a new SSH manager
