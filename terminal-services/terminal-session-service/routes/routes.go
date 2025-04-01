@@ -15,6 +15,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, repo handlers.SessionRe
 	commandHandler := handlers.NewCommandHandler(repo)
 	bookmarkHandler := handlers.NewBookmarkHandler(repo)
 	contextHandler := handlers.NewContextHandler(repo)
+	queryModeHandler := handlers.NewQueryModeHandler(repo)
 	maintenanceHandler := handlers.NewMaintenanceHandler(
 		repo,
 		cfg.Retention.SessionDays,
@@ -48,6 +49,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, repo handlers.SessionRe
 			sessions.GET("/:id", sessionHandler.GetSession)
 			sessions.PATCH("/:id/status", sessionHandler.UpdateSessionStatus)
 			sessions.GET("/search", sessionHandler.SearchSessions)
+			
+			// Query mode endpoints
+			sessions.PATCH("/:id/mode", queryModeHandler.UpdateSessionMode)
 		}
 
 		// Command routes
@@ -73,6 +77,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, repo handlers.SessionRe
 		{
 			contexts.POST("", contextHandler.SaveContext)
 			contexts.GET("/:id", contextHandler.GetContext)
+			contexts.GET("/:id/full", queryModeHandler.GetSessionContext)
+		}
+		
+		// Query mode routes
+		queryMode := v1.Group("/query-mode")
+		{
+			queryMode.GET("/sessions/active", queryModeHandler.GetActiveSessionsByUser)
+			queryMode.GET("/sessions/with-area", queryModeHandler.GetUserSessionsWithArea)
 		}
 
 		// Admin routes

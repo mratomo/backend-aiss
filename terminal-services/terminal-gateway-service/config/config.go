@@ -2,158 +2,176 @@ package config
 
 import (
 	"fmt"
-	"log"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/spf13/viper"
+	"github.com/joho/godotenv"
 )
 
-// Config stores all configuration for the service
+// Config represents the server configuration
 type Config struct {
-	Server   ServerConfig
-	Auth     AuthConfig
-	SSH      SSHConfig
-	Services ServicesConfig
-	Logging  LoggingConfig
-}
-
-// ServerConfig stores HTTP server configuration
-type ServerConfig struct {
-	Port            int
-	Host            string
-	ReadTimeout     time.Duration
-	WriteTimeout    time.Duration
-	GracefulTimeout time.Duration
-	CORSAllowOrigin string
-}
-
-// AuthConfig stores authentication configuration
-type AuthConfig struct {
-	JWTSecret      string
-	JWTExpiryHours int
-	JWTIssuer      string
-}
-
-// SSHConfig stores SSH client configuration
-type SSHConfig struct {
-	DefaultTimeout time.Duration
-	KeepAlive      time.Duration
-	KeyDir         string
-	KnownHostsFile string
-	MaxSessions    int
-}
-
-// ServicesConfig stores URLs for other services
-type ServicesConfig struct {
-	SessionServiceURL      string
-	ContextAggregatorURL   string
-	SuggestionServiceURL   string
-}
-
-// LoggingConfig stores logging configuration
-type LoggingConfig struct {
-	Level string
-	File  string
-}
-
-// Load reads configuration from environment variables or config file
-func Load() (*Config, error) {
-	viper.SetDefault("SERVER.PORT", 8090)
-	viper.SetDefault("SERVER.HOST", "0.0.0.0")
-	viper.SetDefault("SERVER.READ_TIMEOUT", "15s")
-	viper.SetDefault("SERVER.WRITE_TIMEOUT", "15s")
-	viper.SetDefault("SERVER.GRACEFUL_TIMEOUT", "15s")
-	viper.SetDefault("SERVER.CORS_ALLOW_ORIGIN", "*")
-
-	viper.SetDefault("SSH.DEFAULT_TIMEOUT", "30s")
-	viper.SetDefault("SSH.KEEP_ALIVE", "30s")
-	viper.SetDefault("SSH.KEY_DIR", "/app/keys")
-	viper.SetDefault("SSH.KNOWN_HOSTS_FILE", "/app/known_hosts")
-	viper.SetDefault("SSH.MAX_SESSIONS", 50)
-
-	viper.SetDefault("SERVICES.SESSION_SERVICE_URL", "http://terminal-session-service:8091")
-	viper.SetDefault("SERVICES.CONTEXT_AGGREGATOR_URL", "http://terminal-context-aggregator:8092")
-	viper.SetDefault("SERVICES.SUGGESTION_SERVICE_URL", "http://terminal-suggestion-service:8093")
-
-	viper.SetDefault("LOGGING.LEVEL", "info")
-	viper.SetDefault("LOGGING.FILE", "")
-
-	viper.SetConfigName("config")
-	viper.SetConfigType("yaml")
-	viper.AddConfigPath(".")
-	viper.AddConfigPath("/config")
-	viper.AddConfigPath("$HOME/.terminal-gateway")
-	viper.AutomaticEnv()
-
-	readTimeout, err := time.ParseDuration(viper.GetString("SERVER.READ_TIMEOUT"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid SERVER.READ_TIMEOUT: %w", err)
+	Server struct {
+		Port             int           `json:"port"`
+		Host             string        `json:"host"`
+		Timeout          time.Duration `json:"timeout"`
+		CORSAllowOrigin  string        `json:"cors_allow_origin"`
+		CORSAllowMethods string        `json:"cors_allow_methods"`
+		MaxSessions      int           `json:"max_sessions"`
 	}
-
-	writeTimeout, err := time.ParseDuration(viper.GetString("SERVER.WRITE_TIMEOUT"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid SERVER.WRITE_TIMEOUT: %w", err)
+	Auth struct {
+		JWTSecret      string        `json:"jwt_secret"`
+		JWTExpiryHours int           `json:"jwt_expiry_hours"`
+		JWTIssuer      string        `json:"jwt_issuer"`
+		TokenTimeout   time.Duration `json:"token_timeout"`
 	}
-
-	gracefulTimeout, err := time.ParseDuration(viper.GetString("SERVER.GRACEFUL_TIMEOUT"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid SERVER.GRACEFUL_TIMEOUT: %w", err)
+	SSH struct {
+		KeyDir     string        `json:"key_dir"`
+		Timeout    time.Duration `json:"timeout"`
+		KeepAlive  time.Duration `json:"keep_alive"`
+		DefaultKey string        `json:"default_key"`
 	}
-
-	sshTimeout, err := time.ParseDuration(viper.GetString("SSH.DEFAULT_TIMEOUT"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid SSH.DEFAULT_TIMEOUT: %w", err)
+	Services struct {
+		SessionServiceURL        string        `json:"session_service_url"`
+		SessionServiceTimeout    time.Duration `json:"session_service_timeout"`
+		ContextAggregatorURL     string        `json:"context_aggregator_url"`
+		ContextAggregatorTimeout time.Duration `json:"context_aggregator_timeout"`
+		SuggestionServiceURL     string        `json:"suggestion_service_url"`
+		SuggestionServiceTimeout time.Duration `json:"suggestion_service_timeout"`
+		RAGAgentURL              string        `json:"rag_agent_url"`
+		RAGAgentTimeout          time.Duration `json:"rag_agent_timeout"`
 	}
-
-	sshKeepAlive, err := time.ParseDuration(viper.GetString("SSH.KEEP_ALIVE"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid SSH.KEEP_ALIVE: %w", err)
+	Retry struct {
+		MaxRetries  int           `json:"max_retries"`
+		InitialWait time.Duration `json:"initial_wait"`
+		MaxWait     time.Duration `json:"max_wait"`
 	}
+}
 
-	jwtSecret := viper.GetString("AUTH.JWT_SECRET")
+// LoadConfig loads the configuration from environment variables
+func LoadConfig() (*Config, error) {
+	// Load .env file if it exists
+	_ = godotenv.Load()
+
+	// Create default config
+	var config Config
+
+	// Server configuration
+	config.Server.Port = getEnvAsInt("SERVER_PORT", 8080)
+	config.Server.Host = getEnv("SERVER_HOST", "")
+	config.Server.Timeout = getEnvAsDuration("SERVER_TIMEOUT", 30*time.Second)
+	config.Server.CORSAllowOrigin = getEnv("CORS_ALLOW_ORIGIN", "*")
+	config.Server.CORSAllowMethods = getEnv("CORS_ALLOW_METHODS", "GET,POST,PUT,DELETE,OPTIONS")
+	config.Server.MaxSessions = getEnvAsInt("MAX_SESSIONS", 100)
+
+	// Auth configuration
+	// SECURITY RISK: Default JWT secret should never be used in production
+	jwtSecret := getEnv("JWT_SECRET", "")
 	if jwtSecret == "" {
-		log.Println("WARNING: AUTH.JWT_SECRET not set, using default (insecure) value")
-		jwtSecret = "default-insecure-jwt-secret-do-not-use-in-production"
+		return nil, fmt.Errorf("JWT_SECRET environment variable is required")
+	}
+	config.Auth.JWTSecret = jwtSecret
+	config.Auth.JWTExpiryHours = getEnvAsInt("JWT_EXPIRY_HOURS", 24)
+	config.Auth.JWTIssuer = getEnv("JWT_ISSUER", "terminal-gateway-service")
+	config.Auth.TokenTimeout = getEnvAsDuration("TOKEN_TIMEOUT", 5*time.Minute)
+
+	// SSH configuration
+	config.SSH.KeyDir = getEnv("SSH_KEY_DIR", "/app/keys")
+	config.SSH.Timeout = getEnvAsDuration("SSH_TIMEOUT", 10*time.Second)
+	config.SSH.KeepAlive = getEnvAsDuration("SSH_KEEP_ALIVE", 30*time.Second)
+	config.SSH.DefaultKey = getEnv("SSH_DEFAULT_KEY", "")
+
+	// Services configuration
+	config.Services.SessionServiceURL = getEnv("SESSION_SERVICE_URL", "http://terminal-session-service:8080")
+	config.Services.SessionServiceTimeout = getEnvAsDuration("SESSION_SERVICE_TIMEOUT", 5*time.Second)
+	config.Services.ContextAggregatorURL = getEnv("CONTEXT_AGGREGATOR_URL", "http://terminal-context-aggregator:8000")
+	config.Services.ContextAggregatorTimeout = getEnvAsDuration("CONTEXT_AGGREGATOR_TIMEOUT", 5*time.Second)
+	config.Services.SuggestionServiceURL = getEnv("SUGGESTION_SERVICE_URL", "http://terminal-suggestion-service:8000")
+	config.Services.SuggestionServiceTimeout = getEnvAsDuration("SUGGESTION_SERVICE_TIMEOUT", 5*time.Second)
+	config.Services.RAGAgentURL = getEnv("RAG_AGENT_URL", "http://rag-agent:8000")
+	config.Services.RAGAgentTimeout = getEnvAsDuration("RAG_AGENT_TIMEOUT", 30*time.Second)
+
+	// Retry configuration
+	config.Retry.MaxRetries = getEnvAsInt("RETRY_MAX_RETRIES", 3)
+	config.Retry.InitialWait = getEnvAsDuration("RETRY_INITIAL_WAIT", 100*time.Millisecond)
+	config.Retry.MaxWait = getEnvAsDuration("RETRY_MAX_WAIT", 2*time.Second)
+
+	// Validate configuration
+	if err := validateConfig(&config); err != nil {
+		return nil, err
 	}
 
-	config := &Config{
-		Server: ServerConfig{
-			Port:            viper.GetInt("SERVER.PORT"),
-			Host:            viper.GetString("SERVER.HOST"),
-			ReadTimeout:     readTimeout,
-			WriteTimeout:    writeTimeout,
-			GracefulTimeout: gracefulTimeout,
-			CORSAllowOrigin: viper.GetString("SERVER.CORS_ALLOW_ORIGIN"),
-		},
-		Auth: AuthConfig{
-			JWTSecret:      jwtSecret,
-			JWTExpiryHours: viper.GetInt("AUTH.JWT_EXPIRY_HOURS"),
-			JWTIssuer:      viper.GetString("AUTH.JWT_ISSUER"),
-		},
-		SSH: SSHConfig{
-			DefaultTimeout: sshTimeout,
-			KeepAlive:      sshKeepAlive,
-			KeyDir:         viper.GetString("SSH.KEY_DIR"),
-			KnownHostsFile: viper.GetString("SSH.KNOWN_HOSTS_FILE"),
-			MaxSessions:    viper.GetInt("SSH.MAX_SESSIONS"),
-		},
-		Services: ServicesConfig{
-			SessionServiceURL:      viper.GetString("SERVICES.SESSION_SERVICE_URL"),
-			ContextAggregatorURL:   viper.GetString("SERVICES.CONTEXT_AGGREGATOR_URL"),
-			SuggestionServiceURL:   viper.GetString("SERVICES.SUGGESTION_SERVICE_URL"),
-		},
-		Logging: LoggingConfig{
-			Level: viper.GetString("LOGGING.LEVEL"),
-			File:  viper.GetString("LOGGING.FILE"),
-		},
+	return &config, nil
+}
+
+// validateConfig validates the configuration
+func validateConfig(config *Config) error {
+	// Server validation
+	if config.Server.Port < 1 || config.Server.Port > 65535 {
+		return fmt.Errorf("invalid server port: %d, must be between 1 and 65535", config.Server.Port)
 	}
 
-	// Try to read from config file (optional)
-	if err := viper.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			log.Printf("Warning: error reading config file: %v", err)
-		}
+	// Auth validation
+	if config.Auth.JWTSecret == "" {
+		return fmt.Errorf("JWT secret cannot be empty")
 	}
 
-	return config, nil
+	// Add more validation as needed
+
+	return nil
+}
+
+// Helper functions for environment variables
+func getEnv(key, defaultValue string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	return value
+}
+
+func getEnvAsInt(key string, defaultValue int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+
+	intValue, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultValue
+	}
+
+	return intValue
+}
+
+func getEnvAsDuration(key string, defaultValue time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+
+	// Try to parse as duration string (e.g. "5s", "10m")
+	dur, err := time.ParseDuration(value)
+	if err == nil {
+		return dur
+	}
+
+	// Try to parse as seconds
+	intValue, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultValue
+	}
+
+	return time.Duration(intValue) * time.Second
+}
+
+// IsDevMode returns true if the app is running in development mode
+func IsDevMode() bool {
+	return strings.ToLower(getEnv("ENV", "development")) == "development"
+}
+
+// IsTestMode returns true if the app is running in test mode
+func IsTestMode() bool {
+	return strings.ToLower(getEnv("ENV", "")) == "test"
 }

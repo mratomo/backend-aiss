@@ -67,53 +67,137 @@ func (c *SessionClient) WithRetryConfig(config RetryConfig) *SessionClient {
 }
 
 // doWithRetry performs an HTTP request with retry logic
+// doWithRetry performs an HTTP request with retry logic and circuit breaker pattern
 func (c *SessionClient) doWithRetry(req *http.Request) (*http.Response, error) {
-	var resp *http.Response
-	var err error
+	// Get the circuit breaker for this service (create if doesn't exist)
+	breaker := getCircuitBreaker(c.baseURL)
 	
-	wait := c.retryConfig.InitialWait
-	
-	for attempt := 0; attempt <= c.retryConfig.MaxRetries; attempt++ {
-		// Clone the request to ensure a fresh request each time
-		// (some transports might modify or close the request Body)
-		reqClone := req.Clone(req.Context())
+	// Execute with circuit breaker
+	result, err := breaker.Execute(func() (interface{}, error) {
+		var resp *http.Response
+		var err error
 		
-		// Make the request
-		resp, err = c.httpClient.Do(reqClone)
+		wait := c.retryConfig.InitialWait
 		
-		// If successful or permanent error, return immediately
-		if err == nil && resp.StatusCode < 500 {
-			return resp, nil
-		}
-		
-		// If it's the last attempt, return whatever we got
-		if attempt == c.retryConfig.MaxRetries {
-			if err != nil {
-				return nil, fmt.Errorf("request failed after %d attempts: %w", attempt+1, err)
+		for attempt := 0; attempt <= c.retryConfig.MaxRetries; attempt++ {
+			// Create request context with timeout
+			ctx, cancel := context.WithTimeout(req.Context(), c.httpClient.Timeout)
+			reqWithCtx := req.Clone(ctx)
+			defer cancel()
+			
+			// Make the request
+			resp, err = c.httpClient.Do(reqWithCtx)
+			
+			// If successful or permanent error, return immediately
+			if err == nil && resp.StatusCode < 500 {
+				return resp, nil
 			}
-			return resp, nil
+			
+			// If it's the last attempt, return whatever we got
+			if attempt == c.retryConfig.MaxRetries {
+				if err != nil {
+					// Convert temporary network errors to circuit breaker failures
+					if isTemporaryError(err) {
+						return nil, fmt.Errorf("service unavailable after %d attempts: %w", attempt+1, err)
+					}
+					return nil, fmt.Errorf("request failed after %d attempts: %w", attempt+1, err)
+				}
+				return resp, nil
+			}
+			
+			// If response exists but has an error status, log it
+			if err == nil && resp.StatusCode >= 500 {
+				log.Printf("[%s] Request failed with status %d, retrying (%d/%d)...", 
+					shortenURL(c.baseURL), resp.StatusCode, attempt+1, c.retryConfig.MaxRetries)
+				resp.Body.Close() // Important: close the body to avoid leaks
+			} else if err != nil {
+				// Omit sensitive data like tokens from log messages
+				errorString := err.Error()
+				// Sanitize error message to prevent token leaks
+				if strings.Contains(errorString, "Bearer") {
+					errorString = "auth error (token details omitted for security)"
+				}
+				log.Printf("[%s] Request error: %s, retrying (%d/%d)...", 
+					shortenURL(c.baseURL), errorString, attempt+1, c.retryConfig.MaxRetries)
+			}
+			
+			// Wait before retrying (with exponential backoff, capped at MaxWait)
+			time.Sleep(wait)
+			wait *= 2
+			if wait > c.retryConfig.MaxWait {
+				wait = c.retryConfig.MaxWait
+			}
 		}
 		
-		// If response exists but has an error status, log it
-		if err == nil && resp.StatusCode >= 500 {
-			log.Printf("Request failed with status %d, retrying (%d/%d)...", 
-				resp.StatusCode, attempt+1, c.retryConfig.MaxRetries)
-			resp.Body.Close() // Important: close the body to avoid leaks
-		} else if err != nil {
-			log.Printf("Request error: %v, retrying (%d/%d)...", 
-				err, attempt+1, c.retryConfig.MaxRetries)
+		// Should never reach here due to returns in the loop
+		return resp, err
+	})
+	
+	if err != nil {
+		if errors.Is(err, ErrCircuitOpen) {
+			return nil, fmt.Errorf("service %s is temporarily unavailable (circuit open)", shortenURL(c.baseURL))
 		}
-		
-		// Wait before retrying (with exponential backoff, capped at MaxWait)
-		time.Sleep(wait)
-		wait *= 2
-		if wait > c.retryConfig.MaxWait {
-			wait = c.retryConfig.MaxWait
-		}
+		return nil, err
 	}
 	
-	// Should never reach here due to returns in the loop
-	return resp, err
+	return result.(*http.Response), nil
+}
+
+// isTemporaryError checks if an error is temporary and should trigger circuit breaker
+func isTemporaryError(err error) bool {
+	// Check for network-related errors
+	if errors.Is(err, context.DeadlineExceeded) || 
+	   errors.Is(err, io.EOF) ||
+	   strings.Contains(err.Error(), "connection refused") ||
+	   strings.Contains(err.Error(), "no such host") ||
+	   strings.Contains(err.Error(), "i/o timeout") {
+		return true
+	}
+	
+	// Check for temporary net errors
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Temporary()
+	}
+	
+	return false
+}
+
+// shortenURL returns a shorter version of the URL for logging
+func shortenURL(url string) string {
+	parts := strings.Split(url, "/")
+	if len(parts) >= 3 {
+		return parts[2] // Return only the host part
+	}
+	return url
+}
+
+// Global circuit breaker registry
+var (
+	circuitBreakers = make(map[string]*CircuitBreaker)
+	breakerMutex    sync.Mutex
+)
+
+// getCircuitBreaker returns a circuit breaker for the given URL
+func getCircuitBreaker(url string) *CircuitBreaker {
+	breakerMutex.Lock()
+	defer breakerMutex.Unlock()
+	
+	key := shortenURL(url)
+	if cb, exists := circuitBreakers[key]; exists {
+		return cb
+	}
+	
+	// Create new circuit breaker with default settings
+	cb := NewCircuitBreaker(
+		key,
+		WithTimeout(10 * time.Second),
+		WithFailureThreshold(5),
+		WithSuccessThreshold(2),
+	)
+	circuitBreakers[key] = cb
+	
+	return cb
 }
 
 // SetAuthToken sets the authentication token for the client
@@ -611,4 +695,170 @@ func (c *SessionClient) GetSuggestion(suggestionID string) (*Suggestion, error) 
 	}
 
 	return &suggestion, nil
+}
+
+// UpdateSessionMode updates the mode of a terminal session
+func (c *SessionClient) UpdateSessionMode(sessionID string, mode string, areaID string) error {
+	url := fmt.Sprintf("%s/api/v1/sessions/%s/mode", c.baseURL, sessionID)
+	
+	modeData := map[string]string{
+		"mode": mode,
+	}
+	
+	if areaID != "" {
+		modeData["area_id"] = areaID
+	}
+
+	jsonData, err := json.Marshal(modeData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal mode data: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
+
+	// Use retry logic
+	resp, err := c.doWithRetry(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		var errorResp struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err == nil && errorResp.Error != "" {
+			return fmt.Errorf("session service error: %s", errorResp.Error)
+		}
+		return fmt.Errorf("session service returned error: %s", resp.Status)
+	}
+
+	return nil
+}
+
+// GetSessionContext gets the context for a terminal session
+func (c *SessionClient) GetSessionContext(sessionID string) (map[string]interface{}, error) {
+	url := fmt.Sprintf("%s/api/v1/contexts/%s", c.baseURL, sessionID)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
+
+	// Use retry logic
+	resp, err := c.doWithRetry(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		if resp.StatusCode == http.StatusNotFound {
+			// Return empty context if not found
+			return map[string]interface{}{}, nil
+		}
+		
+		var errorResp struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err == nil && errorResp.Error != "" {
+			return nil, fmt.Errorf("session service error: %s", errorResp.Error)
+		}
+		return nil, fmt.Errorf("session service returned error: %s", resp.Status)
+	}
+
+	var context map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&context); err != nil {
+		return nil, fmt.Errorf("failed to decode context: %w", err)
+	}
+
+	return context, nil
+}
+
+// RagResponse represents a response from the RAG agent
+type RagResponse struct {
+	Query       string `json:"query"`
+	Answer      string `json:"answer"`
+	HasError    bool   `json:"has_error"`
+	ErrorMsg    string `json:"error_msg,omitempty"`
+	LlmProvider string `json:"llm_provider"`
+	Model       string `json:"model"`
+	Sources     []struct {
+		Title   string `json:"title"`
+		Snippet string `json:"snippet"`
+	} `json:"sources,omitempty"`
+}
+
+// ProcessRagQuery sends a query to the RAG agent
+func (c *SessionClient) ProcessRagQuery(query string, userID string, areaID string, terminalContext map[string]interface{}) (*RagResponse, error) {
+	// Construct the RAG API URL
+	ragUrl := os.Getenv("RAG_AGENT_URL")
+	if ragUrl == "" {
+		ragUrl = "http://rag-agent:8000"
+	}
+	url := fmt.Sprintf("%s/api/v1/query", ragUrl)
+	
+	// Build query payload
+	queryData := map[string]interface{}{
+		"query":           query,
+		"user_id":         userID,
+		"area_id":         areaID,
+		"include_context": true,
+	}
+	
+	// Add terminal context if available
+	if terminalContext != nil {
+		queryData["terminal_context"] = terminalContext
+	}
+
+	jsonData, err := json.Marshal(queryData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal query data: %w", err)
+	}
+
+	// Create request
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
+
+	// Custom timeout for RAG queries
+	httpClient := &http.Client{
+		Timeout: 60 * time.Second, // Longer timeout for LLM generation
+	}
+	
+	// Execute request with longer timeout
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		var errorResp struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err == nil && errorResp.Error != "" {
+			return nil, fmt.Errorf("RAG agent error: %s", errorResp.Error)
+		}
+		return nil, fmt.Errorf("RAG agent returned error: %s", resp.Status)
+	}
+
+	var response RagResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode RAG response: %w", err)
+	}
+
+	return &response, nil
 }

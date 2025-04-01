@@ -20,6 +20,16 @@ const (
 	SessionStatusFailed SessionStatus = "failed"
 )
 
+// SessionMode represents the mode of the terminal session
+type SessionMode string
+
+const (
+	// SessionModeNormal is the regular terminal mode
+	SessionModeNormal SessionMode = "normal"
+	// SessionModeQuery is the RAG query mode
+	SessionModeQuery SessionMode = "query"
+)
+
 // SSHConnectionParams contains parameters for creating an SSH connection
 type SSHConnectionParams struct {
 	TargetHost string `json:"target_host" binding:"required"`
@@ -76,6 +86,8 @@ type Session struct {
 	WebSocketURL string        `json:"websocket_url,omitempty"`
 	Metadata     Metadata      `json:"metadata"`
 	Stats        Stats         `json:"stats"`
+	Mode         SessionMode   `json:"mode,omitempty"`
+	ActiveAreaID string        `json:"active_area_id,omitempty"`
 }
 
 // NewSession creates a new Session with default values
@@ -98,6 +110,8 @@ func NewSession(userID string) *Session {
 			TermCols:     80,
 			TermRows:     24,
 		},
+		Mode:         SessionModeNormal,
+		ActiveAreaID: "",
 	}
 }
 
@@ -114,55 +128,4 @@ type SessionCreateResponse struct {
 	Message      string        `json:"message,omitempty"`
 }
 
-// WebSocketMessage represents a message exchanged over WebSocket
-type WebSocketMessage struct {
-	Type string      `json:"type"`
-	Data interface{} `json:"data"`
-}
-
-// TerminalInput represents terminal input from the client
-type TerminalInput struct {
-	Data string `json:"data"`
-}
-
-// TerminalOutput represents terminal output to the client
-type TerminalOutput struct {
-	Data string `json:"data"`
-}
-
-// WindowResize represents a terminal window resize event
-type WindowResize struct {
-	Cols int `json:"cols"`
-	Rows int `json:"rows"`
-}
-
-// ExecuteSuggestion represents a command suggestion to execute
-type ExecuteSuggestion struct {
-	SuggestionID    string `json:"suggestion_id"`
-	AcknowledgeRisk bool   `json:"acknowledge_risk"`
-}
-
-// SessionControl represents a session control command
-type SessionControl struct {
-	Action string `json:"action"` // pause, resume, terminate
-}
-
-// SuggestionAvailable notifies the client of a new suggestion
-type SuggestionAvailable struct {
-	SuggestionID   string `json:"suggestion_id"`
-	SuggestionType string `json:"suggestion_type"`
-	Title          string `json:"title"`
-}
-
-// ContextUpdate notifies the client of a context update
-type ContextUpdate struct {
-	WorkingDirectory string `json:"working_directory"`
-	User             string `json:"user"`
-	Hostname         string `json:"hostname"`
-}
-
-// SessionStatus represents the current status of the session
-type SessionStatusUpdate struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
-}
+// Moved to websocket.go

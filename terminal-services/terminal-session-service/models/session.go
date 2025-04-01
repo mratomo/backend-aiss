@@ -39,6 +39,16 @@ type TerminalMetadata struct {
 	} `json:"window_size" bson:"window_size"`
 }
 
+// SessionMode represents the mode of a terminal session
+type SessionMode string
+
+const (
+	// SessionModeNormal is the default terminal mode
+	SessionModeNormal SessionMode = "normal"
+	// SessionModeQuery is the RAG query mode
+	SessionModeQuery SessionMode = "query"
+)
+
 // Session represents a terminal session
 type Session struct {
 	ID           primitive.ObjectID `json:"id" bson:"_id,omitempty"`
@@ -56,7 +66,9 @@ type Session struct {
 		BytesSent      int64 `json:"bytes_sent" bson:"bytes_sent"`
 		TotalDurationS int   `json:"total_duration_s" bson:"total_duration_s"`
 	} `json:"stats" bson:"stats"`
-	Tags []string `json:"tags,omitempty" bson:"tags,omitempty"`
+	Tags          []string    `json:"tags,omitempty" bson:"tags,omitempty"`
+	Mode          SessionMode `json:"mode" bson:"mode"`
+	ActiveAreaID  string      `json:"active_area_id,omitempty" bson:"active_area_id,omitempty"`
 }
 
 // Command represents a command executed in a terminal session
@@ -109,6 +121,17 @@ type SessionContext struct {
 		LastSeen time.Time `json:"last_seen" bson:"last_seen"`
 	} `json:"detected_errors" bson:"detected_errors"`
 	LastUpdated time.Time `json:"last_updated" bson:"last_updated"`
+}
+
+// SessionModeChange tracks when a session's mode changes
+type SessionModeChange struct {
+	ID           primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	SessionID    string             `json:"session_id" bson:"session_id"`
+	UserID       string             `json:"user_id" bson:"user_id"`
+	PreviousMode string             `json:"previous_mode" bson:"previous_mode"`
+	NewMode      string             `json:"new_mode" bson:"new_mode"`
+	AreaID       string             `json:"area_id,omitempty" bson:"area_id,omitempty"`
+	Timestamp    time.Time          `json:"timestamp" bson:"timestamp"`
 }
 
 // SessionSearchRequest represents a request to search for sessions

@@ -47,6 +47,9 @@ type SSHConnection struct {
 		MaxBufferSize    int64     // Maximum allowed buffer size
 		LastBufferReset  time.Time // Last time buffer was reset
 	}
+	// Query mode state
+	IsInQueryMode bool   // Whether the session is in RAG query mode
+	ActiveAreaID  string // ID of the active knowledge area for the session
 }
 
 // SSHCredentials represents credentials for SSH authentication

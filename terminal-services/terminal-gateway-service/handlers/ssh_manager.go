@@ -821,6 +821,31 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 
 			switch msg.Type {
 			case "terminal_input":
+					// Handle keyboard shortcut for query mode
+					var input models.TerminalInput
+					if data, ok := msg.Data.(map[string]interface{}); ok {
+						if inputData, ok := data["data"].(string); ok {
+							input.Data = inputData
+							
+							// Check if this is a keyboard shortcut (simplified implementation)
+							if isShortcutKey(input.Data, "ctrl+alt+q") {
+								m.toggleQueryMode(sessionID, ws, conn)
+								continue
+							}
+							
+							// Check if in query mode
+							conn.Lock.Lock()
+							isInQueryMode := conn.IsInQueryMode
+							activeAreaID := conn.ActiveAreaID
+							conn.Lock.Unlock()
+							
+							if isInQueryMode {
+								// Handle as a RAG query
+								go m.handleRagQuery(sessionID, conn.UserID, input.Data, activeAreaID, ws)
+								continue
+							}
+						}
+					}
 				// Parse terminal input message
 				var input models.TerminalInput
 				if data, ok := msg.Data.(map[string]interface{}); ok {
@@ -838,7 +863,65 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 
 				// TODO: Record command for analysis
 
-			case "resize":
+			case "keyboard_shortcut":
+					// Parse keyboard shortcut message
+					var shortcut models.KeyboardShortcut
+					if data, ok := msg.Data.(map[string]interface{}); ok {
+						if name, ok := data["name"].(string); ok {
+							shortcut.Name = name
+						}
+						if key, ok := data["key"].(string); ok {
+							shortcut.Key = key
+						}
+					}
+
+					// Handle keyboard shortcut
+					if shortcut.Name == "query_mode" && shortcut.Key == "ctrl+alt+q" {
+						// Toggle query mode
+						m.toggleQueryMode(sessionID, ws, conn)
+					}
+
+				case "mode_change":
+					// Parse mode change message
+					var modeChange models.ModeChange
+					if data, ok := msg.Data.(map[string]interface{}); ok {
+						if newMode, ok := data["new_mode"].(string); ok {
+							modeChange.NewMode = newMode
+						}
+						if areaID, ok := data["area_id"].(string); ok {
+							modeChange.AreaID = areaID
+						}
+					}
+
+					// Handle mode change request
+					if modeChange.NewMode == string(models.SessionModeQuery) {
+						// Switch to query mode with specified area
+						m.enableQueryMode(sessionID, ws, conn, modeChange.AreaID)
+					} else if modeChange.NewMode == string(models.SessionModeNormal) {
+						// Switch back to normal mode
+						m.disableQueryMode(sessionID, ws, conn)
+					}
+
+				case "rag_query":
+					// Parse RAG query message
+					var query models.RagQuery
+					if data, ok := msg.Data.(map[string]interface{}); ok {
+						if queryText, ok := data["query"].(string); ok {
+							query.Query = queryText
+						}
+						if areaID, ok := data["area_id"].(string); ok {
+							query.AreaID = areaID
+						}
+						if includeContext, ok := data["include_terminal_context"].(bool); ok {
+							query.IncludeTerminalContext = includeContext
+						}
+					}
+
+					// Handle RAG query
+					query.SessionID = sessionID
+					go m.handleRagQuery(sessionID, conn.UserID, query.Query, query.AreaID, ws)
+
+				case "resize":
 				// Parse resize message
 				var resize models.WindowResize
 				if data, ok := msg.Data.(map[string]interface{}); ok {
@@ -1748,4 +1831,201 @@ func (m *SSHManager) analyzeCommand(cmdInfo CommandAnalysis) {
 	// 1. Retrieves recent output from the session service
 	// 2. Sends it to the context aggregator for analysis
 	// 3. Updates the command record with analysis results
+}
+
+// toggleQueryMode toggles between normal and query mode
+func (m *SSHManager) toggleQueryMode(sessionID string, ws *websocket.Conn, conn *models.SSHConnection) {
+	conn.Lock.Lock()
+	currentlyInQueryMode := conn.IsInQueryMode
+	activeAreaID := conn.ActiveAreaID
+	conn.Lock.Unlock()
+
+	if currentlyInQueryMode {
+		// Currently in query mode, switch back to normal
+		m.disableQueryMode(sessionID, ws, conn)
+	} else {
+		// Currently in normal mode, switch to query
+		// If no active area is set, we need to ask the user to select one
+		if activeAreaID == "" {
+			// Send a message asking the user to select an area
+			ws.WriteJSON(models.WebSocketMessage{
+				Type: "mode_change_request",
+				Data: map[string]interface{}{
+					"message": "Please select a knowledge area for query mode",
+					"required": true,
+				},
+			})
+			return
+		}
+		
+		// If we have an active area, enable query mode
+		m.enableQueryMode(sessionID, ws, conn, activeAreaID)
+	}
+}
+
+// enableQueryMode switches the terminal to RAG query mode
+func (m *SSHManager) enableQueryMode(sessionID string, ws *websocket.Conn, conn *models.SSHConnection, areaID string) {
+	// Update the session state
+	conn.Lock.Lock()
+	previousMode := "normal"
+	if conn.IsInQueryMode {
+		previousMode = "query"
+	}
+	conn.IsInQueryMode = true
+	conn.ActiveAreaID = areaID
+	conn.Lock.Unlock()
+
+	// Update the session in the session service
+	err := m.sessionClient.UpdateSessionMode(sessionID, string(models.SessionModeQuery), areaID)
+	if err != nil {
+		log.Printf("Failed to update session mode in session service: %v", err)
+	}
+
+	// Send a notification about the mode change
+	ws.WriteJSON(models.WebSocketMessage{
+		Type: "mode_changed",
+		Data: models.ModeChange{
+			PreviousMode: previousMode,
+			NewMode:      string(models.SessionModeQuery),
+			AreaID:       areaID,
+		},
+	})
+
+	// Broadcast to other clients on this session
+	go m.broadcastToSessionExcept(sessionID, ws, "mode_changed", models.ModeChange{
+		PreviousMode: previousMode,
+		NewMode:      string(models.SessionModeQuery),
+		AreaID:       areaID,
+	})
+
+	// Send visual indicator to the terminal
+	promptMsg := "\r\n\033[1;32m>>> Query Mode Activated <<<\033[0m\r\n"
+	promptMsg += fmt.Sprintf("\033[1;34mKnowledge Area: %s\033[0m\r\n", areaID)
+	promptMsg += "Type your questions directly, or press Ctrl+Alt+Q to exit query mode\r\n\r\n> "
+	
+	// Send the message to the client
+	ws.WriteJSON(models.WebSocketMessage{
+		Type: "terminal_output",
+		Data: models.TerminalOutput{
+			Data: promptMsg,
+		},
+	})
+}
+
+// disableQueryMode switches the terminal back to normal mode
+func (m *SSHManager) disableQueryMode(sessionID string, ws *websocket.Conn, conn *models.SSHConnection) {
+	// Update the session state
+	conn.Lock.Lock()
+	previousMode := "query"
+	if !conn.IsInQueryMode {
+		previousMode = "normal"
+	}
+	activeAreaID := conn.ActiveAreaID
+	conn.IsInQueryMode = false
+	conn.Lock.Unlock()
+
+	// Update the session in the session service
+	err := m.sessionClient.UpdateSessionMode(sessionID, string(models.SessionModeNormal), "")
+	if err != nil {
+		log.Printf("Failed to update session mode in session service: %v", err)
+	}
+
+	// Send a notification about the mode change
+	ws.WriteJSON(models.WebSocketMessage{
+		Type: "mode_changed",
+		Data: models.ModeChange{
+			PreviousMode: previousMode,
+			NewMode:      string(models.SessionModeNormal),
+			AreaID:       activeAreaID,
+		},
+	})
+
+	// Broadcast to other clients on this session
+	go m.broadcastToSessionExcept(sessionID, ws, "mode_changed", models.ModeChange{
+		PreviousMode: previousMode,
+		NewMode:      string(models.SessionModeNormal),
+		AreaID:       activeAreaID,
+	})
+
+	// Send visual indicator to the terminal
+	promptMsg := "\r\n\033[1;33m<<< Exited Query Mode >>>\033[0m\r\n"
+	promptMsg += "Returned to normal terminal mode\r\n\r\n"
+	
+	// Send the message to the client
+	ws.WriteJSON(models.WebSocketMessage{
+		Type: "terminal_output",
+		Data: models.TerminalOutput{
+			Data: promptMsg,
+		},
+	})
+}
+
+// handleRagQuery processes a RAG query and sends the response back to the client
+func (m *SSHManager) handleRagQuery(sessionID string, userID string, query string, areaID string, ws *websocket.Conn) {
+	// Send a "thinking" indicator to the client
+	ws.WriteJSON(models.WebSocketMessage{
+		Type: "terminal_output",
+		Data: models.TerminalOutput{
+			Data: "\033[3m\033[90mProcessing query...\033[0m\r\n",
+		},
+	})
+
+	// Get terminal context if needed
+	terminalContext, err := m.getTerminalContext(sessionID)
+	if err != nil {
+		log.Printf("Failed to get terminal context: %v", err)
+		// Continue without context
+	}
+
+	// Call the RAG Agent via the session client
+	response, err := m.sessionClient.ProcessRagQuery(query, userID, areaID, terminalContext)
+	if err != nil {
+		log.Printf("Failed to process RAG query: %v", err)
+		// Send error message to the client
+		ws.WriteJSON(models.WebSocketMessage{
+			Type: "terminal_output",
+			Data: models.TerminalOutput{
+				Data: fmt.Sprintf("\r\n\033[1;31mError processing query: %v\033[0m\r\n> ", err),
+			},
+		})
+		return
+	}
+
+	// Format the response
+	formattedResponse := "\r\n\033[1;36m" + response.Answer + "\033[0m\r\n"
+	
+	// Add sources if available
+	if len(response.Sources) > 0 {
+		formattedResponse += "\r\n\033[1;33mSources:\033[0m\r\n"
+		for i, source := range response.Sources {
+			formattedResponse += fmt.Sprintf("\033[1m%d.\033[0m %s\r\n", i+1, source.Title)
+		}
+	}
+	
+	formattedResponse += "\r\n> "
+
+	// Send the response to the client
+	ws.WriteJSON(models.WebSocketMessage{
+		Type: "terminal_output",
+		Data: models.TerminalOutput{
+			Data: formattedResponse,
+		},
+	})
+	
+	// Also send the structured response for the UI to handle
+	ws.WriteJSON(models.WebSocketMessage{
+		Type: "rag_response",
+		Data: response,
+	})
+}
+
+// getTerminalContext retrieves the terminal context for a session
+func (m *SSHManager) getTerminalContext(sessionID string) (map[string]interface{}, error) {
+	// Get the session context from the session service
+	context, err := m.sessionClient.GetSessionContext(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session context: %w", err)
+	}
+	
+	return context, nil
 }
