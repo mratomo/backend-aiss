@@ -8,16 +8,17 @@ import (
 
 // User representa un usuario en el sistema
 type User struct {
-	ID              primitive.ObjectID    `bson:"_id,omitempty" json:"id,omitempty"`
-	Username        string                `bson:"username" json:"username" binding:"required"`
-	Email           string                `bson:"email" json:"email" binding:"required,email"`
-	PasswordHash    string                `bson:"password_hash" json:"-"`
-	Role            string                `bson:"role" json:"role"` // admin, user
-	Active          bool                  `bson:"active" json:"active"`
-	CreatedAt       time.Time             `bson:"created_at" json:"created_at"`
-	UpdatedAt       time.Time             `bson:"updated_at" json:"updated_at"`
-	LastLogin       *time.Time            `bson:"last_login,omitempty" json:"last_login,omitempty"`
-	AreaPermissions map[string]Permission `bson:"area_permissions" json:"area_permissions"`
+	ID                 primitive.ObjectID    `bson:"_id,omitempty" json:"id,omitempty"`
+	Username           string                `bson:"username" json:"username" binding:"required"`
+	Email              string                `bson:"email" json:"email" binding:"required,email"`
+	PasswordHash       string                `bson:"password_hash" json:"-"`
+	Role               string                `bson:"role" json:"role"` // admin, user
+	Active             bool                  `bson:"active" json:"active"`
+	CreatedAt          time.Time             `bson:"created_at" json:"created_at"`
+	UpdatedAt          time.Time             `bson:"updated_at" json:"updated_at"`
+	LastLogin          *time.Time            `bson:"last_login,omitempty" json:"last_login,omitempty"`
+	AreaPermissions    map[string]Permission `bson:"area_permissions" json:"area_permissions"`
+	TokenVersionNumber int                   `bson:"token_version_number" json:"-"` // Incrementar cuando hay que invalidar tokens
 }
 
 // Permission define los permisos de un usuario para un área específica

@@ -15,10 +15,10 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -35,35 +35,40 @@ type readResult struct {
 
 // SSHManager manages SSH connections
 type SSHManager struct {
-	sessions        map[string]*models.SSHConnection
-	sessionMutex    sync.RWMutex
-	config          *ssh.ClientConfig
-	upgrader        websocket.Upgrader
-	timeout         time.Duration
-	keepAlive       time.Duration
-	keyDir          string
-	maxSessions     int
-	sessionClient   *services.SessionClient
-	authToken       string
+	sessions      map[string]*models.SSHConnection
+	sessionMutex  sync.RWMutex
+	config        *ssh.ClientConfig
+	upgrader      websocket.Upgrader
+	timeout       time.Duration
+	keepAlive     time.Duration
+	keyDir        string
+	maxSessions   int
+	sessionClient *services.SessionClient
+	authToken     string
 	// WebSocket clients tracking for broadcasting events
-	wsClients       map[string][]*websocket.Conn  // Map sessionID -> array of websocket connections
-	wsClientsMutex  sync.RWMutex                  // Mutex for wsClients map
+	wsClients      map[string][]*websocket.Conn // Map sessionID -> array of websocket connections
+	wsClientsMutex sync.RWMutex                 // Mutex for wsClients map
 	// Control de concurrencia
-	workerPool      chan struct{}                 // Semáforo para limitar goroutines concurrentes
+	workerPool chan struct{} // Semáforo para limitar goroutines concurrentes
+	// Query mode handler
+	queryHandler *queryModeHandler // Handler para el modo de consulta
+	// WebSocket write protection
+	wsWriteMutex sync.Mutex // Mutex para proteger escrituras WebSocket
 }
 
 // NewSSHManager creates a new SSH manager
 func NewSSHManager(timeout, keepAlive time.Duration, keyDir string, maxSessions int, sessionServiceURL string) *SSHManager {
 	// Create session client
 	sessionClient := services.NewSessionClient(sessionServiceURL, timeout)
-	
+
 	// Set auth token if available from environment
 	authToken := os.Getenv("AUTH_TOKEN")
-	if authToken \!= "" {
+	if authToken != "" {
 		sessionClient.SetAuthToken(authToken)
 	}
-	
-	return &SSHManager{
+
+	// Create the SSH manager
+	manager := &SSHManager{
 		sessions:      make(map[string]*models.SSHConnection),
 		timeout:       timeout,
 		keepAlive:     keepAlive,
@@ -72,6 +77,7 @@ func NewSSHManager(timeout, keepAlive time.Duration, keyDir string, maxSessions 
 		sessionClient: sessionClient,
 		authToken:     authToken,
 		wsClients:     make(map[string][]*websocket.Conn),
+		workerPool:    make(chan struct{}, 100), // Limit concurrent goroutines
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -82,26 +88,31 @@ func NewSSHManager(timeout, keepAlive time.Duration, keyDir string, maxSessions 
 					// Default to localhost in development
 					allowedOrigins = "http://localhost:3000,https://app.domain.com"
 				}
-				
+
 				// Get request origin
 				origin := r.Header.Get("Origin")
 				if origin == "" {
 					return false
 				}
-				
+
 				// Check if origin is allowed
 				for _, allowed := range strings.Split(allowedOrigins, ",") {
 					if allowed == origin || allowed == "*" {
 						return true
 					}
 				}
-				
+
 				// Log unauthorized access attempts
 				log.Printf("Unauthorized WebSocket connection attempt from: %s", origin)
 				return false
 			},
 		},
 	}
+
+	// Initialize the query mode handler with reference to the manager
+	manager.queryHandler = newQueryModeHandler(manager)
+
+	return manager
 }
 
 // knownhostsCallback creates a HostKeyCallback from a known_hosts file
@@ -110,37 +121,37 @@ func knownhostsCallback(filepath string) (ssh.HostKeyCallback, error) {
 	if _, err := os.Stat(filepath); os.IsNotExist(err) {
 		// Create the directory if it doesn't exist
 		dir := filepath[:len(filepath)-len("/known_hosts")]
-		if err := os.MkdirAll(dir, 0700); err \!= nil {
+		if err := os.MkdirAll(dir, 0700); err != nil {
 			return nil, fmt.Errorf("failed to create directory for known_hosts: %w", err)
 		}
-		
+
 		// Create an empty known_hosts file with secure permissions
 		file, err := os.Create(filepath)
-		if err \!= nil {
+		if err != nil {
 			return nil, fmt.Errorf("failed to create known_hosts file: %w", err)
 		}
 		file.Close()
-		
+
 		// Set secure permissions for known_hosts file (only owner can read/write)
-		if err := os.Chmod(filepath, 0600); err \!= nil {
+		if err := os.Chmod(filepath, 0600); err != nil {
 			return nil, fmt.Errorf("failed to set permissions for known_hosts file: %w", err)
 		}
 	} else {
 		// Check if the existing file has secure permissions and fix if needed
 		fileInfo, err := os.Stat(filepath)
-		if err \!= nil {
+		if err != nil {
 			return nil, fmt.Errorf("failed to check permissions for known_hosts file: %w", err)
 		}
-		
+
 		// On Unix systems, make sure the permissions are set to 0600 (only owner can read/write)
-		if fileInfo.Mode().Perm() \!= 0600 {
-			if err := os.Chmod(filepath, 0600); err \!= nil {
+		if fileInfo.Mode().Perm() != 0600 {
+			if err := os.Chmod(filepath, 0600); err != nil {
 				return nil, fmt.Errorf("failed to fix permissions for known_hosts file: %w", err)
 			}
 			log.Printf("Warning: Fixed permissions for known_hosts file: %s", filepath)
 		}
 	}
-	
+
 	return knownhosts.New(filepath)
 }
 
@@ -160,7 +171,7 @@ func (m *SSHManager) CreateSession(userID string, params models.SessionCreateReq
 	session.Metadata.ClientIP = clientIP
 
 	// Configure terminal options
-	if params.Options.TerminalType \!= "" {
+	if params.Options.TerminalType != "" {
 		session.Metadata.TerminalType = params.Options.TerminalType
 	} else {
 		session.Metadata.TerminalType = "xterm-256color"
@@ -183,47 +194,47 @@ func (m *SSHManager) CreateSession(userID string, params models.SessionCreateReq
 		authMethod = ssh.Password(params.Password)
 	case "key":
 		authMethod, err = m.getPublicKeyAuth(params.PrivateKey, params.Passphrase)
-		if err \!= nil {
+		if err != nil {
 			return nil, fmt.Errorf("failed to create key auth: %w", err)
 		}
 	default:
 		return nil, errors.New("unsupported authentication method")
 	}
-	
+
 	// Create a host key callback
 	var hostKeyCallback ssh.HostKeyCallback
-	if m.keyDir \!= "" {
+	if m.keyDir != "" {
 		// Try to use known_hosts file
 		knownHostsFile := fmt.Sprintf("%s/known_hosts", m.keyDir)
-		if hostKeyCallback, err = knownhostsCallback(knownHostsFile); err \!= nil {
+		if hostKeyCallback, err = knownhostsCallback(knownHostsFile); err != nil {
 			log.Printf("Warning: Could not load known_hosts file: %v", err)
-			
+
 			// Instead of InsecureIgnoreHostKey, use a custom handler that at least logs the key
 			hostKeyCallback = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 				fingerprint := ssh.FingerprintSHA256(key)
 				keyType := key.Type()
-				
-				log.Printf("SECURITY WARNING: Host '%s' presents unknown key: %s %s", 
+
+				log.Printf("SECURITY WARNING: Host '%s' presents unknown key: %s %s",
 					hostname, keyType, fingerprint)
-				
+
 				// For enhanced security, we could store this key for future verification
 				// Here we're logging the warning but still allowing the connection
 				// In a production environment, you might want to require explicit confirmation
-				
+
 				// Create a record of this key for future reference
 				if file, err := os.OpenFile(knownHostsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
 					defer file.Close()
-					
+
 					// Format is: hostname keytype key
 					// We need to import encoding/base64 for this
 					line := fmt.Sprintf("%s %s %s\n", hostname, keyType, base64.StdEncoding.EncodeToString(key.Marshal()))
-					if _, err := file.WriteString(line); err \!= nil {
+					if _, err := file.WriteString(line); err != nil {
 						log.Printf("Failed to write to known_hosts file: %v", err)
 					} else {
 						log.Printf("Added new host key to %s for future verification", knownHostsFile)
 					}
 				}
-				
+
 				return nil
 			}
 		}
@@ -243,7 +254,7 @@ func (m *SSHManager) CreateSession(userID string, params models.SessionCreateReq
 
 	// Save session to the session service
 	err = m.sessionClient.CreateSession(session)
-	if err \!= nil {
+	if err != nil {
 		log.Printf("Failed to save session to session service: %v", err)
 		// Continue with in-memory session but log the error
 	}
@@ -251,7 +262,7 @@ func (m *SSHManager) CreateSession(userID string, params models.SessionCreateReq
 	// Connect to the SSH server (in a goroutine to not block)
 	go func() {
 		conn, err := m.connectToSSH(session.ID, params.TargetHost, params.Port, sshConfig, userID, clientIP, session.Metadata.TerminalType, session.Metadata.TermCols, session.Metadata.TermRows)
-		if err \!= nil {
+		if err != nil {
 			log.Printf("Failed to connect to SSH server: %v", err)
 			m.updateSessionStatus(session.ID, models.SessionStatusFailed)
 			return
@@ -267,11 +278,11 @@ func (m *SSHManager) CreateSession(userID string, params models.SessionCreateReq
 
 		// Update target info
 		info, err := m.detectOSInfo(conn)
-		if err \!= nil {
+		if err != nil {
 			log.Printf("Failed to detect OS info: %v", err)
 		} else {
 			m.updateSessionTargetInfo(session.ID, info)
-			
+
 			// Notify clients about the detected OS
 			statusData, _ := json.Marshal(models.SessionStatusUpdate{
 				Status:  "os_detected",
@@ -289,13 +300,13 @@ func (m *SSHManager) connectToSSH(sessionID, host string, port int, config *ssh.
 	// Create the connection
 	addr := fmt.Sprintf("%s:%d", host, port)
 	client, err := ssh.Dial("tcp", addr, config)
-	if err \!= nil {
+	if err != nil {
 		return nil, fmt.Errorf("failed to dial: %w", err)
 	}
 
 	// Create a session
 	sshSession, err := client.NewSession()
-	if err \!= nil {
+	if err != nil {
 		client.Close()
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
@@ -308,7 +319,7 @@ func (m *SSHManager) connectToSSH(sessionID, host string, port int, config *ssh.
 	}
 
 	// Request pseudo terminal
-	if err := sshSession.RequestPty(termType, rows, cols, modes); err \!= nil {
+	if err := sshSession.RequestPty(termType, rows, cols, modes); err != nil {
 		sshSession.Close()
 		client.Close()
 		return nil, fmt.Errorf("failed to request pty: %w", err)
@@ -316,28 +327,28 @@ func (m *SSHManager) connectToSSH(sessionID, host string, port int, config *ssh.
 
 	// Get stdin, stdout, stderr
 	stdin, err := sshSession.StdinPipe()
-	if err \!= nil {
+	if err != nil {
 		sshSession.Close()
 		client.Close()
 		return nil, fmt.Errorf("failed to get stdin pipe: %w", err)
 	}
 
 	stdout, err := sshSession.StdoutPipe()
-	if err \!= nil {
+	if err != nil {
 		sshSession.Close()
 		client.Close()
 		return nil, fmt.Errorf("failed to get stdout pipe: %w", err)
 	}
 
 	stderr, err := sshSession.StderrPipe()
-	if err \!= nil {
+	if err != nil {
 		sshSession.Close()
 		client.Close()
 		return nil, fmt.Errorf("failed to get stderr pipe: %w", err)
 	}
 
 	// Start shell
-	if err := sshSession.Shell(); err \!= nil {
+	if err := sshSession.Shell(); err != nil {
 		sshSession.Close()
 		client.Close()
 		return nil, fmt.Errorf("failed to start shell: %w", err)
@@ -364,12 +375,12 @@ func (m *SSHManager) connectToSSH(sessionID, host string, port int, config *ssh.
 			return client.Close()
 		},
 	}
-	
+
 	// Initialize pause channels
 	conn.PauseChannels.Pause = make(chan bool, 1)
 	conn.PauseChannels.IsPaused = make(chan bool, 1)
 	conn.PauseChannels.Timeout = 100 * time.Millisecond
-	
+
 	// Initialize memory management
 	conn.MemStats.MaxBufferSize = 50 * 1024 * 1024 // 50MB default max
 	conn.MemStats.LastBufferReset = time.Now()
@@ -386,13 +397,13 @@ func (m *SSHManager) getPublicKeyAuth(privateKey, passphrase string) (ssh.AuthMe
 	var signer ssh.Signer
 	var err error
 
-	if passphrase \!= "" {
+	if passphrase != "" {
 		signer, err = ssh.ParsePrivateKeyWithPassphrase([]byte(privateKey), []byte(passphrase))
 	} else {
 		signer, err = ssh.ParsePrivateKey([]byte(privateKey))
 	}
 
-	if err \!= nil {
+	if err != nil {
 		return nil, err
 	}
 
@@ -449,9 +460,9 @@ func (m *SSHManager) GetSession(sessionID string) (*models.Session, error) {
 	// Mantener el lock durante toda la operación para evitar race conditions
 	m.sessionMutex.RLock()
 	defer m.sessionMutex.RUnlock()
-	
+
 	conn, exists := m.sessions[sessionID]
-	if \!exists {
+	if !exists {
 		return nil, errors.New("session not found")
 	}
 
@@ -484,7 +495,7 @@ func (m *SSHManager) GetSession(sessionID string) (*models.Session, error) {
 func (m *SSHManager) TerminateSession(sessionID string) error {
 	m.sessionMutex.Lock()
 	conn, exists := m.sessions[sessionID]
-	if \!exists {
+	if !exists {
 		m.sessionMutex.Unlock()
 		// Try to update session status in session service even if not in memory
 		_ = m.sessionClient.UpdateSessionStatus(sessionID, models.SessionStatusDisconnected)
@@ -497,7 +508,7 @@ func (m *SSHManager) TerminateSession(sessionID string) error {
 
 	// Update status in session service
 	updateErr := m.sessionClient.UpdateSessionStatus(sessionID, models.SessionStatusDisconnected)
-	if updateErr \!= nil {
+	if updateErr != nil {
 		log.Printf("Failed to update session status in session service: %v", updateErr)
 		// Don't return this error, prioritize the close error
 	}
@@ -511,7 +522,7 @@ func (m *SSHManager) UpdateSession(sessionID string, params interface{}) error {
 	defer m.sessionMutex.Unlock()
 
 	conn, exists := m.sessions[sessionID]
-	if \!exists {
+	if !exists {
 		return errors.New("session not found")
 	}
 
@@ -526,26 +537,24 @@ func (m *SSHManager) UpdateSession(sessionID string, params interface{}) error {
 		if p.WindowSize.Cols > 0 && p.WindowSize.Rows > 0 {
 			conn.WindowSize.Cols = p.WindowSize.Cols
 			conn.WindowSize.Rows = p.WindowSize.Rows
-			
+
 			// Update PTY window size using a new SSH session
-			if conn.Client \!= nil {
+			if conn.Client != nil {
 				// Create a new session for window resize operation
 				session, err := conn.Client.NewSession()
-				if err \!= nil {
+				if err != nil {
 					log.Printf("Failed to create session for window resize: %v", err)
 					return fmt.Errorf("failed to create session for window resize: %w", err)
 				}
 				defer session.Close()
-				
+
 				// Update PTY window size using standard SSH window-change request
-				if sshSession, ok := session.(*ssh.Session); ok {
-					err := sshSession.WindowChange(conn.WindowSize.Rows, conn.WindowSize.Cols)
-					if err \!= nil {
-						log.Printf("Failed to resize PTY window: %v", err)
-						return fmt.Errorf("failed to resize PTY window: %w", err)
-					}
-					log.Printf("PTY window resized to %dx%d for session %s", conn.WindowSize.Cols, conn.WindowSize.Rows, conn.SessionID)
+				err = session.WindowChange(conn.WindowSize.Rows, conn.WindowSize.Cols)
+				if err != nil {
+					log.Printf("Failed to resize PTY window: %v", err)
+					return fmt.Errorf("failed to resize PTY window: %w", err)
 				}
+				log.Printf("PTY window resized to %dx%d for session %s", conn.WindowSize.Cols, conn.WindowSize.Rows, conn.SessionID)
 			}
 		}
 	}
@@ -554,36 +563,68 @@ func (m *SSHManager) UpdateSession(sessionID string, params interface{}) error {
 }
 
 // updateSessionStatus updates the status of a session
+// safeWriteJSON envía un mensaje WebSocket de forma segura con manejo de errores
+func (m *SSHManager) safeWriteJSON(ws *websocket.Conn, msgType string, data interface{}) error {
+	if ws == nil {
+		return errors.New("WebSocket connection is nil")
+	}
+
+	// Usar mutex para garantizar escrituras thread-safe al websocket
+	m.wsWriteMutex.Lock()
+	defer m.wsWriteMutex.Unlock()
+
+	// Establecer un deadline para evitar bloqueos indefinidos
+	deadline := time.Now().Add(3 * time.Second)
+	if err := ws.SetWriteDeadline(deadline); err != nil {
+		return fmt.Errorf("failed to set write deadline: %w", err)
+	}
+
+	// Escribir el mensaje
+	message := models.WebSocketMessage{
+		Type: msgType,
+		Data: data,
+	}
+	err := ws.WriteJSON(message)
+
+	// Restablecer el deadline independientemente del error
+	resetErr := ws.SetWriteDeadline(time.Time{})
+
+	if err != nil {
+		log.Printf("Failed to send WebSocket message: %v", err)
+		return err
+	}
+
+	return resetErr
+}
+
 func (m *SSHManager) updateSessionStatus(sessionID string, status models.SessionStatus) {
-	// Crear una copia de los datos de la sesión bajo el lock para evitar race conditions
-	var sessionCopy *models.SSHConnection
+	// Verificar y actualizar el estado de la sesión con protección contra race conditions
 	var exists bool
-	
+	var sessionData struct {
+		ID         string
+		TargetHost string
+		UserID     string
+	}
+
 	m.sessionMutex.Lock()
 	if conn, ok := m.sessions[sessionID]; ok {
 		exists = true
 		// Actualizar el estado en la memoria local
 		conn.Status = status
 		conn.LastActive = time.Now()
-		
-		// Crear una copia mínima de los datos necesarios para evitar
-		// mantener el lock durante operaciones externas (llamadas a la base de datos)
-		sessionCopy = &models.SSHConnection{
-			SessionID:   conn.SessionID,
-			UserID:      conn.UserID,
-			Status:      conn.Status,
-			TargetHost:  conn.TargetHost,
-			Username:    conn.Username,
-			LastActive:  conn.LastActive,
-		}
+
+		// Guardar información mínima necesaria para las operaciones asincrónicas
+		sessionData.ID = conn.SessionID
+		sessionData.UserID = conn.UserID
+		sessionData.TargetHost = conn.TargetHost
 	}
 	m.sessionMutex.Unlock()
-	
+
 	// Si no existe la sesión, no hay nada más que hacer
 	if !exists {
 		return
 	}
-	
+
 	// Actualizar en la base de datos fuera del lock para evitar retenciones
 	go func() {
 		err := m.sessionClient.UpdateSessionStatus(sessionID, status)
@@ -591,7 +632,7 @@ func (m *SSHManager) updateSessionStatus(sessionID string, status models.Session
 			log.Printf("Failed to update session status in session service: %v", err)
 		}
 	}()
-	
+
 	// Preparar la notificación de cambio de estado
 	var message string
 	switch status {
@@ -606,12 +647,12 @@ func (m *SSHManager) updateSessionStatus(sessionID string, status models.Session
 	default:
 		message = fmt.Sprintf("Session status changed to: %s", status)
 	}
-	
+
 	statusData, _ := json.Marshal(models.SessionStatusUpdate{
 		Status:  string(status),
 		Message: message,
 	})
-	
+
 	// Enviar la notificación en una goroutine separada para evitar bloqueos
 	go m.SessionEventHandler(sessionID, "session_status", string(statusData))
 }
@@ -630,14 +671,14 @@ func (m *SSHManager) updateSessionTargetInfo(sessionID string, info models.Targe
 func (m *SSHManager) executeCommandWithOutput(client *ssh.Client, command string) (string, error) {
 	// Create a new session for this command
 	session, err := client.NewSession()
-	if err \!= nil {
+	if err != nil {
 		return "", fmt.Errorf("failed to create session: %w", err)
 	}
 	defer session.Close()
 
 	// Execute command and get combined output
 	output, err := session.CombinedOutput(command)
-	if err \!= nil {
+	if err != nil {
 		return string(output), fmt.Errorf("command execution failed: %w", err)
 	}
 
@@ -649,7 +690,7 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 	// Get hostname from the connection
 	var info models.TargetInfo
 	info.Hostname = conn.TargetHost
-	
+
 	// Resolve IP address if it's a hostname
 	if ip := net.ParseIP(conn.TargetHost); ip == nil {
 		addresses, err := net.LookupHost(conn.TargetHost)
@@ -661,7 +702,7 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 	} else {
 		info.IPAddress = conn.TargetHost
 	}
-	
+
 	// Extract the SSH client from the connection
 	// This requires modifying the connectToSSH function to store the client in the SSHConnection
 	if conn.Client == nil {
@@ -669,13 +710,13 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 		info.OSVersion = "Unknown"
 		return info, errors.New("no SSH client available for OS detection")
 	}
-	
+
 	// Try to detect if it's a Windows system first
 	output, err := m.executeCommandWithOutput(conn.Client, "cmd.exe /c ver")
 	if err == nil && (strings.Contains(output, "Microsoft Windows") || strings.Contains(output, "MS-DOS")) {
 		// Windows system
 		info.OSType = "Windows"
-		
+
 		// Extract version information
 		if strings.Contains(output, "10.0") {
 			info.OSVersion = "10/11/Server 2016+"
@@ -687,19 +728,19 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 			info.OSVersion = "7/Server 2008 R2"
 		} else {
 			// Extract whatever version we can find
-			verPattern := regexp.MustCompile(`Version\s+([0-9\.]+)`)
+			verPattern := regexp.MustCompile(`Version\s+([0-9.]+)`)
 			if matches := verPattern.FindStringSubmatch(output); len(matches) > 1 {
 				info.OSVersion = matches[1]
 			} else {
 				info.OSVersion = "Unknown Windows"
 			}
 		}
-		
+
 		return info, nil
 	}
-	
+
 	// Try Linux/Unix detection approaches in order of preference
-	
+
 	// 1. Try /etc/os-release first (most modern Linux distributions)
 	output, err = m.executeCommandWithOutput(conn.Client, "cat /etc/os-release 2>/dev/null")
 	if err == nil && len(output) > 0 {
@@ -707,40 +748,45 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 		namePattern := regexp.MustCompile(`NAME="([^"]+)"`)
 		versionPattern := regexp.MustCompile(`VERSION="([^"]+)"`)
 		idPattern := regexp.MustCompile(`ID=([^\s]+)`)
-		
+
 		var osName, osVersion, osID string
-		
+
 		if matches := namePattern.FindStringSubmatch(output); len(matches) > 1 {
 			osName = matches[1]
 		}
-		
+
 		if matches := versionPattern.FindStringSubmatch(output); len(matches) > 1 {
 			osVersion = matches[1]
 		}
-		
+
 		if matches := idPattern.FindStringSubmatch(output); len(matches) > 1 {
 			osID = matches[1]
 		}
-		
-		if osName \!= "" {
+
+		if osName != "" {
 			info.OSType = osName
-		} else if osID \!= "" {
-			info.OSType = strings.Title(osID)
+		} else if osID != "" {
+			// Convertir primera letra a mayúsculas en lugar de usar strings.Title que está deprecated
+			if len(osID) > 0 {
+				info.OSType = strings.ToUpper(osID[:1]) + osID[1:]
+			} else {
+				info.OSType = osID
+			}
 		} else {
 			info.OSType = "Linux"
 		}
-		
+
 		info.OSVersion = osVersion
 		return info, nil
 	}
-	
+
 	// 2. Try uname -a (works on most Unix-like systems)
 	output, err = m.executeCommandWithOutput(conn.Client, "uname -a")
 	if err == nil && len(output) > 0 {
 		// Basic OS type detection from uname
 		if strings.Contains(strings.ToLower(output), "darwin") {
 			info.OSType = "macOS"
-			
+
 			// Try to get macOS version
 			macVersion, vErr := m.executeCommandWithOutput(conn.Client, "sw_vers -productVersion")
 			if vErr == nil && len(macVersion) > 0 {
@@ -750,9 +796,9 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 			}
 		} else if strings.Contains(strings.ToLower(output), "freebsd") {
 			info.OSType = "FreeBSD"
-			
+
 			// Try to extract version from uname output
-			versionPattern := regexp.MustCompile(`FreeBSD\s+([0-9\.]+)`)
+			versionPattern := regexp.MustCompile(`FreeBSD\s+([0-9.]+)`)
 			if matches := versionPattern.FindStringSubmatch(output); len(matches) > 1 {
 				info.OSVersion = matches[1]
 			} else {
@@ -761,7 +807,7 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 		} else {
 			// Generic Linux
 			info.OSType = "Linux"
-			
+
 			// Try to extract kernel version
 			versionPattern := regexp.MustCompile(`([0-9]+\.[0-9]+\.[0-9]+)`)
 			if matches := versionPattern.FindStringSubmatch(output); len(matches) > 1 {
@@ -769,7 +815,7 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 			} else {
 				info.OSVersion = "Unknown"
 			}
-			
+
 			// Try specific distribution detection methods
 			// Check for /etc/redhat-release
 			redhatOutput, _ := m.executeCommandWithOutput(conn.Client, "cat /etc/redhat-release 2>/dev/null")
@@ -777,7 +823,7 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 				info.OSType = "Red Hat Linux"
 				info.OSVersion = strings.TrimSpace(redhatOutput)
 			}
-			
+
 			// Check for Debian version
 			debianOutput, _ := m.executeCommandWithOutput(conn.Client, "cat /etc/debian_version 2>/dev/null")
 			if len(debianOutput) > 0 {
@@ -785,14 +831,14 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 				info.OSVersion = strings.TrimSpace(debianOutput)
 			}
 		}
-		
+
 		return info, nil
 	}
-	
+
 	// 3. Fall back to minimal info if we couldn't detect properly
 	info.OSType = "Unknown"
 	info.OSVersion = "Unknown"
-	
+
 	return info, nil
 }
 
@@ -800,7 +846,7 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 	// Upgrade HTTP connection to WebSocket
 	ws, err := m.upgrader.Upgrade(c.Writer, c.Request, nil)
-	if err \!= nil {
+	if err != nil {
 		log.Printf("Failed to upgrade to WebSocket: %v", err)
 		return
 	}
@@ -811,17 +857,20 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 	conn, exists := m.sessions[sessionID]
 	m.sessionMutex.RUnlock()
 
-	if \!exists {
-		ws.WriteJSON(models.WebSocketMessage{
+	if !exists {
+		err := ws.WriteJSON(models.WebSocketMessage{
 			Type: "session_status",
 			Data: models.SessionStatusUpdate{
 				Status:  "error",
 				Message: "Session not found",
 			},
 		})
+		if err != nil {
+			log.Printf("Failed to send 'session not found' message: %v", err)
+		}
 		return
 	}
-	
+
 	// Register this WebSocket connection for the session
 	m.registerWebSocketClient(sessionID, ws)
 
@@ -832,12 +881,12 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 	// Read from WebSocket and write to SSH stdin
 	go func() {
 		defer func() { done <- struct{}{} }()
-		
+
 		for {
 			var msg models.WebSocketMessage
 			err := ws.ReadJSON(&msg)
-			if err \!= nil {
-				if \!websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+			if err != nil {
+				if !websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 					log.Printf("Failed to read WebSocket message: %v", err)
 				}
 				return
@@ -849,107 +898,101 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 			conn.Lock.Unlock()
 
 			switch msg.Type {
-				case "terminal_input":
-						// Handle keyboard shortcut for query mode
-						var input models.TerminalInput
-						if data, ok := msg.Data.(map[string]interface{}); ok {
-							if inputData, ok := data["data"].(string); ok {
-								input.Data = inputData
-								
-								// Check if this is a keyboard shortcut (simplified implementation)
-								if isShortcutKey(input.Data, "ctrl+alt+q") {
-									m.toggleQueryMode(sessionID, ws, conn)
-									continue
-								}
-								
-								// Check if in query mode
-								conn.Lock.Lock()
-								isInQueryMode := conn.IsInQueryMode
-								activeAreaID := conn.ActiveAreaID
-								conn.Lock.Unlock()
-								
-								if isInQueryMode {
-									// Handle as a RAG query
-									go m.handleRagQuery(sessionID, conn.UserID, input.Data, activeAreaID, ws)
-									continue
-								}
-								
-								// Write to SSH stdin (regular command)
-								_, err := conn.Stdin.Write([]byte(input.Data))
-								if err \!= nil {
-									log.Printf("Failed to write to SSH: %v", err)
-									return
-								}
+			case "terminal_input":
+				// Handle terminal input
+				var input models.TerminalInput
+				if data, ok := msg.Data.(map[string]interface{}); ok {
+					if inputData, ok := data["data"].(string); ok {
+						input.Data = inputData
+
+						// Check if this is a keyboard shortcut (simplified implementation)
+						if isShortcutKey(input.Data, "ctrl+alt+q") {
+							m.queryHandler.toggleQueryMode(sessionID, ws, conn)
+							continue
+						}
+
+						// Check if in query mode
+						conn.Lock.Lock()
+						isInQueryMode := conn.IsInQueryMode
+						activeAreaID := conn.ActiveAreaID
+						conn.Lock.Unlock()
+
+						if isInQueryMode {
+							// Handle as a RAG query
+							go m.queryHandler.handleRagQuery(sessionID, conn.UserID, input.Data, activeAreaID, ws)
+							continue
+						} else {
+							// Write to SSH stdin (regular command)
+							_, err := conn.Stdin.Write([]byte(input.Data))
+							if err != nil {
+								log.Printf("Failed to write to SSH: %v", err)
+								return
 							}
 						}
-				// Write to SSH stdin
-				_, err := conn.Stdin.Write([]byte(input.Data))
-				if err \!= nil {
-					log.Printf("Failed to write to SSH: %v", err)
-					return
+					}
 				}
 
 				// TODO: Record command for analysis
 
 			case "keyboard_shortcut":
-					// Parse keyboard shortcut message
-					var shortcut models.KeyboardShortcut
-					if data, ok := msg.Data.(map[string]interface{}); ok {
-						if name, ok := data["name"].(string); ok {
-							shortcut.Name = name
-						}
-						if key, ok := data["key"].(string); ok {
-							shortcut.Key = key
-						}
+				// Parse keyboard shortcut message
+				var shortcut models.KeyboardShortcut
+				if data, ok := msg.Data.(map[string]interface{}); ok {
+					if name, ok := data["name"].(string); ok {
+						shortcut.Name = name
 					}
-
-					// Handle keyboard shortcut
-					if shortcut.Name == "query_mode" && shortcut.Key == "ctrl+alt+q" {
-						// Toggle query mode
-						m.toggleQueryMode(sessionID, ws, conn)
+					if key, ok := data["key"].(string); ok {
+						shortcut.Key = key
 					}
+				}
 
-				case "mode_change":
-					// Parse mode change message
-					var modeChange models.ModeChange
-					if data, ok := msg.Data.(map[string]interface{}); ok {
-						if newMode, ok := data["new_mode"].(string); ok {
-							modeChange.NewMode = newMode
-						}
-						if areaID, ok := data["area_id"].(string); ok {
-							modeChange.AreaID = areaID
-						}
+				// Handle keyboard shortcut
+				if shortcut.Name == "query_mode" && shortcut.Key == "ctrl+alt+q" {
+					// Toggle query mode
+					m.queryHandler.toggleQueryMode(sessionID, ws, conn)
+				}
+
+			case "mode_change":
+				// Parse mode change message
+				var modeChange models.ModeChange
+				if data, ok := msg.Data.(map[string]interface{}); ok {
+					if newMode, ok := data["new_mode"].(string); ok {
+						modeChange.NewMode = newMode
 					}
-
-					// Handle mode change request
-					if modeChange.NewMode == string(models.SessionModeQuery) {
-						// Switch to query mode with specified area
-						m.enableQueryMode(sessionID, ws, conn, modeChange.AreaID)
-					} else if modeChange.NewMode == string(models.SessionModeNormal) {
-						// Switch back to normal mode
-						m.disableQueryMode(sessionID, ws, conn)
+					if areaID, ok := data["area_id"].(string); ok {
+						modeChange.AreaID = areaID
 					}
+				}
 
-				case "rag_query":
-					// Parse RAG query message
-					var query models.RagQuery
-					if data, ok := msg.Data.(map[string]interface{}); ok {
-						if queryText, ok := data["query"].(string); ok {
-							query.Query = queryText
-						}
-						if areaID, ok := data["area_id"].(string); ok {
-							query.AreaID = areaID
-						}
-						if includeContext, ok := data["include_terminal_context"].(bool); ok {
-							query.IncludeTerminalContext = includeContext
-						}
+				// Handle mode change request
+				if modeChange.NewMode == string(models.SessionModeQuery) {
+					// Switch to query mode with specified area
+					m.queryHandler.enableQueryMode(sessionID, ws, conn, modeChange.AreaID)
+				} else if modeChange.NewMode == string(models.SessionModeNormal) {
+					// Switch back to normal mode
+					m.queryHandler.disableQueryMode(sessionID, ws, conn)
+				}
+
+			case "rag_query":
+				// Parse RAG query message
+				var query models.RagQuery
+				if data, ok := msg.Data.(map[string]interface{}); ok {
+					if queryText, ok := data["query"].(string); ok {
+						query.Query = queryText
 					}
+					if areaID, ok := data["area_id"].(string); ok {
+						query.AreaID = areaID
+					}
+					if includeContext, ok := data["include_terminal_context"].(bool); ok {
+						query.IncludeTerminalContext = includeContext
+					}
+				}
 
-					// Handle RAG query
-					query.SessionID = sessionID
-					go m.handleRagQuery(sessionID, conn.UserID, query.Query, query.AreaID, ws)
+				// Handle RAG query
+				query.SessionID = sessionID
+				go m.queryHandler.handleRagQuery(sessionID, conn.UserID, query.Query, query.AreaID, ws)
 
-				case "resize":
+			case "resize":
 				// Parse resize message
 				var resize models.WindowResize
 				if data, ok := msg.Data.(map[string]interface{}); ok {
@@ -968,23 +1011,21 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 				conn.Lock.Unlock()
 
 				// Update the real PTY window size
-				if conn.Client \!= nil {
+				if conn.Client != nil {
 					// Create a new session for window resize operation
 					session, err := conn.Client.NewSession()
-					if err \!= nil {
+					if err != nil {
 						log.Printf("Failed to create session for window resize: %v", err)
 					} else {
 						defer session.Close()
-						
+
 						// Update PTY window size using standard SSH window-change request
-						sshSession := session.(*ssh.Session)
-						if sshSession \!= nil {
-							err := sshSession.WindowChange(resize.Rows, resize.Cols)
-							if err \!= nil {
-								log.Printf("Failed to resize PTY window: %v", err)
-							} else {
-								log.Printf("PTY window resized to %dx%d for session %s", resize.Cols, resize.Rows, conn.SessionID)
-							}
+						// Update window size directly
+						err := session.WindowChange(resize.Rows, resize.Cols)
+						if err != nil {
+							log.Printf("Failed to resize PTY window: %v", err)
+						} else {
+							log.Printf("PTY window resized to %dx%d for session %s", resize.Cols, resize.Rows, conn.SessionID)
 						}
 					}
 				}
@@ -1004,73 +1045,81 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 				// Execute the suggested command
 				if execute.SuggestionID == "" {
 					// Send error message to client
-					ws.WriteJSON(models.WebSocketMessage{
+					if err := ws.WriteJSON(models.WebSocketMessage{
 						Type: "session_status",
 						Data: models.SessionStatusUpdate{
 							Status:  "error",
 							Message: "Missing suggestion ID",
 						},
-					})
+					}); err != nil {
+						log.Printf("Failed to send 'missing suggestion ID' message: %v", err)
+					}
 					continue
 				}
-				
+
 				// Get the suggestion
 				suggestion, err := m.sessionClient.GetSuggestion(execute.SuggestionID)
-				if err \!= nil {
+				if err != nil {
 					log.Printf("Failed to get suggestion: %v", err)
-					ws.WriteJSON(models.WebSocketMessage{
+					if wsErr := ws.WriteJSON(models.WebSocketMessage{
 						Type: "session_status",
 						Data: models.SessionStatusUpdate{
 							Status:  "error",
 							Message: fmt.Sprintf("Failed to get suggestion: %v", err),
 						},
-					})
+					}); wsErr != nil {
+						log.Printf("Failed to send suggestion error message: %v", wsErr)
+					}
 					continue
 				}
-				
+
 				// Check if we need approval for risky commands
-				if suggestion.RequiresApproval && \!execute.AcknowledgeRisk {
+				if suggestion.RequiresApproval && !execute.AcknowledgeRisk {
 					// Send a message requesting acknowledgment
-					ws.WriteJSON(models.WebSocketMessage{
+					if wsErr := ws.WriteJSON(models.WebSocketMessage{
 						Type: "suggestion_status",
 						Data: map[string]interface{}{
-							"suggestion_id":      suggestion.ID,
-							"status":             "requires_approval",
-							"message":            fmt.Sprintf("This suggestion has risk level '%s' and requires approval", suggestion.RiskLevel),
-							"risk_level":         suggestion.RiskLevel,
-							"requires_approval":  true,
-							"command":            suggestion.Command,
+							"suggestion_id":     suggestion.ID,
+							"status":            "requires_approval",
+							"message":           fmt.Sprintf("This suggestion has risk level '%s' and requires approval", suggestion.RiskLevel),
+							"risk_level":        suggestion.RiskLevel,
+							"requires_approval": true,
+							"command":           suggestion.Command,
 						},
-					})
+					}); wsErr != nil {
+						log.Printf("Failed to send requires approval message: %v", wsErr)
+					}
 					continue
 				}
-				
+
 				// Log the execution of a suggested command
 				log.Printf("Executing suggested command: %s (ID: %s) with risk level: %s", suggestion.Command, suggestion.ID, suggestion.RiskLevel)
-				
+
 				// Execute the command with the suggestion ID
 				suggestionInfo := struct {
-					ID string
+					ID      string
 					Command string
 				}{
-					ID: suggestion.ID,
+					ID:      suggestion.ID,
 					Command: suggestion.Command,
 				}
 				// Pass the suggestion ID as metadata for tracking
 				result, err := m.executeSuggestionCommand(sessionID, suggestionInfo)
-				if err \!= nil {
+				if err != nil {
 					log.Printf("Failed to execute suggested command: %v", err)
-					ws.WriteJSON(models.WebSocketMessage{
+					if wsErr := ws.WriteJSON(models.WebSocketMessage{
 						Type: "suggestion_status",
 						Data: map[string]interface{}{
 							"suggestion_id": suggestion.ID,
 							"status":        "error",
 							"message":       fmt.Sprintf("Failed to execute command: %v", err),
 						},
-					})
+					}); wsErr != nil {
+						log.Printf("Failed to send suggestion status error message: %v", wsErr)
+					}
 				} else {
 					// Notify client of successful execution
-					ws.WriteJSON(models.WebSocketMessage{
+					if wsErr := ws.WriteJSON(models.WebSocketMessage{
 						Type: "suggestion_status",
 						Data: map[string]interface{}{
 							"suggestion_id": suggestion.ID,
@@ -1079,7 +1128,9 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 							"command":       suggestion.Command,
 							"duration_ms":   result.DurationMs,
 						},
-					})
+					}); wsErr != nil {
+						log.Printf("Failed to send success message: %v", wsErr)
+					}
 				}
 			case "session_control":
 				// Parse session control message
@@ -1096,35 +1147,41 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 					// Instead of closing the SSH connection, just disconnect this client
 					// This allows other clients to continue using the session
 					log.Printf("Client disconnected from session %s", conn.SessionID)
-					
+
 					// Notify this client about the disconnection
-					ws.WriteJSON(models.WebSocketMessage{
+					if wsErr := ws.WriteJSON(models.WebSocketMessage{
 						Type: "session_status",
 						Data: models.SessionStatusUpdate{
 							Status:  "disconnected",
 							Message: "You have been disconnected from the session.",
 						},
-					})
-					
+					}); wsErr != nil {
+						log.Printf("Failed to send disconnection message: %v", wsErr)
+					}
+
 					// Broadcast to other clients that this client left
 					eventData := map[string]interface{}{
-						"event": "client_disconnected",
+						"event":     "client_disconnected",
 						"client_id": ws.RemoteAddr().String(),
 						"timestamp": time.Now().Format(time.RFC3339),
 					}
-					jsonData, _ := json.Marshal(eventData)
+					jsonData, err := json.Marshal(eventData)
+					if err != nil {
+						log.Printf("Failed to marshal event data: %v", err)
+						return
+					}
 					go m.broadcastToSessionExcept(sessionID, ws, "session_event", string(jsonData))
-					
+
 					return
 				case "pause":
 					// Pause the session
 					conn.Lock.Lock()
-					if \!conn.IsPaused {
+					if !conn.IsPaused {
 						conn.IsPaused = true
 						conn.PausedAt = time.Now()
 						// Signal pause to the readers
 						conn.PauseChannels.Pause <- true
-						
+
 						// Prepare status update message
 						statusMsg := models.WebSocketMessage{
 							Type: "session_status",
@@ -1133,13 +1190,15 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 								Message: "Session paused by " + ws.RemoteAddr().String() + ". Terminal input/output is suspended.",
 							},
 						}
-						
+
 						// Send pause notification to this client
-						ws.WriteJSON(statusMsg)
-						
+						if err := ws.WriteJSON(statusMsg); err != nil {
+							log.Printf("Error writing to WebSocket: %v", err)
+						}
+
 						// Broadcast to all other clients
 						go m.broadcastToSessionExcept(sessionID, ws, "session_status", statusMsg.Data)
-						
+
 						log.Printf("Session %s paused by client %s", conn.SessionID, ws.RemoteAddr())
 					}
 					conn.Lock.Unlock()
@@ -1150,9 +1209,9 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 						conn.IsPaused = false
 						// Signal resume to the readers
 						conn.PauseChannels.Pause <- false
-						
+
 						pauseDuration := time.Since(conn.PausedAt).Seconds()
-						
+
 						// Prepare status update message
 						statusMsg := models.WebSocketMessage{
 							Type: "session_status",
@@ -1161,14 +1220,16 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 								Message: fmt.Sprintf("Session resumed by %s after %.1f seconds.", ws.RemoteAddr(), pauseDuration),
 							},
 						}
-						
+
 						// Send resume notification to this client
-						ws.WriteJSON(statusMsg)
-						
+						if err := ws.WriteJSON(statusMsg); err != nil {
+							log.Printf("Error writing to WebSocket: %v", err)
+						}
+
 						// Broadcast to all other clients
 						go m.broadcastToSessionExcept(sessionID, ws, "session_status", statusMsg.Data)
-						
-						log.Printf("Session %s resumed by client %s after %.2f seconds", 
+
+						log.Printf("Session %s resumed by client %s after %.2f seconds",
 							conn.SessionID, ws.RemoteAddr(), pauseDuration)
 					}
 					conn.Lock.Unlock()
@@ -1177,34 +1238,34 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 		}
 	}()
 
-	// Read from SSH stdout/stderr and write to WebSocket with memory optimization
+	// Read from SSH stdout/stderr and write to WebSocket with optimized memory management
 	go func() {
 		defer func() { done <- struct{}{} }()
-		
+
 		// Use adaptive buffer size based on terminal activity
 		const minBufferSize = 1024
 		const maxBufferSize = 16384
 		bufferSize := minBufferSize
-		buffer := make([]byte, bufferSize)
-		
-		// Memory monitoring variables
-		var totalBytesRead int64
+		var buffer = make([]byte, bufferSize)
+
+		// Memory monitoring variables with atomic operations for thread safety
+		var totalBytesRead atomic.Int64
 		lastResetTime := time.Now()
 		const memoryResetInterval = 5 * time.Minute
 		const memoryThreshold = 50 * 1024 * 1024 // 50MB threshold before more aggressive cleanup
-		
+
 		isPaused := false
-		
+
 		for {
 			// Check for pause/resume signals with timeout
 			select {
 			case pauseState, ok := <-conn.PauseChannels.Pause:
-				if \!ok {
+				if !ok {
 					// Channel closed, terminal session ending
 					return
 				}
 				isPaused = pauseState
-				
+
 				// Send confirmation with timeout
 				select {
 				case conn.PauseChannels.IsPaused <- isPaused:
@@ -1213,7 +1274,7 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 					// Timeout, no one is listening for confirmation
 					log.Printf("Warning: Pause confirmation timed out for session %s", conn.SessionID)
 				}
-				
+
 				if isPaused {
 					log.Printf("stdout reader paused for session %s", conn.SessionID)
 				} else {
@@ -1223,59 +1284,76 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 			default:
 				// Continue with normal operation
 			}
-			
+
 			// If paused, wait for resume signal
 			if isPaused {
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
-			
+
 			// Memory management - check if we need to reset counters
 			if time.Since(lastResetTime) > memoryResetInterval {
+				// Obtener valor usando operación atómica para evitar race conditions
+				totalBytes := totalBytesRead.Load()
+
 				// Log memory stats before reset
-				log.Printf("Memory stats for session %s: %d bytes read since last reset", 
-					conn.SessionID, totalBytesRead)
-				
+				log.Printf("Memory stats for session %s: %d bytes read since last reset",
+					conn.SessionID, totalBytes)
+
 				// Update session memory stats
 				conn.Lock.Lock()
-				conn.MemStats.OutputBufferSize = totalBytesRead
+				conn.MemStats.OutputBufferSize = totalBytes
 				conn.MemStats.LastBufferReset = time.Now()
 				conn.Lock.Unlock()
-				
-				// Reset counters
-				totalBytesRead = 0
+
+				// Reset counters de forma atómica
+				totalBytesRead.Store(0)
 				lastResetTime = time.Now()
-				
+
 				// Force garbage collection if we've processed a lot of data
-				if totalBytesRead > memoryThreshold {
+				if totalBytes > memoryThreshold {
 					runtime.GC()
 				}
-				
-				// Reset buffer size based on activity
+
+				// Optimizar buffer según actividad reciente
+				newBufferSize := bufferSize
 				if conn.MemStats.OutputBufferSize > 10*maxBufferSize {
 					// High activity terminal - use larger buffer
-					bufferSize = maxBufferSize
+					newBufferSize = maxBufferSize
 				} else if conn.MemStats.OutputBufferSize < minBufferSize {
 					// Low activity terminal - use smaller buffer
-					bufferSize = minBufferSize
+					newBufferSize = minBufferSize
 				} else {
 					// Adaptive sizing based on recent output volume
-					bufferSize = int(conn.MemStats.OutputBufferSize / 8)
-					if bufferSize < minBufferSize {
-						bufferSize = minBufferSize
-					} else if bufferSize > maxBufferSize {
-						bufferSize = maxBufferSize
+					adaptiveSize := int(conn.MemStats.OutputBufferSize / 8)
+					if adaptiveSize < minBufferSize {
+						adaptiveSize = minBufferSize
+					} else if adaptiveSize > maxBufferSize {
+						adaptiveSize = maxBufferSize
+					}
+					newBufferSize = adaptiveSize
+				}
+
+				// Solo recrear el buffer si hay un cambio significativo de tamaño
+				if newBufferSize != bufferSize {
+					bufferSize = newBufferSize
+					// Recreate buffer with optimal size
+					buffer = make([]byte, bufferSize)
+
+					// Trigger garbage collection para liberar memoria antigua
+					if totalBytes > memoryThreshold/2 {
+						go func() {
+							time.Sleep(100 * time.Millisecond)
+							runtime.GC()
+						}()
 					}
 				}
-				
-				// Recreate buffer with optimal size
-				buffer = make([]byte, bufferSize)
 			}
-			
+
 			// Read from stdout with context timeout for safety
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			readCh := make(chan readResult, 1)
-			
+
 			go func() {
 				n, err := conn.Stdout.Read(buffer)
 				select {
@@ -1285,10 +1363,10 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 					// Read canceled
 				}
 			}()
-			
+
 			var n int
 			var err error
-			
+
 			select {
 			case <-ctx.Done():
 				// Read timed out
@@ -1298,22 +1376,32 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 				n, err = result.n, result.err
 				cancel()
 			}
-			
-			if err \!= nil {
-				if err \!= io.EOF {
+
+			if err != nil {
+				if err != io.EOF {
 					log.Printf("Failed to read from SSH stdout: %v", err)
 				}
 				return
 			}
-			
-			// Update memory tracking
-			totalBytesRead += int64(n)
-			
+
+			// Update memory tracking utilizando operación atómica
+			totalBytesRead.Add(int64(n))
+
 			// For very large outputs, log for monitoring
 			if n > 8192 {
 				log.Printf("Large output (%d bytes) detected for session %s", n, conn.SessionID)
 			}
-			
+
+			// Enviar con manejo de deadlines para evitar bloqueos en clientes lentos
+			m.wsWriteMutex.Lock()
+			// Establecer un deadline para evitar bloqueos indefinidos
+			deadline := time.Now().Add(3 * time.Second)
+			if err := ws.SetWriteDeadline(deadline); err != nil {
+				m.wsWriteMutex.Unlock()
+				log.Printf("Failed to set write deadline: %v", err)
+				return
+			}
+
 			// Send to WebSocket
 			err = ws.WriteJSON(models.WebSocketMessage{
 				Type: "terminal_output",
@@ -1321,7 +1409,13 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 					Data: string(buffer[:n]),
 				},
 			})
-			if err \!= nil {
+
+			// Restablecer el deadline para operaciones futuras
+			if resetErr := ws.SetWriteDeadline(time.Time{}); resetErr != nil {
+				log.Printf("Failed to reset write deadline: %v", resetErr)
+			}
+			m.wsWriteMutex.Unlock()
+			if err != nil {
 				log.Printf("Failed to write to WebSocket: %v", err)
 				return
 			}
@@ -1331,30 +1425,30 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 	// Read from SSH stderr and write to WebSocket with memory optimization
 	go func() {
 		defer func() { done <- struct{}{} }()
-		
+
 		// Use adaptive buffer size based on terminal activity
 		const minBufferSize = 1024
-		const maxBufferSize = 8192  // Smaller max for stderr since it's usually less data
+		const maxBufferSize = 8192 // Smaller max for stderr since it's usually less data
 		bufferSize := minBufferSize
 		buffer := make([]byte, bufferSize)
-		
+
 		// Memory monitoring variables
 		var totalBytesRead int64
 		lastResetTime := time.Now()
 		const memoryResetInterval = 5 * time.Minute
-		
+
 		isPaused := false
-		
+
 		for {
 			// Check for pause/resume signals with timeout
 			select {
 			case pauseState, ok := <-conn.PauseChannels.Pause:
-				if \!ok {
+				if !ok {
 					// Channel closed, terminal session ending
 					return
 				}
 				isPaused = pauseState
-				
+
 				// Send confirmation with timeout
 				select {
 				case conn.PauseChannels.IsPaused <- isPaused:
@@ -1363,7 +1457,7 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 					// Timeout, no one is listening for confirmation
 					log.Printf("Warning: Stderr pause confirmation timed out for session %s", conn.SessionID)
 				}
-				
+
 				if isPaused {
 					log.Printf("stderr reader paused for session %s", conn.SessionID)
 				} else {
@@ -1373,45 +1467,45 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 			default:
 				// Continue with normal operation
 			}
-			
+
 			// If paused, wait for resume signal
 			if isPaused {
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
-			
+
 			// Memory management - check if we need to reset counters
 			if time.Since(lastResetTime) > memoryResetInterval {
 				// Log memory stats before reset (only if significant data processed)
 				if totalBytesRead > 1024 {
-					log.Printf("Stderr memory stats for session %s: %d bytes read since last reset", 
+					log.Printf("Stderr memory stats for session %s: %d bytes read since last reset",
 						conn.SessionID, totalBytesRead)
 				}
-				
+
 				// Reset counters
 				totalBytesRead = 0
 				lastResetTime = time.Now()
-				
+
 				// Adjust buffer size if needed (err normally needs smaller buffers)
 				if totalBytesRead > 5*maxBufferSize {
 					bufferSize = maxBufferSize
 				} else {
 					bufferSize = minBufferSize
 				}
-				
+
 				// Recreate buffer with optimal size
 				buffer = make([]byte, bufferSize)
 			}
 
 			// Read from stderr
 			n, err := conn.Stderr.Read(buffer)
-			if err \!= nil {
-				if err \!= io.EOF {
+			if err != nil {
+				if err != io.EOF {
 					log.Printf("Failed to read from SSH stderr: %v", err)
 				}
 				return
 			}
-			
+
 			// Update memory tracking
 			totalBytesRead += int64(n)
 
@@ -1422,7 +1516,7 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 					Data: string(buffer[:n]),
 				},
 			})
-			if err \!= nil {
+			if err != nil {
 				log.Printf("Failed to write to WebSocket: %v", err)
 				return
 			}
@@ -1442,16 +1536,16 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 			select {
 			case <-ticker.C:
 				// Send ping message
-				if err := ws.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(time.Second)); err \!= nil {
+				if err := ws.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(time.Second)); err != nil {
 					log.Printf("Failed to send ping: %v", err)
 					return
 				}
-				
+
 				// Log ping stats occasionally to detect WebSocket connection issues
 				pingCounter++
 				if pingCounter >= 60 { // Log stats every ~60 pings
 					timeSinceLastPing := time.Since(lastPingSentAt)
-					log.Printf("WebSocket connection stats for session %s: sent %d pings over %v", 
+					log.Printf("WebSocket connection stats for session %s: sent %d pings over %v",
 						sessionID, pingCounter, timeSinceLastPing)
 					pingCounter = 0
 					lastPingSentAt = time.Now()
@@ -1464,10 +1558,10 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 
 	// Wait for done signal
 	<-done
-	
+
 	// Unregister this WebSocket connection
 	m.unregisterWebSocketClient(sessionID, ws)
-	
+
 	// Clean up - the session might have been terminated on purpose
 	m.sessionMutex.Lock()
 	if _, exists := m.sessions[sessionID]; exists {
@@ -1482,11 +1576,11 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 func (m *SSHManager) registerWebSocketClient(sessionID string, ws *websocket.Conn) {
 	m.wsClientsMutex.Lock()
 	defer m.wsClientsMutex.Unlock()
-	
+
 	// Add this connection to the list for this session
 	m.wsClients[sessionID] = append(m.wsClients[sessionID], ws)
-	
-	log.Printf("WebSocket client registered for session %s, total clients: %d", 
+
+	log.Printf("WebSocket client registered for session %s, total clients: %d",
 		sessionID, len(m.wsClients[sessionID]))
 }
 
@@ -1494,19 +1588,19 @@ func (m *SSHManager) registerWebSocketClient(sessionID string, ws *websocket.Con
 func (m *SSHManager) unregisterWebSocketClient(sessionID string, ws *websocket.Conn) {
 	m.wsClientsMutex.Lock()
 	defer m.wsClientsMutex.Unlock()
-	
+
 	clients := m.wsClients[sessionID]
 	for i, client := range clients {
 		if client == ws {
 			// Remove this client by swapping with the last element and truncating the slice
 			clients[i] = clients[len(clients)-1]
 			m.wsClients[sessionID] = clients[:len(clients)-1]
-			log.Printf("WebSocket client unregistered from session %s, remaining clients: %d", 
+			log.Printf("WebSocket client unregistered from session %s, remaining clients: %d",
 				sessionID, len(m.wsClients[sessionID]))
 			break
 		}
 	}
-	
+
 	// If no more clients for this session, clean up the map entry
 	if len(m.wsClients[sessionID]) == 0 {
 		delete(m.wsClients, sessionID)
@@ -1519,21 +1613,21 @@ func (m *SSHManager) broadcastToSessionExcept(sessionID string, except *websocke
 	m.wsClientsMutex.RLock()
 	clients := m.wsClients[sessionID]
 	m.wsClientsMutex.RUnlock()
-	
+
 	if len(clients) == 0 {
 		return // No clients connected for this session
 	}
-	
+
 	message := models.WebSocketMessage{
 		Type: msgType,
 		Data: msgData,
 	}
-	
+
 	// Send to all clients except the excluded one
 	for _, client := range clients {
-		if client \!= except {
+		if client != except {
 			err := client.WriteJSON(message)
-			if err \!= nil {
+			if err != nil {
 				log.Printf("Failed to send message to WebSocket client: %v", err)
 				// Note: We don't unregister here as the client might still be active
 				// The unregister will happen when the read loop detects the error
@@ -1546,20 +1640,20 @@ func (m *SSHManager) broadcastToSession(sessionID string, msgType string, msgDat
 	m.wsClientsMutex.RLock()
 	clients := m.wsClients[sessionID]
 	m.wsClientsMutex.RUnlock()
-	
+
 	if len(clients) == 0 {
 		return // No clients connected for this session
 	}
-	
+
 	message := models.WebSocketMessage{
 		Type: msgType,
 		Data: msgData,
 	}
-	
+
 	// Send to all clients
 	for _, client := range clients {
 		err := client.WriteJSON(message)
-		if err \!= nil {
+		if err != nil {
 			log.Printf("Failed to send message to WebSocket client: %v", err)
 			// Note: We don't unregister here as the client might still be active
 			// The unregister will happen when the read loop detects the error
@@ -1574,52 +1668,52 @@ func (m *SSHManager) SessionEventHandler(sessionID string, eventType string, dat
 	_, exists := m.sessions[sessionID]
 	m.sessionMutex.RUnlock()
 
-	if \!exists {
+	if !exists {
 		return errors.New("session not found")
 	}
 
 	// Parsear los datos fuera de cualquier lock para minimizar el tiempo de bloqueo
 	var msgData interface{}
-	
+
 	switch eventType {
 	case "context_update":
 		// Parse the data as a context update
 		var update models.ContextUpdate
-		if err := json.Unmarshal([]byte(data), &update); err \!= nil {
+		if err := json.Unmarshal([]byte(data), &update); err != nil {
 			log.Printf("Failed to parse context update data: %v", err)
 			return err
 		}
 		msgData = update
-		
+
 	case "suggestion_available":
 		// Parse the data as a suggestion notification
 		var suggestion models.SuggestionAvailable
-		if err := json.Unmarshal([]byte(data), &suggestion); err \!= nil {
+		if err := json.Unmarshal([]byte(data), &suggestion); err != nil {
 			log.Printf("Failed to parse suggestion data: %v", err)
 			return err
 		}
 		msgData = suggestion
-		
+
 	case "session_status":
 		// Parse the data as a status update
 		var status models.SessionStatusUpdate
-		if err := json.Unmarshal([]byte(data), &status); err \!= nil {
+		if err := json.Unmarshal([]byte(data), &status); err != nil {
 			log.Printf("Failed to parse status update data: %v", err)
 			return err
 		}
 		msgData = status
-		
+
 	default:
 		// For other event types, use a generic map
 		var genericData map[string]interface{}
-		if err := json.Unmarshal([]byte(data), &genericData); err \!= nil {
+		if err := json.Unmarshal([]byte(data), &genericData); err != nil {
 			// If it's not valid JSON, just use the string as is
 			msgData = data
 		} else {
 			msgData = genericData
 		}
 	}
-	
+
 	// Obtener una copia segura de los clientes WebSocket para este sessionID
 	// Esto evita mantener un lock durante el envío de mensajes
 	m.wsClientsMutex.RLock()
@@ -1628,14 +1722,14 @@ func (m *SSHManager) SessionEventHandler(sessionID string, eventType string, dat
 	clientsCopy := make([]*websocket.Conn, len(clients))
 	copy(clientsCopy, clients)
 	m.wsClientsMutex.RUnlock()
-	
+
 	// Broadcast the event a todos los clientes (usando copia local) sin locks globales
 	if len(clientsCopy) > 0 {
 		message := models.WebSocketMessage{
 			Type: eventType,
 			Data: msgData,
 		}
-		
+
 		for _, client := range clientsCopy {
 			// Enviar mensajes de forma asíncrona para no bloquear si un cliente es lento
 			go func(c *websocket.Conn) {
@@ -1646,7 +1740,7 @@ func (m *SSHManager) SessionEventHandler(sessionID string, eventType string, dat
 			}(client)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -1656,7 +1750,7 @@ func (m *SSHManager) ExecuteCommand(sessionID string, command string, isSuggeste
 	conn, exists := m.sessions[sessionID]
 	m.sessionMutex.RUnlock()
 
-	if \!exists {
+	if !exists {
 		return nil, errors.New("session not found")
 	}
 
@@ -1666,22 +1760,22 @@ func (m *SSHManager) ExecuteCommand(sessionID string, command string, isSuggeste
 	// Notify clients about starting the command
 	if isSuggested {
 		jsonData, _ := json.Marshal(map[string]interface{}{
-			"command":     command,
+			"command":      command,
 			"is_suggested": true,
-			"status":      "starting",
+			"status":       "starting",
 		})
 		m.SessionEventHandler(sessionID, "command_starting", string(jsonData))
 	}
-	
+
 	// Execute command by writing to stdin
 	_, err := conn.Stdin.Write([]byte(command + "\n"))
-	if err \!= nil {
+	if err != nil {
 		return nil, fmt.Errorf("failed to write command: %w", err)
 	}
 
 	// Calculate duration
 	duration := time.Since(startTime)
-	
+
 	// Create a command result
 	result := &models.CommandResult{
 		Command:    command,
@@ -1703,7 +1797,7 @@ func (m *SSHManager) ExecuteCommand(sessionID string, command string, isSuggeste
 				suggestionID = suggestion[0].ID
 			}
 		}
-		
+
 		err := m.sessionClient.SaveCommand(
 			sessionID,
 			conn.UserID,
@@ -1712,24 +1806,28 @@ func (m *SSHManager) ExecuteCommand(sessionID string, command string, isSuggeste
 			0,  // We don't know exit code
 			"", // We don't know working directory
 			int(duration.Milliseconds()),
-			conn.TargetHost,       // Hostname
-			conn.Username,         // Username
-			isSuggested,           // From parameter
-			suggestionID,          // Suggestion ID
+			conn.TargetHost, // Hostname
+			conn.Username,   // Username
+			isSuggested,     // From parameter
+			suggestionID,    // Suggestion ID
 		)
-		if err \!= nil {
+		if err != nil {
 			log.Printf("Failed to save command to session service: %v", err)
 		}
-		
+
 		// Notify clients about the command execution
 		eventData := map[string]interface{}{
-			"command": command,
-			"duration_ms": int(duration.Milliseconds()),
+			"command":      command,
+			"duration_ms":  int(duration.Milliseconds()),
 			"is_suggested": isSuggested,
-			"timestamp": time.Now().Format(time.RFC3339),
+			"timestamp":    time.Now().Format(time.RFC3339),
 		}
-		
-		jsonData, _ := json.Marshal(eventData)
+
+		jsonData, err := json.Marshal(eventData)
+		if err != nil {
+			log.Printf("Failed to marshal event data: %v", err)
+			return
+		}
 		m.SessionEventHandler(sessionID, "command_executed", string(jsonData))
 	}()
 
@@ -1738,22 +1836,22 @@ func (m *SSHManager) ExecuteCommand(sessionID string, command string, isSuggeste
 
 // CommandAnalysis contains information about a command for analysis
 type CommandAnalysis struct {
-	Command    string
-	ID         string
-	SessionID  string
+	Command     string
+	ID          string
+	SessionID   string
 	IsSuggested bool
 }
 
 // executeSuggestionCommand executes a suggested command with proper tracking and analysis
 func (m *SSHManager) executeSuggestionCommand(sessionID string, suggestion struct {
-	ID string
+	ID      string
 	Command string
 }) (*models.CommandResult, error) {
 	m.sessionMutex.RLock()
 	conn, exists := m.sessions[sessionID]
 	m.sessionMutex.RUnlock()
 
-	if \!exists {
+	if !exists {
 		return nil, errors.New("session not found")
 	}
 
@@ -1779,13 +1877,13 @@ func (m *SSHManager) executeSuggestionCommand(sessionID string, suggestion struc
 		"timestamp":     startTime.Format(time.RFC3339),
 	})
 	m.SessionEventHandler(sessionID, "command_starting", string(jsonData))
-	
+
 	// Execute command by writing to stdin
 	_, err := conn.Stdin.Write([]byte(suggestion.Command + "\n"))
-	if err \!= nil {
+	if err != nil {
 		// Log the error
 		log.Printf("Failed to execute suggested command: %v", err)
-		
+
 		// Create failure event
 		failureData, _ := json.Marshal(map[string]interface{}{
 			"command":       suggestion.Command,
@@ -1796,13 +1894,13 @@ func (m *SSHManager) executeSuggestionCommand(sessionID string, suggestion struc
 			"timestamp":     time.Now().Format(time.RFC3339),
 		})
 		m.SessionEventHandler(sessionID, "command_failed", string(failureData))
-		
+
 		return nil, fmt.Errorf("failed to write command: %w", err)
 	}
 
 	// Calculate duration
 	duration := time.Since(startTime)
-	
+
 	// Schedule command analysis
 	go m.analyzeCommand(CommandAnalysis{
 		Command:     suggestion.Command,
@@ -1810,7 +1908,7 @@ func (m *SSHManager) executeSuggestionCommand(sessionID string, suggestion struc
 		SessionID:   sessionID,
 		IsSuggested: true,
 	})
-	
+
 	// Create a command result
 	result := &models.CommandResult{
 		Command:      suggestion.Command,
@@ -1835,15 +1933,15 @@ func (m *SSHManager) executeSuggestionCommand(sessionID string, suggestion struc
 			0,  // We don't know exit code
 			"", // We don't know working directory
 			int(duration.Milliseconds()),
-			conn.TargetHost,       // Hostname
-			conn.Username,         // Username
-			true,                  // Is suggested
-			suggestion.ID,         // Suggestion ID from parameter
+			conn.TargetHost, // Hostname
+			conn.Username,   // Username
+			true,            // Is suggested
+			suggestion.ID,   // Suggestion ID from parameter
 		)
-		if err \!= nil {
+		if err != nil {
 			log.Printf("Failed to save command to session service: %v", err)
 		}
-		
+
 		// Notify clients about the command execution
 		eventData := map[string]interface{}{
 			"command":       suggestion.Command,
@@ -1853,8 +1951,12 @@ func (m *SSHManager) executeSuggestionCommand(sessionID string, suggestion struc
 			"timestamp":     time.Now().Format(time.RFC3339),
 			"metadata":      metadata,
 		}
-		
-		jsonData, _ := json.Marshal(eventData)
+
+		jsonData, err := json.Marshal(eventData)
+		if err != nil {
+			log.Printf("Failed to marshal event data: %v", err)
+			return
+		}
 		m.SessionEventHandler(sessionID, "command_executed", string(jsonData))
 	}()
 
@@ -1867,281 +1969,30 @@ func (m *SSHManager) analyzeCommand(cmdInfo CommandAnalysis) {
 	if m.sessionClient == nil {
 		return
 	}
-	
+
 	// Wait a short delay to allow output to be processed
 	time.Sleep(500 * time.Millisecond)
-	
+
 	// Here we would typically call the context aggregator to analyze the command
 	// For now, we'll just log that we would do this
-	log.Printf("Analyzing command: %s (ID: %s, Suggested: %v)", 
+	log.Printf("Analyzing command: %s (ID: %s, Suggested: %v)",
 		cmdInfo.Command, cmdInfo.ID, cmdInfo.IsSuggested)
-		
+
 	// In a complete implementation, we would call an endpoint like:
 	// POST /api/v1/context-aggregator/analyze-command
 	// with details about the command, its output, and context
-	
+
 	// You could implement a more sophisticated version that:
 	// 1. Retrieves recent output from the session service
 	// 2. Sends it to the context aggregator for analysis
 	// 3. Updates the command record with analysis results
 }
 
-// toggleQueryMode toggles between normal and query mode
-func (m *SSHManager) toggleQueryMode(sessionID string, ws *websocket.Conn, conn *models.SSHConnection) {
-	conn.Lock.Lock()
-	currentlyInQueryMode := conn.IsInQueryMode
-	activeAreaID := conn.ActiveAreaID
-	conn.Lock.Unlock()
-
-	if currentlyInQueryMode {
-		// Currently in query mode, switch back to normal
-		m.disableQueryMode(sessionID, ws, conn)
-	} else {
-		// Currently in normal mode, switch to query
-		// If no active area is set, we need to ask the user to select one
-		if activeAreaID == "" {
-			// Send a message asking the user to select an area
-			ws.WriteJSON(models.WebSocketMessage{
-				Type: "mode_change_request",
-				Data: map[string]interface{}{
-					"message": "Please select a knowledge area for query mode",
-					"required": true,
-				},
-			})
-			return
-		}
-		
-		// If we have an active area, enable query mode
-		m.enableQueryMode(sessionID, ws, conn, activeAreaID)
+// getAreaInfo obtiene información sobre un área de conocimiento, delegando al session client
+func (m *SSHManager) getAreaInfo(areaID string) (struct{ Name string }, error) {
+	if m.sessionClient == nil {
+		return struct{ Name string }{Name: areaID}, fmt.Errorf("session client not initialized")
 	}
+	areaInfo, err := m.sessionClient.GetAreaInfo(areaID)
+	return areaInfo, err
 }
-
-// enableQueryMode switches the terminal to RAG query mode
-func (m *SSHManager) enableQueryMode(sessionID string, ws *websocket.Conn, conn *models.SSHConnection, areaID string) {
-	// Update the session state
-	conn.Lock.Lock()
-	previousMode := "normal"
-	if conn.IsInQueryMode {
-		previousMode = "query"
-	}
-	conn.IsInQueryMode = true
-	conn.ActiveAreaID = areaID
-	conn.Lock.Unlock()
-
-	// Update the session in the session service
-	err := m.sessionClient.UpdateSessionMode(sessionID, string(models.SessionModeQuery), areaID)
-	if err != nil {
-		log.Printf("Failed to update session mode in session service: %v", err)
-	}
-
-	// Send a notification about the mode change
-	ws.WriteJSON(models.WebSocketMessage{
-		Type: "mode_changed",
-		Data: models.ModeChange{
-			PreviousMode: previousMode,
-			NewMode:      string(models.SessionModeQuery),
-			AreaID:       areaID,
-		},
-	})
-
-	// Broadcast to other clients on this session
-	go m.broadcastToSessionExcept(sessionID, ws, "mode_changed", models.ModeChange{
-		PreviousMode: previousMode,
-		NewMode:      string(models.SessionModeQuery),
-		AreaID:       areaID,
-	})
-
-	// Send visual indicator to the terminal
-	promptMsg := "\r\n\033[1;32m>>> Query Mode Activated <<<\033[0m\r\n"
-	promptMsg += fmt.Sprintf("\033[1;34mKnowledge Area: %s\033[0m\r\n", areaID)
-	promptMsg += "Type your questions directly, or press Ctrl+Alt+Q to exit query mode\r\n\r\n> "
-	
-	// Send the message to the client
-	ws.WriteJSON(models.WebSocketMessage{
-		Type: "terminal_output",
-		Data: models.TerminalOutput{
-			Data: promptMsg,
-		},
-	})
-}
-
-// disableQueryMode switches the terminal back to normal mode
-func (m *SSHManager) disableQueryMode(sessionID string, ws *websocket.Conn, conn *models.SSHConnection) {
-	// Update the session state
-	conn.Lock.Lock()
-	previousMode := "query"
-	if !conn.IsInQueryMode {
-		previousMode = "normal"
-	}
-	activeAreaID := conn.ActiveAreaID
-	conn.IsInQueryMode = false
-	conn.Lock.Unlock()
-
-	// Update the session in the session service
-	err := m.sessionClient.UpdateSessionMode(sessionID, string(models.SessionModeNormal), "")
-	if err != nil {
-		log.Printf("Failed to update session mode in session service: %v", err)
-	}
-
-	// Send a notification about the mode change
-	ws.WriteJSON(models.WebSocketMessage{
-		Type: "mode_changed",
-		Data: models.ModeChange{
-			PreviousMode: previousMode,
-			NewMode:      string(models.SessionModeNormal),
-			AreaID:       activeAreaID,
-		},
-	})
-
-	// Broadcast to other clients on this session
-	go m.broadcastToSessionExcept(sessionID, ws, "mode_changed", models.ModeChange{
-		PreviousMode: previousMode,
-		NewMode:      string(models.SessionModeNormal),
-		AreaID:       activeAreaID,
-	})
-
-	// Send visual indicator to the terminal
-	promptMsg := "\r\n\033[1;33m<<< Exited Query Mode >>>\033[0m\r\n"
-	promptMsg += "Returned to normal terminal mode\r\n\r\n"
-	
-	// Send the message to the client
-	ws.WriteJSON(models.WebSocketMessage{
-		Type: "terminal_output",
-		Data: models.TerminalOutput{
-			Data: promptMsg,
-		},
-	})
-}
-
-// getTerminalContext retrieves context information for a terminal session
-func (m *SSHManager) getTerminalContext(sessionID string) (map[string]interface{}, error) {
-	// Use session client to get the stored context for this session
-	context, err := m.sessionClient.GetSessionContext(sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get session context: %w", err)
-	}
-	
-	// Crear una copia local del contexto para evitar modificaciones concurrentes
-	// al mapa original que podrían causar race conditions
-	contextCopy := make(map[string]interface{})
-	for k, v := range context {
-		contextCopy[k] = v
-	}
-	
-	// Get additional context from the SSH connection if available
-	m.sessionMutex.RLock()
-	conn, exists := m.sessions[sessionID]
-	m.sessionMutex.RUnlock()
-	
-	if exists {
-		// Add any runtime information from the SSH connection that isn't already in the persisted context
-		// Obtener un lock único para el campo CommandHistory que evite bloqueos prolongados
-		conn.Lock.RLock() // Usar RLock para lectura concurrente
-		
-		// Copiar datos relevantes con protección de concurrencia
-		var currentDir, hostname, username string
-		var commandHistoryCopy []string
-		
-		// Capturar datos relevantes
-		currentDir = conn.CurrentDirectory
-		hostname = conn.Hostname
-		username = conn.Username
-		
-		// Crear una copia segura del historial de comandos
-		if len(conn.CommandHistory) > 0 {
-			commandHistoryCopy = make([]string, len(conn.CommandHistory))
-			copy(commandHistoryCopy, conn.CommandHistory)
-		}
-		
-		// Liberar el lock lo antes posible
-		conn.Lock.RUnlock()
-		
-		// Ahora trabajar con las copias locales seguras
-		if currentDir != "" && contextCopy["working_directory"] == nil {
-			contextCopy["working_directory"] = currentDir
-		}
-		
-		if hostname != "" && contextCopy["hostname"] == nil {
-			contextCopy["hostname"] = hostname
-		}
-		
-		if username != "" && contextCopy["username"] == nil {
-			contextCopy["username"] = username
-		}
-		
-		// Add command history for context if not already present and we have history
-		if contextCopy["recent_commands"] == nil && len(commandHistoryCopy) > 0 {
-			// Get the last 10 commands or whatever is available
-			historyLen := len(commandHistoryCopy)
-			startIdx := 0
-			if historyLen > 10 {
-				startIdx = historyLen - 10
-			}
-			contextCopy["recent_commands"] = commandHistoryCopy[startIdx:]
-		}
-	}
-	
-	return contextCopy, nil
-}
-
-// handleRagQuery processes a RAG query and sends the response back to the client
-func (m *SSHManager) handleRagQuery(sessionID string, userID string, query string, areaID string, ws *websocket.Conn) {
-	// Send a "thinking" indicator to the client
-	ws.WriteJSON(models.WebSocketMessage{
-		Type: "terminal_output",
-		Data: models.TerminalOutput{
-			Data: "\033[3m\033[90mProcessing query...\033[0m\r\n",
-		},
-	})
-
-	// Get terminal context if needed
-	terminalContext, err := m.getTerminalContext(sessionID)
-	if err != nil {
-		log.Printf("Failed to get terminal context: %v", err)
-		// Continue without context
-		terminalContext = make(map[string]interface{})
-	}
-
-	// Call the RAG Agent via the session client
-	response, err := m.sessionClient.ProcessRagQuery(query, userID, areaID, terminalContext)
-	if err != nil {
-		log.Printf("Failed to process RAG query: %v", err)
-		// Send error message to the client
-		ws.WriteJSON(models.WebSocketMessage{
-			Type: "terminal_output",
-			Data: models.TerminalOutput{
-				Data: fmt.Sprintf("\r\n\033[1;31mError processing query: %v\033[0m\r\n> ", err),
-			},
-		})
-		return
-	}
-
-	// Format the response
-	formattedResponse := "\r\n\033[1;36m" + response.Answer + "\033[0m\r\n"
-	
-	// Add sources if available
-	if len(response.Sources) > 0 {
-		formattedResponse += "\r\n\033[1;33mSources:\033[0m\r\n"
-		for i, source := range response.Sources {
-			formattedResponse += fmt.Sprintf("\033[1m%d.\033[0m %s\r\n", i+1, source.Title)
-		}
-	}
-	
-	formattedResponse += "\r\n> "
-
-	// Send the response to the client
-	ws.WriteJSON(models.WebSocketMessage{
-		Type: "terminal_output",
-		Data: models.TerminalOutput{
-			Data: formattedResponse,
-		},
-	})
-	
-	// Also send the structured response for the UI to handle
-	ws.WriteJSON(models.WebSocketMessage{
-		Type: "rag_response",
-		Data: response,
-	})
-}
-
-// Esta función ha sido reemplazada por la implementación más completa de getTerminalContext en la línea 1964

@@ -2,10 +2,17 @@ package services
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
+	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"terminal-gateway-service/models"
@@ -66,9 +73,12 @@ func (c *SessionClient) WithRetryConfig(config RetryConfig) *SessionClient {
 	return c
 }
 
-// doWithRetry performs an HTTP request with retry logic
 // doWithRetry performs an HTTP request with retry logic and circuit breaker pattern
 func (c *SessionClient) doWithRetry(req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("request cannot be nil")
+	}
+
 	// Get the circuit breaker for this service (create if doesn't exist)
 	breaker := getCircuitBreaker(c.baseURL)
 	
@@ -81,15 +91,17 @@ func (c *SessionClient) doWithRetry(req *http.Request) (*http.Response, error) {
 		
 		for attempt := 0; attempt <= c.retryConfig.MaxRetries; attempt++ {
 			// Create request context with timeout
-			ctx, cancel := context.WithTimeout(req.Context(), c.httpClient.Timeout)
+			ctx, cancel := context.WithTimeout(context.Background(), c.httpClient.Timeout)
 			reqWithCtx := req.Clone(ctx)
-			defer cancel()
 			
 			// Make the request
 			resp, err = c.httpClient.Do(reqWithCtx)
 			
+			// Always cancel the context after the request is done
+			cancel()
+			
 			// If successful or permanent error, return immediately
-			if err == nil && resp.StatusCode < 500 {
+			if err == nil && resp != nil && resp.StatusCode < 500 {
 				return resp, nil
 			}
 			
@@ -106,7 +118,7 @@ func (c *SessionClient) doWithRetry(req *http.Request) (*http.Response, error) {
 			}
 			
 			// If response exists but has an error status, log it
-			if err == nil && resp.StatusCode >= 500 {
+			if err == nil && resp != nil && resp.StatusCode >= 500 {
 				log.Printf("[%s] Request failed with status %d, retrying (%d/%d)...", 
 					shortenURL(c.baseURL), resp.StatusCode, attempt+1, c.retryConfig.MaxRetries)
 				resp.Body.Close() // Important: close the body to avoid leaks
@@ -129,7 +141,10 @@ func (c *SessionClient) doWithRetry(req *http.Request) (*http.Response, error) {
 			}
 		}
 		
-		// Should never reach here due to returns in the loop
+		// Should never reach here due to returns in the loop, but return empty values just in case
+		if resp == nil && err == nil {
+			err = fmt.Errorf("unexpected error: no response and no error after %d retries", c.retryConfig.MaxRetries)
+		}
 		return resp, err
 	})
 	
@@ -140,17 +155,32 @@ func (c *SessionClient) doWithRetry(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	
-	return result.(*http.Response), nil
+	// Safe type assertion
+	resp, ok := result.(*http.Response)
+	if !ok || resp == nil {
+		return nil, fmt.Errorf("invalid response type from circuit breaker")
+	}
+	
+	return resp, nil
 }
 
 // isTemporaryError checks if an error is temporary and should trigger circuit breaker
 func isTemporaryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	
 	// Check for network-related errors
 	if errors.Is(err, context.DeadlineExceeded) || 
-	   errors.Is(err, io.EOF) ||
-	   strings.Contains(err.Error(), "connection refused") ||
-	   strings.Contains(err.Error(), "no such host") ||
-	   strings.Contains(err.Error(), "i/o timeout") {
+	   errors.Is(err, io.EOF) {
+		return true
+	}
+	
+	// Check string patterns safely
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "connection refused") ||
+	   strings.Contains(errMsg, "no such host") ||
+	   strings.Contains(errMsg, "i/o timeout") {
 		return true
 	}
 	
@@ -861,4 +891,47 @@ func (c *SessionClient) ProcessRagQuery(query string, userID string, areaID stri
 	}
 
 	return &response, nil
+}
+
+// GetAreaInfo obtiene información sobre un área de conocimiento
+func (c *SessionClient) GetAreaInfo(areaID string) (struct { Name string }, error) {
+	url := fmt.Sprintf("%s/api/v1/areas/%s", c.baseURL, areaID)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return struct { Name string }{Name: areaID}, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
+
+	// Use retry logic
+	resp, err := c.doWithRetry(req)
+	if err != nil {
+		return struct { Name string }{Name: areaID}, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		if resp.StatusCode == http.StatusNotFound {
+			// Si no se encuentra el área, devolver el ID como nombre
+			return struct { Name string }{Name: areaID}, nil
+		}
+		
+		var errorResp struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err == nil && errorResp.Error != "" {
+			return struct { Name string }{Name: areaID}, fmt.Errorf("session service error: %s", errorResp.Error)
+		}
+		return struct { Name string }{Name: areaID}, fmt.Errorf("session service returned error: %s", resp.Status)
+	}
+
+	var area struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&area); err != nil {
+		return struct { Name string }{Name: areaID}, fmt.Errorf("failed to decode area info: %w", err)
+	}
+
+	return area, nil
 }
