@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"time"
 	"user-service/models"
 	"user-service/repositories"
@@ -99,10 +101,17 @@ func (s *UserService) RefreshToken(ctx context.Context, refreshTokenStr string) 
 			return nil, errors.New("tipo de token inválido")
 		}
 
-		// Obtener ID de usuario
-		userID, ok := claims["user_id"].(string)
-		if !ok {
-			return nil, errors.New("token inválido (sin user_id)")
+
+			// Obtener ID de usuario
+			userID, ok := claims["user_id"].(string)
+			if \!ok {
+				// Registrar información para facilitar depuración
+				actualType := fmt.Sprintf("%T", claims["user_id"])
+				actualValue := fmt.Sprintf("%v", claims["user_id"])
+				log.Printf("Error en token refresh: campo user_id con tipo incorrecto, tipo: %s, valor: %s", 
+					actualType, actualValue)
+				return nil, errors.New("token inválido: formato de user_id incorrecto")
+			}
 		}
 
 		// Buscar usuario
@@ -171,6 +180,25 @@ func (s *UserService) DeleteUser(ctx context.Context, id string) error {
 // UpdateUserPermissions actualiza los permisos de un usuario para un área
 func (s *UserService) UpdateUserPermissions(ctx context.Context, userID string, areaID string, permission models.Permission) error {
 	return s.repo.UpdateUserPermissions(ctx, userID, areaID, permission)
+}
+
+// SetAdminPassword establece la contraseña para el admin inicial
+func (s *UserService) SetAdminPassword(ctx context.Context, password string) error {
+	// Buscar usuario admin
+	user, err := s.repo.GetUserByUsername(ctx, "admin")
+	if err != nil {
+		return fmt.Errorf("error al buscar usuario admin: %w", err)
+	}
+	
+	// Generar hash de la contraseña
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("error al generar hash de contraseña: %w", err)
+	}
+	
+	// Actualizar contraseña
+	user.PasswordHash = string(hashedPassword)
+	return s.repo.UpdateUser(ctx, user)
 }
 
 // ChangePassword cambia la contraseña de un usuario

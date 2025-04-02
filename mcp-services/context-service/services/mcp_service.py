@@ -285,7 +285,10 @@ class MCPService:
 
         return active_contexts
 
-    def activate_context(self, context_id: str) -> Dict[str, Any]:
+    # Lock global para operaciones de activación/desactivación de contextos
+    _contexts_lock = asyncio.Lock()
+    
+    async def activate_context(self, context_id: str) -> Dict[str, Any]:
         """
         Activar un contexto MCP
         
@@ -296,30 +299,37 @@ class MCPService:
             Información de activación
         """
         try:
-            # Verificar si el contexto existe
-            context = self.server.get_context(context_id)
-            if not context:
-                logger.warning(f"Contexto MCP no encontrado: {context_id}")
-                raise HTTPException(status_code=404, detail=f"Contexto MCP no encontrado: {context_id}")
+            # Adquirir lock para evitar race conditions al modificar el estado de los contextos
+            async with self._contexts_lock:
+                # Verificar si el contexto existe
+                context = self.server.get_context(context_id)
+                if not context:
+                    logger.warning(f"Contexto MCP no encontrado: {context_id}")
+                    raise HTTPException(status_code=404, detail=f"Contexto MCP no encontrado: {context_id}")
 
-            # Activar contexto
-            context.active = True
+                # Activar contexto de forma thread-safe
+                context.active = True
 
-            logger.info(f"Contexto MCP activado: {context_id} - {context.name}")
+                logger.info(f"Contexto MCP activado: {context_id} - {context.name}")
 
-            return {
-                "id": context_id,
-                "name": context.name,
-                "active": True,
-                "status": "activated"
-            }
+                # Crear una copia segura de la información para devolver
+                result = {
+                    "id": context_id,
+                    "name": context.name,
+                    "active": True,
+                    "status": "activated"
+                }
+                
+            # Devolver el resultado fuera del lock
+            return result
+            
         except HTTPException:
             raise
         except Exception as e:
             logger.error(f"Error activando contexto MCP: {e}")
             raise HTTPException(status_code=500, detail=f"Error activando contexto MCP: {str(e)}")
 
-    def deactivate_context(self, context_id: str) -> Dict[str, Any]:
+    async def deactivate_context(self, context_id: str) -> Dict[str, Any]:
         """
         Desactivar un contexto MCP
         
@@ -330,23 +340,31 @@ class MCPService:
             Información de desactivación
         """
         try:
-            # Verificar si el contexto existe
-            context = self.server.get_context(context_id)
-            if not context:
-                logger.warning(f"Contexto MCP no encontrado: {context_id}")
-                raise HTTPException(status_code=404, detail=f"Contexto MCP no encontrado: {context_id}")
+            # Adquirir lock para evitar race conditions al modificar el estado de los contextos
+            # Usar el mismo lock que en activate_context para asegurar la exclusión mutua
+            async with self._contexts_lock:
+                # Verificar si el contexto existe
+                context = self.server.get_context(context_id)
+                if not context:
+                    logger.warning(f"Contexto MCP no encontrado: {context_id}")
+                    raise HTTPException(status_code=404, detail=f"Contexto MCP no encontrado: {context_id}")
 
-            # Desactivar contexto
-            context.active = False
+                # Desactivar contexto de forma thread-safe
+                context.active = False
 
-            logger.info(f"Contexto MCP desactivado: {context_id} - {context.name}")
+                logger.info(f"Contexto MCP desactivado: {context_id} - {context.name}")
 
-            return {
-                "id": context_id,
-                "name": context.name,
-                "active": False,
-                "status": "deactivated"
-            }
+                # Crear una copia segura de la información para devolver
+                result = {
+                    "id": context_id,
+                    "name": context.name,
+                    "active": False,
+                    "status": "deactivated"
+                }
+                
+            # Devolver el resultado fuera del lock
+            return result
+            
         except HTTPException:
             raise
         except Exception as e:

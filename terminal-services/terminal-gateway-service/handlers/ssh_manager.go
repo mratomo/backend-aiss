@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"encoding/base64"
-	"sync"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -447,14 +446,17 @@ func (m *SSHManager) GetSessions(userID, status string, limit, offset int) ([]*m
 
 // GetSession returns a session by ID
 func (m *SSHManager) GetSession(sessionID string) (*models.Session, error) {
+	// Mantener el lock durante toda la operación para evitar race conditions
 	m.sessionMutex.RLock()
+	defer m.sessionMutex.RUnlock()
+	
 	conn, exists := m.sessions[sessionID]
-	m.sessionMutex.RUnlock()
-
 	if \!exists {
 		return nil, errors.New("session not found")
 	}
 
+	// Crear una copia segura de los datos de la sesión mientras tenemos el lock
+	// para evitar race conditions por cambios concurrentes
 	session := &models.Session{
 		ID:           conn.SessionID,
 		UserID:       conn.UserID,
@@ -553,20 +555,44 @@ func (m *SSHManager) UpdateSession(sessionID string, params interface{}) error {
 
 // updateSessionStatus updates the status of a session
 func (m *SSHManager) updateSessionStatus(sessionID string, status models.SessionStatus) {
+	// Crear una copia de los datos de la sesión bajo el lock para evitar race conditions
+	var sessionCopy *models.SSHConnection
+	var exists bool
+	
 	m.sessionMutex.Lock()
-	if conn, exists := m.sessions[sessionID]; exists {
+	if conn, ok := m.sessions[sessionID]; ok {
+		exists = true
+		// Actualizar el estado en la memoria local
 		conn.Status = status
 		conn.LastActive = time.Now()
+		
+		// Crear una copia mínima de los datos necesarios para evitar
+		// mantener el lock durante operaciones externas (llamadas a la base de datos)
+		sessionCopy = &models.SSHConnection{
+			SessionID:   conn.SessionID,
+			UserID:      conn.UserID,
+			Status:      conn.Status,
+			TargetHost:  conn.TargetHost,
+			Username:    conn.Username,
+			LastActive:  conn.LastActive,
+		}
 	}
 	m.sessionMutex.Unlock()
 	
-	// Update status in session service as well
-	err := m.sessionClient.UpdateSessionStatus(sessionID, status)
-	if err \!= nil {
-		log.Printf("Failed to update session status in session service: %v", err)
+	// Si no existe la sesión, no hay nada más que hacer
+	if !exists {
+		return
 	}
 	
-	// Notify clients about the status change
+	// Actualizar en la base de datos fuera del lock para evitar retenciones
+	go func() {
+		err := m.sessionClient.UpdateSessionStatus(sessionID, status)
+		if err != nil {
+			log.Printf("Failed to update session status in session service: %v", err)
+		}
+	}()
+	
+	// Preparar la notificación de cambio de estado
 	var message string
 	switch status {
 	case models.SessionStatusConnecting:
@@ -586,8 +612,8 @@ func (m *SSHManager) updateSessionStatus(sessionID string, status models.Session
 		Message: message,
 	})
 	
-	// Broadcast the event to all clients
-	m.SessionEventHandler(sessionID, "session_status", string(statusData))
+	// Enviar la notificación en una goroutine separada para evitar bloqueos
+	go m.SessionEventHandler(sessionID, "session_status", string(statusData))
 }
 
 // updateSessionTargetInfo updates the target info of a session
@@ -823,40 +849,39 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 			conn.Lock.Unlock()
 
 			switch msg.Type {
-			case "terminal_input":
-					// Handle keyboard shortcut for query mode
-					var input models.TerminalInput
-					if data, ok := msg.Data.(map[string]interface{}); ok {
-						if inputData, ok := data["data"].(string); ok {
-							input.Data = inputData
-							
-							// Check if this is a keyboard shortcut (simplified implementation)
-							if isShortcutKey(input.Data, "ctrl+alt+q") {
-								m.toggleQueryMode(sessionID, ws, conn)
-								continue
-							}
-							
-							// Check if in query mode
-							conn.Lock.Lock()
-							isInQueryMode := conn.IsInQueryMode
-							activeAreaID := conn.ActiveAreaID
-							conn.Lock.Unlock()
-							
-							if isInQueryMode {
-								// Handle as a RAG query
-								go m.handleRagQuery(sessionID, conn.UserID, input.Data, activeAreaID, ws)
-								continue
+				case "terminal_input":
+						// Handle keyboard shortcut for query mode
+						var input models.TerminalInput
+						if data, ok := msg.Data.(map[string]interface{}); ok {
+							if inputData, ok := data["data"].(string); ok {
+								input.Data = inputData
+								
+								// Check if this is a keyboard shortcut (simplified implementation)
+								if isShortcutKey(input.Data, "ctrl+alt+q") {
+									m.toggleQueryMode(sessionID, ws, conn)
+									continue
+								}
+								
+								// Check if in query mode
+								conn.Lock.Lock()
+								isInQueryMode := conn.IsInQueryMode
+								activeAreaID := conn.ActiveAreaID
+								conn.Lock.Unlock()
+								
+								if isInQueryMode {
+									// Handle as a RAG query
+									go m.handleRagQuery(sessionID, conn.UserID, input.Data, activeAreaID, ws)
+									continue
+								}
+								
+								// Write to SSH stdin (regular command)
+								_, err := conn.Stdin.Write([]byte(input.Data))
+								if err \!= nil {
+									log.Printf("Failed to write to SSH: %v", err)
+									return
+								}
 							}
 						}
-					}
-				// Parse terminal input message
-				var input models.TerminalInput
-				if data, ok := msg.Data.(map[string]interface{}); ok {
-					if inputData, ok := data["data"].(string); ok {
-						input.Data = inputData
-					}
-				}
-
 				// Write to SSH stdin
 				_, err := conn.Stdin.Write([]byte(input.Data))
 				if err \!= nil {
@@ -1544,6 +1569,7 @@ func (m *SSHManager) broadcastToSession(sessionID string, msgType string, msgDat
 
 // SessionEventHandler notifies clients about session events
 func (m *SSHManager) SessionEventHandler(sessionID string, eventType string, data string) error {
+	// Verificar primero si la sesión existe sin mantener el lock por demasiado tiempo
 	m.sessionMutex.RLock()
 	_, exists := m.sessions[sessionID]
 	m.sessionMutex.RUnlock()
@@ -1552,7 +1578,7 @@ func (m *SSHManager) SessionEventHandler(sessionID string, eventType string, dat
 		return errors.New("session not found")
 	}
 
-	// Create an event based on the event type
+	// Parsear los datos fuera de cualquier lock para minimizar el tiempo de bloqueo
 	var msgData interface{}
 	
 	switch eventType {
@@ -1594,8 +1620,32 @@ func (m *SSHManager) SessionEventHandler(sessionID string, eventType string, dat
 		}
 	}
 	
-	// Broadcast the event to all WebSocket clients for this session
-	m.broadcastToSession(sessionID, eventType, msgData)
+	// Obtener una copia segura de los clientes WebSocket para este sessionID
+	// Esto evita mantener un lock durante el envío de mensajes
+	m.wsClientsMutex.RLock()
+	clients := m.wsClients[sessionID]
+	// Crear una copia profunda para evitar race conditions
+	clientsCopy := make([]*websocket.Conn, len(clients))
+	copy(clientsCopy, clients)
+	m.wsClientsMutex.RUnlock()
+	
+	// Broadcast the event a todos los clientes (usando copia local) sin locks globales
+	if len(clientsCopy) > 0 {
+		message := models.WebSocketMessage{
+			Type: eventType,
+			Data: msgData,
+		}
+		
+		for _, client := range clientsCopy {
+			// Enviar mensajes de forma asíncrona para no bloquear si un cliente es lento
+			go func(c *websocket.Conn) {
+				err := c.WriteJSON(message)
+				if err != nil {
+					log.Printf("Failed to send event to WebSocket client: %v", err)
+				}
+			}(client)
+		}
+	}
 	
 	return nil
 }
@@ -1963,6 +2013,77 @@ func (m *SSHManager) disableQueryMode(sessionID string, ws *websocket.Conn, conn
 	})
 }
 
+// getTerminalContext retrieves context information for a terminal session
+func (m *SSHManager) getTerminalContext(sessionID string) (map[string]interface{}, error) {
+	// Use session client to get the stored context for this session
+	context, err := m.sessionClient.GetSessionContext(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session context: %w", err)
+	}
+	
+	// Crear una copia local del contexto para evitar modificaciones concurrentes
+	// al mapa original que podrían causar race conditions
+	contextCopy := make(map[string]interface{})
+	for k, v := range context {
+		contextCopy[k] = v
+	}
+	
+	// Get additional context from the SSH connection if available
+	m.sessionMutex.RLock()
+	conn, exists := m.sessions[sessionID]
+	m.sessionMutex.RUnlock()
+	
+	if exists {
+		// Add any runtime information from the SSH connection that isn't already in the persisted context
+		// Obtener un lock único para el campo CommandHistory que evite bloqueos prolongados
+		conn.Lock.RLock() // Usar RLock para lectura concurrente
+		
+		// Copiar datos relevantes con protección de concurrencia
+		var currentDir, hostname, username string
+		var commandHistoryCopy []string
+		
+		// Capturar datos relevantes
+		currentDir = conn.CurrentDirectory
+		hostname = conn.Hostname
+		username = conn.Username
+		
+		// Crear una copia segura del historial de comandos
+		if len(conn.CommandHistory) > 0 {
+			commandHistoryCopy = make([]string, len(conn.CommandHistory))
+			copy(commandHistoryCopy, conn.CommandHistory)
+		}
+		
+		// Liberar el lock lo antes posible
+		conn.Lock.RUnlock()
+		
+		// Ahora trabajar con las copias locales seguras
+		if currentDir != "" && contextCopy["working_directory"] == nil {
+			contextCopy["working_directory"] = currentDir
+		}
+		
+		if hostname != "" && contextCopy["hostname"] == nil {
+			contextCopy["hostname"] = hostname
+		}
+		
+		if username != "" && contextCopy["username"] == nil {
+			contextCopy["username"] = username
+		}
+		
+		// Add command history for context if not already present and we have history
+		if contextCopy["recent_commands"] == nil && len(commandHistoryCopy) > 0 {
+			// Get the last 10 commands or whatever is available
+			historyLen := len(commandHistoryCopy)
+			startIdx := 0
+			if historyLen > 10 {
+				startIdx = historyLen - 10
+			}
+			contextCopy["recent_commands"] = commandHistoryCopy[startIdx:]
+		}
+	}
+	
+	return contextCopy, nil
+}
+
 // handleRagQuery processes a RAG query and sends the response back to the client
 func (m *SSHManager) handleRagQuery(sessionID string, userID string, query string, areaID string, ws *websocket.Conn) {
 	// Send a "thinking" indicator to the client
@@ -1978,6 +2099,7 @@ func (m *SSHManager) handleRagQuery(sessionID string, userID string, query strin
 	if err != nil {
 		log.Printf("Failed to get terminal context: %v", err)
 		// Continue without context
+		terminalContext = make(map[string]interface{})
 	}
 
 	// Call the RAG Agent via the session client
@@ -2022,13 +2144,4 @@ func (m *SSHManager) handleRagQuery(sessionID string, userID string, query strin
 	})
 }
 
-// getTerminalContext retrieves the terminal context for a session
-func (m *SSHManager) getTerminalContext(sessionID string) (map[string]interface{}, error) {
-	// Get the session context from the session service
-	context, err := m.sessionClient.GetSessionContext(sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get session context: %w", err)
-	}
-	
-	return context, nil
-}
+// Esta función ha sido reemplazada por la implementación más completa de getTerminalContext en la línea 1964

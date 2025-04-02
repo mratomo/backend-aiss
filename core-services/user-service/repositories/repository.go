@@ -186,6 +186,51 @@ func (r *UserRepository) CountUsers(ctx context.Context) (int64, error) {
 	return r.collection.CountDocuments(ctx, bson.M{})
 }
 
+// CreateFirstAdminIfNeeded verifica si hay usuarios y crea el primer admin si no hay
+// Usa operaciones atómicas para evitar race conditions en entornos multi-instancia
+func (r *UserRepository) CreateFirstAdminIfNeeded(ctx context.Context, username, email string) (bool, error) {
+	// Preparar un administrador por defecto
+	now := time.Now()
+	admin := models.User{
+		Username:        username,
+		Email:           email,
+		Role:            "admin",
+		Active:          true,
+		AreaPermissions: make(map[string]models.Permission),
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		// La contraseña se establecerá después
+	}
+
+	// Usar FindOneAndUpdate con upsert para crear el admin solo si no hay usuarios
+	// Esta operación es atómica y evita race conditions
+	filter := bson.M{"role": "admin"} // Buscar cualquier admin
+	update := bson.M{"$setOnInsert": admin}
+
+	opts := options.FindOneAndUpdate().
+		SetUpsert(true).
+		SetReturnDocument(options.After)
+
+	result := r.collection.FindOneAndUpdate(ctx, filter, update, opts)
+
+	// Si hay error, no es NoDocuments, es un error real
+	if result.Err() != nil && result.Err() != mongo.ErrNoDocuments {
+		return false, result.Err()
+	}
+
+	// Si no hay error, se creó un nuevo admin o ya existía uno
+	var existingAdmin models.User
+	err := result.Decode(&existingAdmin)
+
+	// Si hay error al decodificar, algo salió mal
+	if err != nil {
+		return false, err
+	}
+
+	// Si el ID es válido, se encontró o creó un admin
+	return !existingAdmin.ID.IsZero(), nil
+}
+
 // UpdateUserPermissions actualiza los permisos de un usuario para un área específica
 func (r *UserRepository) UpdateUserPermissions(ctx context.Context, userID string, areaID string, permission models.Permission) error {
 	objectID, err := primitive.ObjectIDFromHex(userID)

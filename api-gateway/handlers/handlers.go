@@ -3,9 +3,11 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -27,24 +29,45 @@ type ConfigHandler struct {
 }
 
 // Instancia global del ConfigHandler para acceso desde las rutas
-var ConfigHandlerInstance *ConfigHandler
+var (
+	ConfigHandlerInstance *ConfigHandler
+	configHandlerMutex    sync.RWMutex
+	configHandlerOnce     sync.Once
+)
 
 // NewConfigHandler crea un nuevo manejador de configuración y lo asigna a la instancia global
 func NewConfigHandler(corsConfig *[]string, environment, configPath string) *ConfigHandler {
-	handler := &ConfigHandler{
-		corsConfig:     corsConfig,
-		environment:    environment,
-		configFilePath: configPath,
-	}
-	ConfigHandlerInstance = handler
-	return handler
+	// Inicialización segura utilizando sync.Once sin anidamiento de locks
+	configHandlerOnce.Do(func() {
+		// Constructor sin locks anidados
+		handler := &ConfigHandler{
+			corsConfig:     corsConfig,
+			environment:    environment,
+			configFilePath: configPath,
+		}
+
+		// Asignar la instancia global de forma segura
+		ConfigHandlerInstance = handler
+
+		// No se necesita un lock explícito aquí porque sync.Once ya garantiza
+		// que este bloque se ejecuta una sola vez de forma thread-safe
+	})
+
+	// No es necesario adquirir el lock para leer la referencia después de la inicialización
+	// porque sync.Once garantiza visibilidad de memoria después de la inicialización
+	return ConfigHandlerInstance
 }
 
 // GetCorsConfig devuelve la configuración CORS actual
 func (h *ConfigHandler) GetCorsConfig(c *gin.Context) {
+	configHandlerMutex.RLock()
+	corsConfig := *h.corsConfig
+	environment := h.environment
+	configHandlerMutex.RUnlock()
+
 	c.JSON(http.StatusOK, gin.H{
-		"environment":          h.environment,
-		"cors_allowed_origins": *h.corsConfig,
+		"environment":          environment,
+		"cors_allowed_origins": corsConfig,
 	})
 }
 
@@ -69,8 +92,10 @@ func (h *ConfigHandler) UpdateCorsConfig(c *gin.Context) {
 		}
 	}
 
-	// Actualizar configuración en memoria
+	// Actualizar configuración en memoria (thread-safe)
+	configHandlerMutex.Lock()
 	*h.corsConfig = request.Origins
+	configHandlerMutex.Unlock()
 
 	// Registrar cambio
 	log.Printf("CORS configuration updated to: %v", request.Origins)
@@ -293,6 +318,23 @@ type EmbeddingHandler struct {
 	serviceURL string
 }
 
+// NewEmbeddingHandler crea un nuevo manejador de embeddings
+func NewEmbeddingHandler(serviceURL string) *EmbeddingHandler {
+	return &EmbeddingHandler{
+		serviceURL: serviceURL,
+	}
+}
+
+// GenerateEmbedding genera un embedding para un texto
+func (h *EmbeddingHandler) GenerateEmbedding(c *gin.Context) {
+	proxyRequest(c, h.serviceURL+"/embedding", "POST")
+}
+
+// GetEmbeddingModels obtiene los modelos de embedding disponibles
+func (h *EmbeddingHandler) GetEmbeddingModels(c *gin.Context) {
+	proxyRequest(c, h.serviceURL+"/models", "GET")
+}
+
 // RAGHandler maneja solicitudes relacionadas con el agente RAG
 type RAGHandler struct {
 	serviceURL string
@@ -460,9 +502,11 @@ func proxyRequestSimple(c *gin.Context, url string, method string) {
 	}
 }
 
-// Alias para mantener compatibilidad con código existente
-func proxyRequestSimple(c *gin.Context, url string, method string) {
-	proxyRequestBasic(c, url, method)
+// proxyRequest es la función principal para enviar solicitudes a servicios internos
+func proxyRequest(c *gin.Context, url string, method string) {
+	proxyRequestSimple(c, url, method)
+	// No se puede manejar errores aquí porque proxyRequestSimple ya escribe la respuesta directamente
+	// y no devuelve errores. Si hay errores, ya se manejan dentro de proxyRequestSimple.
 }
 
 // proxyRequestWithData es una versión mejorada que acepta un parámetro de datos y devuelve una respuesta estructurada
@@ -565,11 +609,36 @@ func proxyMultipartRequest(c *gin.Context, url string) {
 		return
 	}
 
-	// Crear cliente HTTP con timeout adecuado para subida de archivos
-	client := &http.Client{Timeout: 5 * time.Minute}
+	// Crear cliente HTTP con timeout adaptativo para subida de archivos
+	// Calcular timeout basado en el tamaño del archivo (1 minuto base + 1 minuto por cada 10MB)
+	fileSize := c.Request.ContentLength
+	baseTimeout := 1 * time.Minute
+	sizeTimeout := time.Duration(0)
+	if fileSize > 0 {
+		// 1 minuto adicional por cada 10MB
+		sizeTimeout = time.Duration(fileSize/(10*1024*1024)) * time.Minute
+	}
+	// Máximo 30 minutos para archivos muy grandes
+	timeout := baseTimeout + sizeTimeout
+	if timeout > 30*time.Minute {
+		timeout = 30 * time.Minute
+	}
 
-	// Crear una nueva solicitud multipart
-	req, err := http.NewRequest("POST", url, c.Request.Body)
+	client := &http.Client{Timeout: timeout}
+
+	// Crear buffer para leer body y evitar memory leak
+	bodyBytes, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "error al leer body: " + err.Error()})
+		return
+	}
+	// Cerrar body original para evitar memory leak
+	if err := c.Request.Body.Close(); err != nil {
+		log.Printf("Error closing request body: %v", err)
+	}
+
+	// Crear una nueva solicitud multipart con buffer
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "error al crear solicitud: " + err.Error()})
 		return

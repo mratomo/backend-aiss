@@ -288,11 +288,44 @@ class ConnectionService:
         # Crear instancia de DBConnection
         conn = DBConnection(**{**connection, "id": str(connection["_id"])})
         
-        # Desencriptar contraseña si existe
-        if conn.password:
-            conn.password = self.encryption_service.decrypt(conn.password)
+        # Solo desencriptar temporalmente si realmente se necesita la contraseña
+        # (retornamos la conexión con la contraseña encriptada por seguridad)
+        # El cliente debe llamar a get_decrypted_credentials cuando realmente necesite usarla
         
         return conn
+        
+    async def get_decrypted_credentials(self, connection_id: str) -> dict:
+        """
+        Obtiene credenciales desencriptadas de una conexión, solo cuando realmente
+        se necesitan para establecer una conexión.
+        
+        Args:
+            connection_id: ID de la conexión
+            
+        Returns:
+            Diccionario con username y password desencriptados
+        """
+        conn = await self.get_connection(connection_id)
+        if not conn:
+            return {"username": "", "password": ""}
+            
+        credentials = {
+            "username": conn.username or "",
+            "password": ""
+        }
+        
+        # Desencriptar contraseña solo si existe
+        if conn.password:
+            decrypted = self.encryption_service.decrypt(conn.password)
+            credentials["password"] = decrypted
+            
+        # Uso de try-finally para garantizar limpieza de información sensible
+        try:
+            return credentials
+        finally:
+            # Eliminar la contraseña desencriptada de la memoria lo antes posible
+            if "password" in credentials:
+                credentials["password"] = ""
     
     async def update_connection_status(self, connection_id: str, status: ConnectionStatus) -> bool:
         """

@@ -3,12 +3,34 @@ package controllers
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 	"user-service/models"
 	"user-service/services"
 
 	"github.com/gin-gonic/gin"
 )
+
+// getOperationTimeout devuelve el timeout adecuado según la operación
+func getOperationTimeout(path string) time.Duration {
+	// Definir timeouts por tipo de operación
+	switch {
+	case strings.Contains(path, "/auth/register"):
+		return 15 * time.Second // Registro es más pesado (validaciones, hash de contraseña)
+	case strings.Contains(path, "/auth/login"):
+		return 5 * time.Second // Login es ligero
+	case strings.Contains(path, "/auth/refresh"):
+		return 5 * time.Second // Refresh token es ligero
+	case strings.Contains(path, "/users") && strings.Contains(path, "all"):
+		return 15 * time.Second // Listar todos los usuarios puede ser pesado
+	case strings.Contains(path, "/users") && (strings.Contains(path, "update") || strings.Contains(path, "permissions")):
+		return 10 * time.Second // Actualizaciones son moderadas
+	case strings.Contains(path, "/users") && strings.Contains(path, "delete"):
+		return 10 * time.Second // Eliminación puede requerir validaciones
+	default:
+		return 5 * time.Second // Valor predeterminado para otras operaciones
+	}
+}
 
 // UserController gestiona las solicitudes relacionadas con usuarios
 type UserController struct {
@@ -30,8 +52,8 @@ func (ctrl *UserController) Register(c *gin.Context) {
 		return
 	}
 
-	// Crear contexto con timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Crear contexto con timeout variable según la operación
+	ctx, cancel := context.WithTimeout(context.Background(), getOperationTimeout(c.FullPath()))
 	defer cancel()
 
 	// Crear usuario con datos de la solicitud
@@ -46,7 +68,12 @@ func (ctrl *UserController) Register(c *gin.Context) {
 	// Registrar usuario
 	tokenResponse, err := ctrl.userService.RegisterUser(ctx, user, req.Password)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		// Diferenciar entre errores de validación y errores del servidor
+		if strings.Contains(err.Error(), "ya existe un usuario") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
 		return
 	}
 
@@ -61,8 +88,8 @@ func (ctrl *UserController) Login(c *gin.Context) {
 		return
 	}
 
-	// Crear contexto con timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Crear contexto con timeout variable según la operación
+	ctx, cancel := context.WithTimeout(context.Background(), getOperationTimeout(c.FullPath()))
 	defer cancel()
 
 	// Autenticar usuario
@@ -83,8 +110,8 @@ func (ctrl *UserController) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	// Crear contexto con timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Crear contexto con timeout variable según la operación
+	ctx, cancel := context.WithTimeout(context.Background(), getOperationTimeout(c.FullPath()))
 	defer cancel()
 
 	// Renovar token
@@ -101,8 +128,8 @@ func (ctrl *UserController) RefreshToken(c *gin.Context) {
 func (ctrl *UserController) GetUserByID(c *gin.Context) {
 	id := c.Param("id")
 
-	// Crear contexto con timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Crear contexto con timeout variable según la operación
+	ctx, cancel := context.WithTimeout(context.Background(), getOperationTimeout(c.FullPath()))
 	defer cancel()
 
 	// Obtener usuario
@@ -117,8 +144,8 @@ func (ctrl *UserController) GetUserByID(c *gin.Context) {
 
 // GetAllUsers obtiene todos los usuarios
 func (ctrl *UserController) GetAllUsers(c *gin.Context) {
-	// Crear contexto con timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Crear contexto con timeout variable según la operación
+	ctx, cancel := context.WithTimeout(context.Background(), getOperationTimeout(c.FullPath()))
 	defer cancel()
 
 	// Obtener usuarios
@@ -146,8 +173,8 @@ func (ctrl *UserController) UpdateUser(c *gin.Context) {
 		return
 	}
 
-	// Crear contexto con timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Crear contexto con timeout variable según la operación
+	ctx, cancel := context.WithTimeout(context.Background(), getOperationTimeout(c.FullPath()))
 	defer cancel()
 
 	// Actualizar usuario
@@ -164,8 +191,8 @@ func (ctrl *UserController) UpdateUser(c *gin.Context) {
 func (ctrl *UserController) DeleteUser(c *gin.Context) {
 	id := c.Param("id")
 
-	// Crear contexto con timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Crear contexto con timeout variable según la operación
+	ctx, cancel := context.WithTimeout(context.Background(), getOperationTimeout(c.FullPath()))
 	defer cancel()
 
 	// Eliminar usuario
@@ -187,8 +214,8 @@ func (ctrl *UserController) UpdatePermissions(c *gin.Context) {
 		return
 	}
 
-	// Crear contexto con timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Crear contexto con timeout variable según la operación
+	ctx, cancel := context.WithTimeout(context.Background(), getOperationTimeout(c.FullPath()))
 	defer cancel()
 
 	// Actualizar permisos
@@ -221,8 +248,8 @@ func (ctrl *UserController) VerifyAdmin(c *gin.Context) {
 		return
 	}
 
-	// Crear contexto con timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Crear contexto con timeout variable según la operación
+	ctx, cancel := context.WithTimeout(context.Background(), getOperationTimeout(c.FullPath()))
 	defer cancel()
 
 	// Obtener usuario

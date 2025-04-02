@@ -101,7 +101,7 @@ class SecurityService:
     
     def _validate_sql_query(self, normalized_query: str) -> bool:
         """
-        Validar consulta SQL
+        Validar consulta SQL de manera robusta
         
         Args:
             normalized_query: Consulta normalizada
@@ -109,35 +109,81 @@ class SecurityService:
         Returns:
             True si la consulta es segura
         """
-        # Verificar palabras clave sensibles
-        for keyword in self.sensitive_keywords:
-            if keyword in normalized_query:
-                # Si contiene keyword sensible, verificar si es una operación permitida
-                # Por ejemplo, "SELECT * FROM users" contiene "SELECT" pero es permitido
-                if keyword == "SELECT" and normalized_query.strip().startswith("SELECT"):
-                    continue
-                if keyword == "SHOW" and normalized_query.strip().startswith("SHOW"):
-                    continue
-                if keyword == "DESCRIBE" and normalized_query.strip().startswith("DESCRIBE"):
-                    continue
-                if keyword == "EXPLAIN" and normalized_query.strip().startswith("EXPLAIN"):
-                    continue
-                
-                # Si es otra operación sensible, rechazar
-                logger.warning(f"Query contains sensitive keyword: {keyword}")
-                return False
+        # Lista de operaciones permitidas
+        allowed_operations = ["SELECT", "SHOW", "DESCRIBE", "EXPLAIN"]
         
-        # Verificar patrones de inyección
+        # Obtener primera palabra de la consulta (el comando principal)
+        query_parts = normalized_query.strip().split()
+        if not query_parts:
+            logger.warning("Empty query")
+            return False
+            
+        main_command = query_parts[0].upper()
+        
+        # Solo permitir comandos explícitamente permitidos
+        if main_command not in allowed_operations:
+            logger.warning(f"Command not allowed: {main_command}")
+            return False
+            
+        # Verificar combinaciones peligrosas incluso en comandos permitidos
+        dangerous_patterns = [
+            # Comentarios que podrían usarse para truncar consultas
+            r'--\s',        # SQL comment
+            r'/\*.*\*/',    # Multi-line comment
+            
+            # Combinaciones de UNION que podrían usarse para inyecciones
+            r'UNION\s+(?:ALL\s+)?SELECT',
+            
+            # Secuencias de escape que podrían romper la lógica de consulta
+            r';\s*\w',      # Multiple statements
+            
+            # Modificaciones al esquema o datos
+            r'INSERT\s+INTO',
+            r'UPDATE\s+\w+\s+SET',
+            r'DELETE\s+FROM',
+            r'DROP\s+TABLE',
+            r'ALTER\s+TABLE',
+            r'CREATE\s+',
+            r'TRUNCATE\s+',
+            
+            # Funciones del sistema que podrían revelar información sensible
+            r'LOAD_FILE\(',
+            r'SLEEP\(',
+            r'BENCHMARK\(',
+            r'SYSTEM\(',
+            r'USER\(',
+            r'DATABASE\(',
+            r'VERSION\(',
+            r'@@'           # Variables del sistema en MySQL/PostgreSQL
+        ]
+        
+        # Compilar patrones para mejor rendimiento
+        import re
+        compiled_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in dangerous_patterns]
+        
+        # Verificar cada patrón
+        for pattern in compiled_patterns:
+            if pattern.search(normalized_query):
+                logger.warning(f"Query matches dangerous pattern: {pattern.pattern}")
+                return False
+                
+        # Verificar patrones de inyección generales
         for pattern in self.injection_patterns:
             if pattern.search(normalized_query):
                 logger.warning(f"Query matches injection pattern: {pattern.pattern}")
                 return False
-        
+                
+        # Validación de párametros (evitar inyecciones con comillas)
+        quotes_count = normalized_query.count("'") + normalized_query.count('"')
+        if quotes_count % 2 != 0:
+            logger.warning("Query has unbalanced quotes")
+            return False
+            
         return True
     
     def _validate_mongodb_query(self, query: str) -> bool:
         """
-        Validar consulta MongoDB
+        Validar consulta MongoDB con protección robusta
         
         Args:
             query: Consulta
@@ -145,36 +191,79 @@ class SecurityService:
         Returns:
             True si la consulta es segura
         """
-        # Para MongoDB, validar formato JSON y operaciones
+        # Lista de operaciones permitidas en MongoDB
+        allowed_operations = ["find", "findOne", "count", "distinct", "aggregate"]
+        
+        # Operadores prohibidos de MongoDB que pueden modificar datos o ejecutar JS
+        prohibited_operators = [
+            "$where",       # Permite ejecución de JavaScript
+            "$expr",        # Permite expresiones complejas
+            "$function",    # Función JavaScript personalizada
+            "$accumulator", # Función personalizada en aggregation
+            "$set",         # Modifica documentos
+            "$unset",       # Elimina campos
+            "$rename",      # Renombra campos
+            "$out",         # Envía resultados a una colección
+            "$merge",       # Fusiona resultados con una colección
+            "$addFields",   # Añade campos
+            "$replaceRoot", # Reemplaza documentos
+            "$replaceWith", # Reemplaza documentos (alias de $replaceRoot)
+            "$eval",        # Ejecuta JavaScript
+            "$execute",     # Ejecuta comandos
+            "mapReduce"     # Map-reduce (puede ejecutar JavaScript)
+        ]
+        
+        # Validar formato JSON
         try:
             # Si la consulta está en formato JSON, intentar analizarla
             import json
             if query.strip().startswith("{"):
                 query_json = json.loads(query)
                 
-                # Verificar operaciones peligrosas
-                if "$where" in query:
-                    logger.warning("MongoDB query contains $where operator")
-                    return False
+                # Verificar operadores prohibidos recursivamente
+                def check_prohibited(obj):
+                    if isinstance(obj, dict):
+                        for key, value in obj.items():
+                            if key in prohibited_operators:
+                                logger.warning(f"MongoDB query contains prohibited operator: {key}")
+                                return False
+                            if isinstance(value, (dict, list)):
+                                if not check_prohibited(value):
+                                    return False
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            if isinstance(item, (dict, list)):
+                                if not check_prohibited(item):
+                                    return False
+                    return True
                 
-                # Verificar código JavaScript
-                if "$function" in query:
-                    logger.warning("MongoDB query contains $function operator")
+                if not check_prohibited(query_json):
                     return False
                 
                 # Si pasa todas las validaciones
                 return True
             elif query.strip().startswith("db."):
-                # Validar operaciones comunes
-                if query.startswith("db.collection.find(") or query.startswith("db.collection.aggregate("):
-                    return True
-                else:
-                    # Buscar operaciones peligrosas
-                    dangerous_ops = ["deleteMany", "drop", "dropDatabase"]
-                    for op in dangerous_ops:
-                        if op in query:
-                            logger.warning(f"MongoDB query contains dangerous operation: {op}")
-                            return False
+                # Validar sintaxis de tipo shell de MongoDB
+                import re
+                
+                # Extraer la operación principal (ej: find, update, etc.)
+                operation_match = re.search(r'db\.[^.]+\.(\w+)\(', query)
+                if not operation_match:
+                    logger.warning("Invalid MongoDB shell query format")
+                    return False
+                    
+                operation = operation_match.group(1)
+                
+                # Verificar si la operación está permitida
+                if operation not in allowed_operations:
+                    logger.warning(f"MongoDB operation not allowed: {operation}")
+                    return False
+                
+                # Verificar operadores prohibidos
+                for op in prohibited_operators:
+                    if op in query:
+                        logger.warning(f"MongoDB query contains prohibited operator: {op}")
+                        return False
                 
                 return True
             else:

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -15,7 +14,6 @@ import (
 	"user-service/repositories"
 	"user-service/services"
 
-	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -25,10 +23,10 @@ func main() {
 	// Cargar configuración
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatalf("Error al cargar la configuración: %v", err)
+		log.Fatalf("Error al cargar configuración: %v", err)
 	}
 
-	// Configurar modo de Gin
+	// Configurar Gin
 	if cfg.Environment == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -37,111 +35,98 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(cfg.MongoDB.URI))
+	mongoURI := os.Getenv("MONGODB_URI")
+	if mongoURI == "" {
+		mongoURI = cfg.MongoDB.URI
+	}
+
+	mongoClient, err := mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
 	if err != nil {
 		log.Fatalf("Error al conectar a MongoDB: %v", err)
 	}
 
 	// Verificar conexión
-	err = client.Ping(ctx, nil)
+	err = mongoClient.Ping(ctx, nil)
 	if err != nil {
 		log.Fatalf("Error al verificar conexión a MongoDB: %v", err)
 	}
 
-	log.Println("Conexión a MongoDB establecida")
+	log.Println("Conexión a MongoDB establecida correctamente")
 
-	// Configurar cierre de conexión al finalizar
-	defer func() {
-		if err := client.Disconnect(ctx); err != nil {
-			log.Fatalf("Error al desconectar de MongoDB: %v", err)
-		}
-	}()
+	// Inicializar repositorio
+	db := mongoClient.Database(cfg.MongoDB.Database)
+	userCollection := db.Collection("users")
+	userRepo := repositories.NewUserRepository(userCollection)
 
-	// Inicializar repositorio, servicio y controlador
-	userCollection := client.Database(cfg.MongoDB.Database).Collection("users")
-	repo := repositories.NewUserRepository(userCollection)
-	service := services.NewUserService(repo, cfg.Auth.Secret, cfg.Auth.ExpirationHours)
-	controller := controllers.NewUserController(service)
+	// Inicializar servicio
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		jwtSecret = cfg.JWTSecret
+	}
+	userService := services.NewUserService(userRepo, jwtSecret, cfg.JWTExpirationHours)
 
-	// Registrar al primer administrador si no existe ningún usuario
-	registerFirstAdmin(ctx, repo, service, cfg.Environment)
-
-	// Inicializar router
-	router := gin.Default()
-
-	// Configurar CORS
-	router.Use(cors.New(cors.Config{
-		AllowOrigins:     cfg.CorsAllowedOrigins,
-		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: true,
-		MaxAge:           12 * time.Hour,
-	}))
+	// Inicializar controlador
+	userController := controllers.NewUserController(userService)
 
 	// Configurar rutas
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
+	router := setupRoutes(userController)
 
-	// Rutas de autenticación
-	router.POST("/auth/register", controller.Register)
-	router.POST("/auth/login", controller.Login)
-	router.POST("/auth/refresh", controller.RefreshToken)
+	// Registrar el primer administrador si no hay usuarios
+	initCtx, initCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	registerFirstAdmin(initCtx, userRepo, userService, cfg.Environment)
+	initCancel()
 
-	// Rutas de usuario
-	router.GET("/users/:id", controller.GetUserByID)
-	router.GET("/users", controller.GetAllUsers)
-	router.PUT("/users/:id", controller.UpdateUser)
-	router.DELETE("/users/:id", controller.DeleteUser)
-	router.PUT("/users/:id/permissions", controller.UpdatePermissions)
-	router.POST("/users/verify-admin", controller.VerifyAdmin)
-
-	// Configurar servidor HTTP
+	// Iniciar servidor
 	server := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: router,
+		Addr:         ":" + cfg.Port,
+		Handler:      router,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
 	}
 
-	// Canal para señales de cierre
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
-	// Ejecutar servidor en goroutine
+	// Iniciar servidor en goroutine
 	go func() {
-		log.Printf("Servidor iniciado en el puerto %s", cfg.Port)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("Error al iniciar el servidor: %v", err)
+		log.Printf("Servidor iniciado en puerto %s", cfg.Port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Error al iniciar servidor: %v", err)
 		}
 	}()
 
-	// Esperar señal de cierre
+	// Configurar apagado graceful
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("Apagando servidor...")
+	log.Println("Apagado de servidor iniciado...")
 
-	// Contexto con timeout para shutdown
-	ctxShutdown, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelShutdown()
+	// Dar tiempo para finalizar solicitudes en curso
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
 
-	// Cerrar servidor gracefully
-	if err := server.Shutdown(ctxShutdown); err != nil {
-		log.Fatalf("Error al cerrar el servidor: %v", err)
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Fatalf("Error al apagar servidor: %v", err)
+	}
+
+	log.Println("Cerrando conexión a MongoDB...")
+	if err := mongoClient.Disconnect(shutdownCtx); err != nil {
+		log.Fatalf("Error al cerrar conexión a MongoDB: %v", err)
 	}
 
 	log.Println("Servidor detenido correctamente")
 }
 
 // registerFirstAdmin registra al primer administrador si no existe ningún usuario
+// usando una operación atómica para evitar race conditions
 func registerFirstAdmin(ctx context.Context, repo *repositories.UserRepository, service *services.UserService, environment string) {
-	// Verificar si ya existen usuarios
-	count, err := repo.CountUsers(ctx)
+	// Usar una operación atómica para verificar y crear admin si es necesario
+	result, err := repo.CreateFirstAdminIfNeeded(ctx, "admin", "admin@example.com")
 	if err != nil {
-		log.Printf("Error al verificar usuarios existentes: %v", err)
+		log.Printf("Error durante verificación de primer administrador: %v", err)
 		return
 	}
 
-	// Si no hay usuarios, crear el primer administrador
-	if count == 0 {
+	// Si el resultado es false, significa que ya existen usuarios
+	// Si es true, significa que se creó el admin
+	if result {
 		adminPassword := os.Getenv("ADMIN_INITIAL_PASSWORD")
 
 		// En entorno de producción, requerir contraseña explícitamente
@@ -152,20 +137,51 @@ func registerFirstAdmin(ctx context.Context, repo *repositories.UserRepository, 
 			log.Println("Advertencia: Usando contraseña de administrador por defecto. Defina ADMIN_INITIAL_PASSWORD para mayor seguridad.")
 		}
 
-		admin := models.User{
-			Username: "admin",
-			Email:    "admin@example.com",
-			Role:     "admin",
-			Active:   true,
-		}
-
-		// Registrar al admin
-		_, err := service.RegisterUser(ctx, &admin, adminPassword)
+		// Establecer la contraseña del admin
+		err = service.SetAdminPassword(ctx, adminPassword)
 		if err != nil {
-			log.Printf("Error al crear usuario administrador inicial: %v", err)
+			log.Printf("Error al establecer contraseña del administrador inicial: %v", err)
 			return
 		}
 
 		log.Println("Usuario administrador inicial creado correctamente")
 	}
+}
+
+// setupRoutes configura las rutas del API
+func setupRoutes(userController *controllers.UserController) *gin.Engine {
+	router := gin.Default()
+
+	// Middlewares
+	router.Use(gin.Recovery())
+
+	// Rutas de autenticación
+	authGroup := router.Group("/auth")
+	{
+		authGroup.POST("/register", userController.Register)
+		authGroup.POST("/login", userController.Login)
+		authGroup.POST("/refresh", userController.RefreshToken)
+	}
+
+	// Rutas de usuario
+	userGroup := router.Group("/users")
+	{
+		userGroup.GET("", userController.GetAllUsers)
+		userGroup.GET("/:id", userController.GetUserByID)
+		userGroup.PUT("/:id", userController.UpdateUser)
+		userGroup.DELETE("/:id", userController.DeleteUser)
+		userGroup.POST("/verify-admin", userController.VerifyAdmin)
+		userGroup.PUT("/:id/permissions", userController.UpdatePermissions)
+		userGroup.PUT("/:id/password", userController.ChangePassword)
+	}
+
+	// Ruta de health check
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status": "ok",
+			"time":   time.Now().Format(time.RFC3339),
+		})
+	})
+
+	return router
 }

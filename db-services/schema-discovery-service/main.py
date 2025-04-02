@@ -45,8 +45,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Jobs activos
+# Jobs activos con lock para proteger acceso concurrente
 active_jobs: Dict[str, Dict[str, Any]] = {}
+active_jobs_lock = asyncio.Lock()  # Lock para proteger acceso concurrente a active_jobs
 
 # Inicializar servicios
 http_client = aiohttp.ClientSession()
@@ -63,15 +64,53 @@ async def startup_event():
 async def shutdown_event():
     """Limpiar recursos al detener la aplicación"""
     logger.info("Shutting down Schema Discovery Service")
-    await http_client.close()
+    
+    try:
+        # Cerrar cliente HTTP correctamente
+        await http_client.close()
+        logger.info("HTTP client closed successfully")
+        
+        # Limpiar trabajos activos
+        async with active_jobs_lock:
+            job_count = len(active_jobs)
+            active_jobs.clear()
+            logger.info(f"Cleared {job_count} active jobs")
+            
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
 
 # Endpoint de health check
 @app.get("/health", tags=["Health"])
 async def health_check():
     """Verificar salud del servicio"""
+    # Verificar estado de memoria y eliminar jobs antiguos si es necesario
+    try:
+        async with active_jobs_lock:
+            # Limpiar trabajos antiguos para prevenir fugas de memoria
+            current_time = datetime.utcnow()
+            jobs_count = len(active_jobs)
+            old_jobs = [job_id for job_id, job_info in active_jobs.items() 
+                        if "started_at" in job_info and 
+                        (current_time - job_info["started_at"]).total_seconds() > 86400]  # 24 horas
+            
+            # Eliminar trabajos antiguos
+            for job_id in old_jobs:
+                del active_jobs[job_id]
+                
+            # Reportar limpieza si ocurrió
+            cleaned_jobs = len(old_jobs)
+            if cleaned_jobs > 0:
+                logger.info(f"Cleaned up {cleaned_jobs} old jobs during health check")
+    except Exception as e:
+        logger.error(f"Error cleaning old jobs: {e}")
+    
+    # Devolver estado del servicio
     return {
         "status": "ok",
         "active_jobs": len(active_jobs),
+        "memory_usage": {
+            "active_jobs_count": len(active_jobs),
+        },
         "timestamp": datetime.utcnow()
     }
 
@@ -131,16 +170,18 @@ async def discover_schema(request: SchemaDiscoveryRequest, background_tasks: Bac
         # Generar ID de trabajo
         job_id = f"job_{request.connection_id}_{datetime.utcnow().timestamp()}"
         
-        # Registrar trabajo
+        # Registrar trabajo (thread-safe con lock)
         start_time = datetime.utcnow()
         estimated_completion = start_time + timedelta(seconds=settings.schema.schema_discovery_timeout)
         
-        active_jobs[job_id] = {
-            "connection_id": request.connection_id,
-            "status": SchemaDiscoveryStatus.PENDING,
-            "started_at": start_time,
-            "estimated_completion": estimated_completion
-        }
+        # Adquirir lock para modificar active_jobs
+        async with active_jobs_lock:
+            active_jobs[job_id] = {
+                "connection_id": request.connection_id,
+                "status": SchemaDiscoveryStatus.PENDING,
+                "started_at": start_time,
+                "estimated_completion": estimated_completion
+            }
         
         # Iniciar tarea en segundo plano
         background_tasks.add_task(
@@ -165,10 +206,13 @@ async def discover_schema(request: SchemaDiscoveryRequest, background_tasks: Bac
 @app.get("/schema/jobs/{job_id}", response_model=SchemaDiscoveryResponse, tags=["Schema Discovery"])
 async def get_job_status(job_id: str):
     """Obtener estado de un trabajo de descubrimiento"""
-    if job_id not in active_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    job = active_jobs[job_id]
+    # Acceso thread-safe con lock
+    async with active_jobs_lock:
+        if job_id not in active_jobs:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        # Hacer una copia del job para evitar race conditions
+        job = dict(active_jobs[job_id])
     
     return SchemaDiscoveryResponse(
         job_id=job_id,
@@ -228,8 +272,9 @@ async def vectorize_schema(connection_id: str):
         if schema.status != SchemaDiscoveryStatus.COMPLETED:
             raise HTTPException(status_code=400, detail="Schema discovery not completed")
         
-        # Vectorizar esquema
-        vector_id = await vectorization_service.vectorize_schema(schema)
+        # Vectorizar esquema asegurando que la sesión HTTP se cierre correctamente
+        async with aiohttp.ClientSession() as session:
+            vector_id = await vectorization_service.vectorize_schema(schema, session)
         
         return {
             "status": "success",
@@ -252,35 +297,82 @@ async def discover_schema_background(job_id: str, connection_id: str, options: O
         connection_id: ID de la conexión
         options: Opciones de descubrimiento
     """
+    # Establecer límite de tiempo para el job
+    job_timeout = settings.schema.schema_discovery_timeout + 120  # Timeout base + margen adicional
+    start_time = datetime.utcnow()
+    
     try:
-        # Actualizar estado
-        active_jobs[job_id]["status"] = SchemaDiscoveryStatus.IN_PROGRESS
+        # Actualizar estado (thread-safe)
+        async with active_jobs_lock:
+            if job_id in active_jobs:
+                active_jobs[job_id]["status"] = SchemaDiscoveryStatus.IN_PROGRESS
+                active_jobs[job_id]["memory_usage"] = 0  # Inicializar tracking de memoria
         
-        # Iniciar descubrimiento
-        schema = await discovery_service.discover_schema(connection_id, options)
-        
-        # Si se completó correctamente, vectorizar
-        if schema.status == SchemaDiscoveryStatus.COMPLETED:
-            try:
-                vector_id = await vectorization_service.vectorize_schema(schema)
-                
-                # Actualizar esquema con ID del vector
-                schema.vector_id = vector_id
-                await discovery_service.save_schema(schema)
-            except Exception as e:
-                logger.error(f"Error vectorizing schema: {e}")
-        
-        # Actualizar estado del trabajo
-        active_jobs[job_id]["status"] = schema.status
+        try:
+            # Iniciar descubrimiento con timeout
+            schema = await asyncio.wait_for(
+                discovery_service.discover_schema(connection_id, options),
+                timeout=job_timeout
+            )
+            
+            # Si se completó correctamente, vectorizar
+            if schema and schema.status == SchemaDiscoveryStatus.COMPLETED:
+                try:
+                    # Crear una sesión específica para vectorizar con timeout y asegurar que se cierre
+                    async with aiohttp.ClientSession() as session:
+                        vector_id = await asyncio.wait_for(
+                            vectorization_service.vectorize_schema(schema, session),
+                            timeout=60  # 1 minuto para vectorización
+                        )
+                        
+                        # Actualizar esquema con ID del vector
+                        schema.vector_id = vector_id
+                        await discovery_service.save_schema(schema)
+                except asyncio.TimeoutError:
+                    logger.error(f"Timeout vectorizing schema for job {job_id}")
+                    # Continuar sin vectorizar
+                except Exception as e:
+                    logger.error(f"Error vectorizing schema for job {job_id}: {e}")
+                    # Continuar sin vectorizar
+            
+            # Actualizar estado del trabajo (thread-safe)
+            async with active_jobs_lock:
+                if job_id in active_jobs:
+                    active_jobs[job_id]["status"] = schema.status if schema else SchemaDiscoveryStatus.FAILED
+                    active_jobs[job_id]["completed_at"] = datetime.utcnow()
+                    
+        except asyncio.TimeoutError:
+            logger.error(f"Job {job_id} timed out after {job_timeout} seconds")
+            
+            # Actualizar estado con timeout (thread-safe)
+            async with active_jobs_lock:
+                if job_id in active_jobs:
+                    active_jobs[job_id]["status"] = SchemaDiscoveryStatus.FAILED
+                    active_jobs[job_id]["error"] = f"Job timed out after {job_timeout} seconds"
+            
+            # Guardar esquema con error de timeout
+            schema_timeout = DatabaseSchema(
+                connection_id=connection_id,
+                name=f"Timeout: {connection_id}",
+                type="unknown",
+                status=SchemaDiscoveryStatus.FAILED,
+                discovery_date=datetime.utcnow(),
+                error=f"Schema discovery timed out after {job_timeout} seconds"
+            )
+            await discovery_service.save_schema(schema_timeout)
+            
     except Exception as e:
         logger.error(f"Error in schema discovery job {job_id}: {e}")
         
-        # Actualizar estado con error
-        active_jobs[job_id]["status"] = SchemaDiscoveryStatus.FAILED
-        active_jobs[job_id]["error"] = str(e)
+        # Actualizar estado con error (thread-safe)
+        async with active_jobs_lock:
+            if job_id in active_jobs:
+                active_jobs[job_id]["status"] = SchemaDiscoveryStatus.FAILED
+                active_jobs[job_id]["error"] = str(e)
+                active_jobs[job_id]["completed_at"] = datetime.utcnow()
         
         # Guardar esquema con error
-        schema = DatabaseSchema(
+        schema_error = DatabaseSchema(
             connection_id=connection_id,
             name="Discovery Failed",
             type="unknown",
@@ -288,12 +380,32 @@ async def discover_schema_background(job_id: str, connection_id: str, options: O
             discovery_date=datetime.utcnow(),
             error=str(e)
         )
-        await discovery_service.save_schema(schema)
+        await discovery_service.save_schema(schema_error)
     finally:
-        # Limpiar trabajo después de un tiempo
-        await asyncio.sleep(3600)  # Mantener en memoria por 1 hora
-        if job_id in active_jobs:
-            del active_jobs[job_id]
+        # Calcular tiempo de ejecución
+        execution_time = (datetime.utcnow() - start_time).total_seconds()
+        logger.info(f"Job {job_id} completed in {execution_time:.2f} seconds")
+        
+        # Reducir el tiempo de retención de jobs completados o fallidos
+        # para evitar acumular demasiados en memoria
+        retention_time = 3600  # 1 hora por defecto
+        if execution_time > 300:  # Si tomó más de 5 minutos
+            # Menor retención para jobs largos (10 minutos)
+            retention_time = 600
+        
+        # Mantener el job en memoria por el tiempo de retención
+        try:
+            await asyncio.sleep(retention_time)
+        except asyncio.CancelledError:
+            logger.info(f"Job retention sleep cancelled for {job_id}")
+        
+        # Eliminar job de manera thread-safe
+        async with active_jobs_lock:
+            if job_id in active_jobs:
+                # Capturar estado final para logging
+                final_status = active_jobs[job_id].get("status", "unknown")
+                del active_jobs[job_id]
+                logger.info(f"Removed job {job_id} from memory (final status: {final_status})")
 
 if __name__ == "__main__":
     uvicorn.run(

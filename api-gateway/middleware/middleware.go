@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -58,22 +59,63 @@ func RequestLogger() gin.HandlerFunc {
 // ErrorHandler middleware para manejar errores de forma centralizada
 func ErrorHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Crear un buffer para capturar el cuerpo de la respuesta
+		blw := &bodyLogWriter{body: bytes.NewBufferString(""), ResponseWriter: c.Writer}
+		c.Writer = blw
+
+		// Procesar la solicitud
 		c.Next()
 
-		// Si ya hay una respuesta, no hacer nada
-		if c.Writer.Written() {
+		// Si ya hay una respuesta, solo registrar
+		if c.Writer.Status() != 0 {
+			// Capturar el error si es 4xx o 5xx
+			if c.Writer.Status() >= 400 {
+				log.Printf("[ERROR] Path: %s, Status: %d, Response: %s",
+					c.Request.URL.Path, c.Writer.Status(), blw.body.String())
+			}
 			return
 		}
 
-		// Si hay errores, responder con el primero
+		// Si hay errores en Gin, responder con el primero
 		if len(c.Errors) > 0 {
 			err := c.Errors[0]
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": err.Error(),
+			// Determinar código de estado basado en el tipo de error
+			statusCode := http.StatusInternalServerError
+
+			// Analizar error para determinar código apropiado
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "no encontrado") || strings.Contains(errMsg, "not found") {
+				statusCode = http.StatusNotFound
+			} else if strings.Contains(errMsg, "no autorizado") || strings.Contains(errMsg, "unauthorized") {
+				statusCode = http.StatusUnauthorized
+			} else if strings.Contains(errMsg, "validación") || strings.Contains(errMsg, "validation") {
+				statusCode = http.StatusBadRequest
+			}
+
+			c.JSON(statusCode, gin.H{
+				"error": errMsg,
+				"code":  statusCode,
+				"path":  c.Request.URL.Path,
 			})
+
+			// Registrar error
+			log.Printf("[ERROR] Path: %s, Status: %d, Error: %s",
+				c.Request.URL.Path, statusCode, errMsg)
 			return
 		}
 	}
+}
+
+// bodyLogWriter estructura para capturar el cuerpo de la respuesta
+type bodyLogWriter struct {
+	gin.ResponseWriter
+	body *bytes.Buffer
+}
+
+// Write implementa la interfaz ResponseWriter
+func (w *bodyLogWriter) Write(b []byte) (int, error) {
+	w.body.Write(b)
+	return w.ResponseWriter.Write(b)
 }
 
 // AuthMiddleware estructura para el middleware de autenticación
@@ -217,26 +259,48 @@ func (am *AdminMiddleware) AdminOnly() gin.HandlerFunc {
 		userID, _ := c.Get("userID")
 		userIDStr := userID.(string)
 
-		// Crear solicitud al servicio de usuarios
+		// Crear solicitud al servicio de usuarios con contexto y timeout
 		reqBody, _ := json.Marshal(map[string]string{
 			"user_id": userIDStr,
 		})
 
-		// Llamar al endpoint de verificación de admin
-		resp, err := http.Post(
+		// Crear contexto con timeout
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		defer cancel()
+
+		// Crear solicitud HTTP con contexto
+		req, err := http.NewRequestWithContext(
+			ctx,
+			"POST",
 			am.UserServiceURL+"/users/verify-admin",
-			"application/json",
 			bytes.NewBuffer(reqBody),
 		)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "error al crear solicitud de verificación de admin"})
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		// Enviar solicitud
+		client := &http.Client{}
+		resp, err := client.Do(req)
 
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "error al verificar permisos de administrador"})
+			if ctx.Err() == context.DeadlineExceeded {
+				c.AbortWithStatusJSON(http.StatusGatewayTimeout, gin.H{"error": "timeout al verificar permisos de administrador"})
+			} else {
+				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "error al verificar permisos de administrador: " + err.Error()})
+			}
 			return
 		}
 		defer resp.Body.Close()
 
 		// Leer respuesta
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "error al leer respuesta de verificación"})
+			return
+		}
 
 		// Verificar respuesta
 		var result map[string]interface{}
