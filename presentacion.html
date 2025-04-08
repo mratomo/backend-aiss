@@ -1,0 +1,1432 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Presentación Backend AISS - Locked Shields 2025</title>
+    <style>
+        :root {
+            --primary: #6dc0ff;
+            --secondary: #bb86fc;
+            --accent: #ff7675;
+            --light: #cfcfcf;
+            --dark: #121212;
+            --darker: #0a0a0a;
+            --success: #00b894;
+            --warning: #fdcb6e;
+            --danger: #ff7675;
+            --gray: #8c8c8c;
+            --surface: #1e1e1e;
+            --surface-light: #2d2d2d;
+            --text: #e0e0e0;
+            --text-muted: #b0b0b0;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: var(--text);
+            background-color: var(--dark);
+            padding: 0;
+            margin: 0;
+            scroll-snap-type: y mandatory;
+            overflow-y: scroll;
+        }
+        
+        .slide {
+            height: 100vh;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            scroll-snap-align: start;
+            position: relative;
+        }
+        
+        .slide-content {
+            max-width: 1200px;
+            width: 100%;
+            padding: 2rem;
+            background-color: var(--surface);
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            overflow: hidden;
+            position: relative;
+            border: 1px solid var(--surface-light);
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        
+        .slide-number {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            font-size: 1rem;
+            color: var(--gray);
+            z-index: 10;
+        }
+        
+        h1 {
+            font-size: 3rem;
+            color: var(--primary);
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+        
+        h2 {
+            font-size: 2.5rem;
+            color: var(--secondary);
+            margin-bottom: 1.5rem;
+            text-align: center;
+        }
+        
+        h3 {
+            font-size: 1.8rem;
+            color: var(--primary);
+            margin-bottom: 1rem;
+        }
+        
+        p, li {
+            font-size: 1.2rem;
+            margin-bottom: 1rem;
+        }
+        
+        ul, ol {
+            margin-left: 2rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .two-columns {
+            display: flex;
+            justify-content: space-between;
+            gap: 2rem;
+            margin-top: 1rem;
+        }
+        
+        .column {
+            flex: 1;
+        }
+        
+        .highlight {
+            color: var(--accent);
+            font-weight: bold;
+        }
+        
+        .check-list {
+            list-style: none;
+            margin-left: 0;
+        }
+        
+        .check-list li {
+            padding-left: 2rem;
+            position: relative;
+            margin-bottom: 0.8rem;
+        }
+        
+        .check-list li:before {
+            content: "✅";
+            position: absolute;
+            left: 0;
+        }
+        
+        .diagram {
+            width: 100%;
+            margin: 1.5rem 0;
+            padding: 1rem;
+            background-color: var(--surface-light);
+            border-radius: 8px;
+            border: 1px solid #444;
+            display: flex;
+            justify-content: center;
+            overflow-x: auto;
+        }
+        
+        .diagram pre {
+            font-family: 'Consolas', 'Courier New', monospace;
+            white-space: pre;
+            font-size: 14px;
+            line-height: 1.5;
+            color: var(--text);
+        }
+        
+        .service-box {
+            background-color: rgba(109, 192, 255, 0.1);
+            border: 2px solid var(--primary);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        
+        .service-box h4 {
+            color: var(--primary);
+            font-size: 1.3rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .cover {
+            background: linear-gradient(135deg, #1a237e, #311b92);
+            color: white;
+        }
+        
+        .cover h1, .cover p, .cover h3 {
+            color: var(--text);
+        }
+        
+        /* Estilos para diagramas modernos */
+        .modern-diagram {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+            margin: 1rem 0;
+        }
+        
+        .arch-box {
+            border: 2px solid var(--primary);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 0.5rem;
+            text-align: center;
+            background-color: rgba(109, 192, 255, 0.15);
+            width: 100%;
+            position: relative;
+        }
+        
+        .arch-arrow {
+            width: 0;
+            height: 0;
+            border-left: 15px solid transparent;
+            border-right: 15px solid transparent;
+            border-top: 15px solid var(--primary);
+            margin: 0.5rem 0;
+        }
+        
+        .arch-container {
+            display: flex;
+            width: 100%;
+            justify-content: space-around;
+            margin: 0.5rem 0;
+            flex-wrap: wrap;
+        }
+        
+        .arch-component {
+            border: 2px solid var(--success);
+            border-radius: 8px;
+            padding: 0.5rem;
+            margin: 0.5rem;
+            text-align: center;
+            background-color: rgba(0, 184, 148, 0.15);
+            flex: 1;
+        }
+        
+        .arch-db {
+            border: 2px solid var(--warning);
+            border-radius: 8px;
+            padding: 0.5rem;
+            margin: 0.5rem;
+            text-align: center;
+            background-color: rgba(253, 203, 110, 0.15);
+            flex: 1;
+        }
+        
+        .security-layer {
+            border: 2px solid var(--primary);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 0.5rem;
+            width: 90%;
+            background-color: rgba(109, 192, 255, 0.05);
+        }
+        
+        /* Animaciones */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes fadeInDelay {
+            0% { opacity: 0; transform: translateY(20px); }
+            50% { opacity: 0; transform: translateY(20px); }
+            100% { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+        
+        @keyframes highlight {
+            0% { background-color: rgba(109, 192, 255, 0.1); }
+            50% { background-color: rgba(109, 192, 255, 0.4); }
+            100% { background-color: rgba(109, 192, 255, 0.1); }
+        }
+        
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        
+        .highlight-box {
+            animation: highlight 2s infinite;
+        }
+        
+        .fade-in {
+            animation: fadeIn 0.8s ease-out forwards;
+        }
+        
+        .fade-in-delay-1 {
+            opacity: 0;
+            animation: fadeIn 0.8s ease-out forwards;
+            animation-delay: 0.3s;
+        }
+        
+        .fade-in-delay-2 {
+            opacity: 0;
+            animation: fadeIn 0.8s ease-out forwards;
+            animation-delay: 0.6s;
+        }
+        
+        .fade-in-delay-3 {
+            opacity: 0;
+            animation: fadeIn 0.8s ease-out forwards;
+            animation-delay: 0.9s;
+        }
+        
+        .slide-content {
+            animation: fadeIn 0.5s ease-out forwards;
+        }
+        
+        .thanks {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            background: linear-gradient(135deg, #1a237e, #311b92);
+            color: white;
+        }
+        
+        .thanks h2 {
+            color: var(--text);
+            font-size: 3.5rem;
+            margin-bottom: 2rem;
+        }
+        
+        .thanks p {
+            color: var(--text);
+            font-size: 1.5rem;
+            text-align: center;
+        }
+        
+        /* Diagrama SVG */
+        .svg-diagram {
+            width: 100%;
+            max-width: 900px;
+            margin: 1rem auto;
+        }
+        
+        code {
+            background-color: var(--surface-light);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 0.9em;
+            color: var(--secondary);
+        }
+        
+        /* Adaptación para tema oscuro */
+        a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+        
+        a:hover {
+            text-decoration: underline;
+        }
+        
+        strong {
+            color: var(--text);
+            font-weight: bold;
+        }
+        
+        /* Optimizaciones para mejor visualización */
+        .svg-container {
+            width: 100%;
+            height: 100%;
+            overflow: visible;
+        }
+        
+        .author {
+            color: var(--accent);
+            font-size: 1.5rem;
+            margin-top: 1rem;
+            text-align: center;
+        }
+        
+        /* Ajuste para scroll en diagramas grandes */
+        .diagram-container {
+            max-height: 400px;
+            overflow-y: auto;
+            width: 100%;
+        }
+        
+        /* Mejora para visualización móvil */
+        @media (max-width: 768px) {
+            .two-columns {
+                flex-direction: column;
+            }
+            
+            .slide-content {
+                padding: 1rem;
+            }
+            
+            h1 {
+                font-size: 2rem;
+            }
+            
+            h2 {
+                font-size: 1.8rem;
+            }
+        }
+        
+        /* Estilos para casos de uso */
+        .use-case-box {
+            border: 2px solid var(--secondary);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            background-color: rgba(187, 134, 252, 0.05);
+        }
+        
+        .use-case-box h3 {
+            color: var(--secondary);
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+        
+        .use-case-step {
+            margin-bottom: 1rem;
+            padding: 1rem;
+            background-color: rgba(109, 192, 255, 0.05);
+            border-radius: 5px;
+            border-left: 3px solid var(--primary);
+        }
+        
+        .use-case-step h4 {
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+        
+        /* Títulos de sección */
+        .section-title {
+            text-align: center;
+            margin-bottom: 2rem;
+            position: relative;
+            padding-bottom: 1rem;
+        }
+        
+        .section-title::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 25%;
+            width: 50%;
+            height: 3px;
+            background: linear-gradient(to right, transparent, var(--secondary), transparent);
+        }
+        
+        /* Componente box */
+        .component-box {
+            border: 2px solid var(--success);
+            border-radius: 8px;
+            padding: 1.2rem;
+            margin-bottom: 1.5rem;
+            background-color: rgba(0, 184, 148, 0.05);
+        }
+        
+        .component-box h3 {
+            color: var(--success);
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+
+        .future-feature {
+            background-color: rgba(231, 76, 60, 0.1);
+            border: 1px dashed var(--danger);
+            border-radius: 4px;
+            padding: 5px 10px;
+            font-size: 0.8rem;
+            color: var(--danger);
+            display: inline-block;
+            margin-left: 8px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Diapositiva 1: Portada -->
+    <section class="slide cover">
+        <div class="slide-content">
+            <h1>Backend AISS</h1>
+            <h2>Artificial Intelligence Support System</h2>
+            <h3 style="color: var(--accent); margin-top: 1rem; margin-bottom: 1.5rem; text-align: center; font-size: 2.5rem;">Locked Shields 2025</h3>
+            <p class="author">Pablo Rodriguez Garcia</p>
+            <p style="text-align: center; margin-top: 2rem;">Abril 2025</p>
+            <div class="slide-number">1</div>
+        </div>
+    </section>
+
+    <!-- SECCIÓN DE ARQUITECTURA -->
+
+    <!-- Diapositiva 2: Visión General del Sistema -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Visión General del Sistema</h2>
+            <div class="two-columns">
+                <div class="column">
+                    <ul>
+                        <li><strong>Sistema distribuido para gestión de conocimiento con capacidades RAG</strong> (Retrieval Augmented Generation)</li>
+                        <li><strong>Arquitectura de microservicios</strong> altamente modular y escalable</li>
+                        <li><strong>Implementa el Model Context Protocol (MCP)</strong> para estructuración de información</li>
+                        <li><strong>LangGraph</strong> <span class="future-feature">Futura implementación</span> para flujos de trabajo de IA avanzados</li>
+                        <li><strong>Structured Output</strong> para generar respuestas en formatos específicos</li>
+                    </ul>
+                </div>
+                <div class="column">
+                    <div class="service-box">
+                        <h4>Tecnologías principales</h4>
+                        <ul>
+                            <li><strong>Go</strong>: Servicios core de alto rendimiento</li>
+                            <li><strong>Python</strong>: Servicios MCP y procesamiento de lenguaje</li>
+                            <li><strong>MongoDB</strong>: Almacenamiento de datos</li>
+                            <li><strong>Qdrant</strong>: Base de datos vectorial</li>
+                            <li><strong>MinIO</strong>: Almacenamiento de objetos</li>
+                            <li><strong>Comunicación</strong>: APIs REST</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="slide-number">2</div>
+        </div>
+    </section>
+
+    <!-- Diapositiva 3: Arquitectura General -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Arquitectura General</h2>
+            
+            <!-- Arquitectura por capas en formato visual jerárquico -->
+            <div style="display: flex; flex-direction: column; width: 100%; margin-bottom: 2rem;">
+                <!-- Capa de presentación -->
+                <div style="display: flex; justify-content: center; margin-bottom: 1rem;">
+                    <div class="arch-box fade-in" style="width: 70%; text-align: center; background-color: rgba(231, 76, 60, 0.1); border-color: var(--danger);">
+                        <strong style="font-size: 1.2rem;">Capa de Presentación</strong>
+                        <div style="display: flex; justify-content: center; margin-top: 0.8rem;">
+                            <div class="arch-component" style="width: 70%; text-align: center;">Cliente (Frontend)</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Capa de API -->
+                <div style="display: flex; justify-content: center; margin-bottom: 1rem;">
+                    <div class="arch-box fade-in-delay-1" style="width: 80%; text-align: center; background-color: rgba(243, 156, 18, 0.1); border-color: var(--warning);">
+                        <strong style="font-size: 1.2rem;">Capa de API</strong>
+                        <div style="display: flex; justify-content: center; margin-top: 0.8rem;">
+                            <div style="width: 95%; display: flex; flex-direction: row; justify-content: space-between;">
+                                <div class="arch-component" style="width: 22%; text-align: center;">Routing</div>
+                                <div class="arch-component" style="width: 22%; text-align: center;">Auth</div>
+                                <div class="arch-component" style="width: 22%; text-align: center;">CORS</div>
+                                <div class="arch-component" style="width: 22%; text-align: center;">Rate Limiting</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Capa de servicios -->
+                <div style="display: flex; justify-content: center; margin-bottom: 1rem;">
+                    <div class="arch-box fade-in-delay-2" style="width: 90%; text-align: center; background-color: rgba(41, 128, 185, 0.1); border-color: var(--primary);">
+                        <strong style="font-size: 1.2rem;">Capa de Servicios Core</strong>
+                        <div style="display: flex; justify-content: center; margin-top: 0.8rem;">
+                            <div style="width: 95%; display: flex; flex-direction: row; justify-content: space-between;">
+                                <div class="arch-box" style="width: 22%; font-size: 0.9rem; padding: 0.5rem;">User Service</div>
+                                <div class="arch-box" style="width: 22%; font-size: 0.9rem; padding: 0.5rem;">Document Service</div>
+                                <div class="arch-box" style="width: 22%; font-size: 0.9rem; padding: 0.5rem;">Terminal Services</div>
+                                <div class="arch-box" style="width: 22%; font-size: 0.9rem; padding: 0.5rem;">DB Services</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Capa de servicios MCP y RAG -->
+                <div style="display: flex; justify-content: center; margin-bottom: 1rem;">
+                    <div class="arch-box fade-in-delay-2" style="width: 90%; text-align: center; background-color: rgba(155, 89, 182, 0.1); border-color: var(--secondary);">
+                        <strong style="font-size: 1.2rem;">Capa de Servicios MCP y RAG</strong>
+                        <div style="display: flex; justify-content: center; margin-top: 0.8rem;">
+                            <div style="width: 95%; display: flex; flex-direction: row; justify-content: space-between; flex-wrap: wrap;">
+                                <div class="arch-component" style="width: 30%; margin-bottom: 0.5rem; font-size: 0.9rem;">Context Service</div>
+                                <div class="arch-component" style="width: 30%; margin-bottom: 0.5rem; font-size: 0.9rem;">Embedding Service</div>
+                                <div class="arch-component" style="width: 30%; margin-bottom: 0.5rem; font-size: 0.9rem;">RAG Agent</div>
+                                <div class="arch-component" style="width: 45%; margin-bottom: 0.5rem; font-size: 0.9rem;">External LLM APIs</div>
+                                <div class="arch-component" style="width: 45%; margin-bottom: 0.5rem; font-size: 0.9rem;">Structured Output</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Capa de datos -->
+                <div style="display: flex; justify-content: center;">
+                    <div class="arch-box fade-in-delay-3" style="width: 80%; text-align: center; background-color: rgba(39, 174, 96, 0.1); border-color: var(--success);">
+                        <strong style="font-size: 1.2rem;">Capa de Datos</strong>
+                        <div style="display: flex; justify-content: center; margin-top: 0.8rem;">
+                            <div style="width: 95%; display: flex; flex-direction: row; justify-content: space-between; flex-wrap: wrap;">
+                                <div class="arch-db" style="width: 30%; margin-bottom: 0.5rem; font-size: 0.9rem;">MongoDB</div>
+                                <div class="arch-db" style="width: 30%; margin-bottom: 0.5rem; font-size: 0.9rem;">Qdrant</div>
+                                <div class="arch-db" style="width: 30%; margin-bottom: 0.5rem; font-size: 0.9rem;">MinIO</div>
+                            </div>
+                            <div style="width: 95%; display: flex; flex-direction: row; justify-content: space-evenly; margin-top: 0.5rem;">
+                                <div class="arch-component" style="width: 45%; margin-bottom: 0.5rem; font-size: 0.9rem;">Ollama (LLM Provider)</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Leyenda -->
+            <div style="display: flex; justify-content: center; margin-top: 1rem;">
+                <div style="display: flex; flex-direction: row; justify-content: center; width: 80%;">
+                    <div style="margin: 0 1rem; display: flex; align-items: center;">
+                        <div style="width: 15px; height: 15px; background-color: rgba(231, 76, 60, 0.1); border: 1px solid var(--danger); margin-right: 5px;"></div>
+                        <span>Presentación</span>
+                    </div>
+                    <div style="margin: 0 1rem; display: flex; align-items: center;">
+                        <div style="width: 15px; height: 15px; background-color: rgba(243, 156, 18, 0.1); border: 1px solid var(--warning); margin-right: 5px;"></div>
+                        <span>API</span>
+                    </div>
+                    <div style="margin: 0 1rem; display: flex; align-items: center;">
+                        <div style="width: 15px; height: 15px; background-color: rgba(41, 128, 185, 0.1); border: 1px solid var(--primary); margin-right: 5px;"></div>
+                        <span>Servicios Core</span>
+                    </div>
+                    <div style="margin: 0 1rem; display: flex; align-items: center;">
+                        <div style="width: 15px; height: 15px; background-color: rgba(155, 89, 182, 0.1); border: 1px solid var(--secondary); margin-right: 5px;"></div>
+                        <span>MCP/RAG</span>
+                    </div>
+                    <div style="margin: 0 1rem; display: flex; align-items: center;">
+                        <div style="width: 15px; height: 15px; background-color: rgba(39, 174, 96, 0.1); border: 1px solid var(--success); margin-right: 5px;"></div>
+                        <span>Datos</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="slide-number">3</div>
+        </div>
+    </section>
+
+    <!-- Diapositiva 4: Flujo de Datos Principales -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Flujos de Datos Principales</h2>
+            
+            <div class="component-box">
+                <h3>1. Procesamiento de Documentos</h3>
+                <div class="modern-diagram">
+                    <div style="display: flex; flex-direction: column; align-items: center; width: 100%;">
+                        <div class="arch-box fade-in" style="width: 70%; margin-bottom: 0.5rem;">Cliente</div>
+                        <div class="arch-arrow"></div>
+                        <div class="arch-box fade-in-delay-1" style="width: 70%; margin-bottom: 0.5rem;">Document Service</div>
+                        <div class="arch-arrow"></div>
+                        <div style="display: flex; flex-direction: column; align-items: center; width: 90%; margin-top: 0.5rem; margin-bottom: 0.5rem;" class="fade-in-delay-2">
+                            <div class="arch-box" style="width: 80%; margin-bottom: 0.5rem;">MinIO (Almacenamiento)</div>
+                            <div class="arch-component" style="width: 80%; margin-bottom: 0.5rem;">Embedding Service</div>
+                            <div class="arch-db" style="width: 80%; margin-bottom: 0.5rem;">Context Service</div>
+                        </div>
+                        <div class="arch-arrow"></div>
+                        <div style="display: flex; flex-direction: column; align-items: center; width: 90%;" class="fade-in-delay-3">
+                            <div class="arch-db" style="width: 80%; margin-bottom: 0.5rem;">Qdrant (Vector DB)</div>
+                            <div class="arch-db" style="width: 80%; margin-bottom: 0.5rem;">MongoDB (Metadata)</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="component-box">
+                <h3>2. Consulta RAG</h3>
+                <div class="modern-diagram">
+                    <div style="display: flex; flex-direction: column; align-items: center; width: 100%;">
+                        <div class="arch-box fade-in" style="width: 70%; margin-bottom: 0.5rem;">Usuario</div>
+                        <div class="arch-arrow"></div>
+                        <div class="arch-box fade-in-delay-1" style="width: 70%; margin-bottom: 0.5rem;">RAG Agent</div>
+                        <div class="arch-arrow"></div>
+                        <div style="display: flex; flex-direction: column; align-items: center; width: 90%;" class="fade-in-delay-2">
+                            <div class="arch-component" style="width: 80%; margin-bottom: 0.5rem;">Embedding Service</div>
+                            <div class="arch-component" style="width: 80%; margin-bottom: 0.5rem;">Context Service</div>
+                        </div>
+                        <div class="arch-arrow"></div>
+                        <div style="display: flex; flex-direction: column; align-items: center; width: 90%;" class="fade-in-delay-3">
+                            <div class="arch-db" style="width: 80%; margin-bottom: 0.5rem;">Qdrant (Búsqueda Semántica)</div>
+                            <div class="arch-component" style="width: 80%; margin-bottom: 0.5rem;">LLM Provider</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="component-box">
+                <h3>3. Terminal + RAG</h3>
+                <div class="modern-diagram">
+                    <div style="display: flex; flex-direction: column; align-items: center; width: 100%;">
+                        <div class="arch-box fade-in" style="width: 70%; margin-bottom: 0.5rem;">Operador</div>
+                        <div class="arch-arrow"></div>
+                        <div style="display: flex; flex-direction: row; width: 90%; justify-content: space-between;" class="fade-in-delay-1">
+                            <div class="arch-box" style="width: 45%; margin-bottom: 0.5rem; border-color: var(--secondary);">Consulta de Servicio</div>
+                            <div class="arch-box pulse" style="width: 45%; margin-bottom: 0.5rem; border-color: var(--accent);">Información del Servicio</div>
+                        </div>
+                        <div class="arch-arrow"></div>
+                        <div style="display: flex; flex-direction: row; width: 90%;" class="fade-in-delay-2">
+                            <div class="arch-component" style="width: 30%; margin-bottom: 0.5rem;">RAG Agent</div>
+                            <div class="arch-component" style="width: 30%; margin-bottom: 0.5rem;">Context Service</div>
+                            <div class="arch-db" style="width: 30%; margin-bottom: 0.5rem;">Base de Conocimiento</div>
+                        </div>
+                        <div class="arch-arrow"></div>
+                        <div class="arch-box highlight-box fade-in-delay-2" style="width: 70%; margin-bottom: 0.5rem; border-color: var(--primary);">
+                            Terminal Service
+                            <div style="font-size: 0.8rem; margin-top: 0.3rem; padding: 0.3rem; background-color: rgba(109, 192, 255, 0.2); border-radius: 5px;">
+                                Acceso y diagnóstico al servicio afectado
+                            </div>
+                        </div>
+                        <div class="arch-arrow"></div>
+                        <div style="display: flex; flex-direction: column; width: 70%;" class="fade-in-delay-3">
+                            <div class="arch-box" style="width: 100%; margin-bottom: 0.5rem; border-color: var(--warning);">Integración con Terminal + Logs</div>
+                            <div class="arch-box" style="width: 100%; margin-bottom: 0.5rem; border-color: var(--secondary);">
+                                Análisis de información
+                                <div style="font-size: 0.8rem; margin-top: 0.3rem; padding: 0.3rem; background-color: rgba(155, 89, 182, 0.1); border-radius: 5px;">
+                                    Diagnóstico • Causas Posibles • Recomendaciones de Solución
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="slide-number">4</div>
+        </div>
+    </section>
+
+    <!-- Diapositiva 5: Ejemplo de flujo - DB Services -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Flujo: Integración con Bases de Datos</h2>
+            
+            <div class="component-box">
+                <h3>Flujo DB Query con Validation Agent</h3>
+                <div class="modern-diagram">
+                    <div style="display: flex; flex-direction: column; align-items: center; width: 100%;">
+                        <div class="arch-box fade-in" style="width: 70%; margin-bottom: 0.5rem;">Usuario (Consulta en lenguaje natural)</div>
+                        <div class="arch-arrow"></div>
+                        <div class="arch-box fade-in-delay-1" style="width: 70%; margin-bottom: 0.5rem;">API Gateway</div>
+                        <div class="arch-arrow"></div>
+                        <div style="display: flex; flex-direction: column; align-items: center; width: 90%; margin-top: 0.5rem; margin-bottom: 0.5rem;" class="fade-in-delay-2">
+                            <div class="arch-component" style="width: 80%; margin-bottom: 0.5rem;">RAG Agent + DB Query Service</div>
+                            <div class="arch-box" style="width: 80%; margin-bottom: 0.5rem;">Validación de consulta</div>
+                        </div>
+                        <div class="arch-arrow"></div>
+                        <div style="display: flex; flex-direction: row; width: 90%; justify-content: space-between;" class="fade-in-delay-3">
+                            <div class="arch-component" style="width: 45%; margin-bottom: 0.5rem;">DB Connection Service</div>
+                            <div class="arch-component" style="width: 45%; margin-bottom: 0.5rem;">Schema Discovery Service</div>
+                        </div>
+                        <div class="arch-arrow"></div>
+                        <div class="arch-box highlight-box fade-in-delay-3" style="width: 70%; margin-bottom: 0.5rem; border-color: var(--warning);">
+                            Base de Datos Externa
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="service-box" style="margin-top: 1.5rem;">
+                <h4>Características principales</h4>
+                <div class="two-columns">
+                    <div class="column">
+                        <ul>
+                            <li>Traducción de lenguaje natural a múltiples lenguajes de consulta</li>
+                            <li>Validación universal con Ollama para todos los tipos de BBDD</li>
+                            <li>Conexión segura a SQL, NoSQL, vectoriales y grafos</li>
+                        </ul>
+                    </div>
+                    <div class="column">
+                        <ul>
+                            <li>Exploración automática de esquemas</li>
+                            <li>Control granular de permisos por conexión</li>
+                            <li>Generación de respuestas explicativas</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="slide-number">5</div>
+        </div>
+    </section>
+
+    <!-- SECCIÓN DE COMPONENTES -->
+
+    <!-- Diapositiva 6: Servicios Core -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Componentes: Servicios Core</h2>
+            <div class="two-columns">
+                <div class="column">
+                    <div class="component-box">
+                        <h3>User Service</h3>
+                        <ul>
+                            <li>Gestión completa de usuarios y autenticación</li>
+                            <li>JWT con tokens de acceso y refresco</li>
+                            <li>Control de acceso basado en roles (RBAC)</li>
+                            <li>Gestión de perfiles y preferencias</li>
+                            <li>Auditoría de accesos y seguridad</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="component-box">
+                        <h3>Document Service</h3>
+                        <ul>
+                            <li>Gestión del ciclo de vida de documentos</li>
+                            <li>Procesamiento e indexación de documentos</li>
+                            <li>Extracción de texto y metadatos</li>
+                            <li>Chunking inteligente de contenido</li>
+                            <li>Almacenamiento seguro en MinIO</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="two-columns">
+                <div class="column">
+                    <div class="component-box">
+                        <h3>API Gateway</h3>
+                        <ul>
+                            <li>Punto único de entrada al sistema</li>
+                            <li>Autenticación y enrutamiento de solicitudes</li>
+                            <li>Balanceo de carga y limitación de tasas</li>
+                            <li>Monitorización y logs de acceso</li>
+                            <li>Configuración CORS y seguridad de cabeceras</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="column">
+                    <div style="margin-top: 1.5rem; padding: 1rem;">
+                        <p>Los servicios core están implementados en <strong>Go</strong> para maximizar rendimiento y escalabilidad en operaciones críticas.</p>
+                        <p>La arquitectura orientada a microservicios permite:</p>
+                        <ul>
+                            <li>Despliegue independiente de componentes</li>
+                            <li>Escalado horizontal específico por servicio</li>
+                            <li>Resiliencia ante fallos parciales</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="slide-number">6</div>
+        </div>
+    </section>
+
+    <!-- Diapositiva 7: Servicios MCP -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Componentes: Servicios MCP</h2>
+            <div class="two-columns">
+                <div class="column">
+                    <div class="component-box">
+                        <h3>Context Service</h3>
+                        <ul>
+                            <li>Gestión de áreas de conocimiento</li>
+                            <li>Organización jerárquica de información</li>
+                            <li>Estructuración de metadatos avanzada</li>
+                            <li>Relaciones padre-hijo entre áreas</li>
+                            <li>Preprocesamiento para búsquedas eficientes</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="component-box">
+                        <h3>Embedding Service</h3>
+                        <ul>
+                            <li>Generación de embeddings vectoriales</li>
+                            <li>Búsqueda semántica por similitud</li>
+                            <li>Procesamiento por lotes optimizado</li>
+                            <li>Caché inteligente de embeddings</li>
+                            <li>Soporte para múltiples modelos vectoriales</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="two-columns">
+                <div class="column">
+                    <div class="component-box">
+                        <h3>RAG Agent</h3>
+                        <ul>
+                            <li>Coordinación del proceso RAG</li>
+                            <li>Integración con múltiples LLM (OpenAI, Anthropic, Ollama)</li>
+                            <li>Gestión de prompts y contextos</li>
+                            <li>Control de parámetros de generación</li>
+                            <li>Monitoreo de uso y costes de LLM</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="component-box">
+                        <h3>Structured Output</h3>
+                        <ul>
+                            <li>Generación de respuestas en formatos específicos</li>
+                            <li>Soporte JSON/XML para integraciones</li>
+                            <li>Validación automática de estructura</li>
+                            <li>Transformación de formatos dinámicos</li>
+                            <li>Plantillas personalizables por cliente</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="slide-number">7</div>
+        </div>
+    </section>
+
+    <!-- Diapositiva 8: Plan LangGraph -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Plan de Implementación: LangGraph</h2>
+            <div class="two-columns">
+                <div class="column">
+                    <h3>Implementación Futura</h3>
+                    <p>La arquitectura está preparada para incorporar LangGraph para mejorar los flujos de razonamiento y resolver problemas complejos.</p>
+                    
+                    <div class="service-box" style="margin-top: 1rem;">
+                        <h4>Características planeadas</h4>
+                        <ul>
+                            <li>Orquestación de flujos de trabajo de IA complejos</li>
+                            <li>Agentes con memoria y estado persistente</li>
+                            <li>Encadenamiento dinámico de procesos LLM</li>
+                            <li>Trazabilidad completa del razonamiento</li>
+                            <li>Pensamiento multicapa para problemas estructurados</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="service-box highlight-box">
+                        <h4>Estado Actual: Flujo Secuencial</h4>
+                        <p>El sistema actual implementa un flujo RAG secuencial que funciona correctamente para la mayoría de los casos de uso:</p>
+                        <ol>
+                            <li>Recepción de consulta</li>
+                            <li>Procesamiento y generación de embedding</li>
+                            <li>Búsqueda de contexto relevante</li>
+                            <li>Formulación de prompt enriquecido</li>
+                            <li>Generación de respuesta por LLM</li>
+                        </ol>
+                    </div>
+                    
+                    <div class="service-box" style="margin-top: 1rem; background-color: rgba(231, 76, 60, 0.05); border-color: var(--danger);">
+                        <h4>Próximos pasos</h4>
+                        <p>Para implementar LangGraph se requiere:</p>
+                        <ul>
+                            <li>Integrar la biblioteca en requirements.txt</li>
+                            <li>Definir nodos de procesamiento específicos</li>
+                            <li>Diseñar flujos para los casos de uso prioritarios</li>
+                            <li>Implementar persistencia de estado entre llamadas</li>
+                            <li>Desarrollar sistema de monitoreo del flujo</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="slide-number">8</div>
+        </div>
+    </section>
+
+    <!-- Diapositiva 9: Terminal Services -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Componentes: Terminal Services</h2>
+            <div class="two-columns">
+                <div class="column">
+                    <div class="component-box">
+                        <h3>Terminal Gateway Service</h3>
+                        <ul>
+                            <li>WebSocket para terminal interactiva</li>
+                            <li>Gestión de sesiones SSH seguras</li>
+                            <li>Autenticación múltiple (contraseñas, claves)</li>
+                            <li>Detección automática de sistema operativo</li>
+                            <li>Redimensionamiento dinámico de terminal</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="component-box">
+                        <h3>Terminal Suggestion Service</h3>
+                        <ul>
+                            <li>Sugerencias de comandos basadas en contexto</li>
+                            <li>Análisis en tiempo real de output</li>
+                            <li>Detección y corrección de errores comunes</li>
+                            <li>Integración con bases de conocimiento</li>
+                            <li>Aprendizaje de patrones de uso</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="service-box" style="margin-top: 1rem;">
+                <h4>Características avanzadas</h4>
+                <div class="two-columns">
+                    <div class="column">
+                        <ul>
+                            <li>Sesiones compartidas colaborativas</li>
+                            <li>Modos observador y colaborador</li>
+                            <li>Indicadores de actividad en tiempo real</li>
+                        </ul>
+                    </div>
+                    <div class="column">
+                        <ul>
+                            <li>Auditoría completa de comandos</li>
+                            <li>Alertas para comandos potencialmente peligrosos</li>
+                            <li>Control granular de permisos</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="slide-number">9</div>
+        </div>
+    </section>
+
+    <!-- Diapositiva 10: DB Services -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Componentes: DB Services</h2>
+            <div class="two-columns">
+                <div class="column">
+                    <div class="component-box">
+                        <h3>DB Connection Service</h3>
+                        <ul>
+                            <li>Gestión de conexiones a múltiples tipos de BD</li>
+                            <li>Soporte para SQL, NoSQL, Graph DBs, etc.</li>
+                            <li>Exploración de esquemas y relaciones</li>
+                            <li>Ejecución segura de consultas con límites</li>
+                            <li>Pool de conexiones optimizado</li>
+                            <li>Cifrado de credenciales</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="component-box">
+                        <h3>Schema Discovery Service</h3>
+                        <ul>
+                            <li>Análisis automático de esquemas de bases de datos</li>
+                            <li>Detección de relaciones y dependencias</li>
+                            <li>Generación de mapas de esquema</li>
+                            <li>Integración con RAG para consultas contextuales</li>
+                            <li>Vectorización de esquemas para búsqueda semántica</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="service-box" style="margin-top: 1rem;">
+                <h4>Bases de datos soportadas</h4>
+                <div style="display: flex; flex-direction: column; align-items: center; width: 100%;">
+                    <div class="arch-db" style="width: 80%; margin-bottom: 0.5rem;">PostgreSQL</div>
+                    <div class="arch-db" style="width: 80%; margin-bottom: 0.5rem;">MongoDB</div>
+                    <div class="arch-db" style="width: 80%; margin-bottom: 0.5rem;">MySQL/MariaDB</div>
+                    <div class="arch-db" style="width: 80%; margin-bottom: 0.5rem;">Qdrant</div>
+                    <div class="arch-db" style="width: 80%; margin-bottom: 0.5rem;">SQLite</div>
+                    <div class="arch-db" style="width: 80%; margin-bottom: 0.5rem;">Microsoft SQL Server</div>
+                </div>
+            </div>
+            <div class="slide-number">10</div>
+        </div>
+    </section>
+
+    <!-- SECCIÓN SEGURIDAD -->
+
+    <!-- Diapositiva 11: Seguridad - Configuración de Red -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Seguridad: Configuración de Red</h2>
+            
+            <div class="modern-diagram">
+                <div style="display: flex; flex-direction: column; align-items: center; width: 100%;">
+                    <div class="arch-box fade-in" style="width: 80%; text-align: center; font-weight: bold; background-color: rgba(231, 76, 60, 0.1); border-color: var(--danger); margin-bottom: 0.5rem;">
+                        Internet/Red Externa
+                    </div>
+                    <div class="arch-arrow"></div>
+                    <div class="arch-box fade-in-delay-1" style="width: 80%; border-color: var(--danger); margin-bottom: 0.5rem;">
+                        Frontend (Nginx/Proxy)
+                        <div style="font-size: 0.9rem; margin-top: 0.5rem;">Los usuarios se conectan aquí (puerto 80/443)</div>
+                    </div>
+                    <div class="arch-arrow"></div>
+                    <div class="arch-box fade-in-delay-2" style="width: 80%; border-color: var(--warning); margin-bottom: 0.5rem;">
+                        API Gateway
+                        <div style="font-size: 0.9rem; margin-top: 0.5rem;">No expuesto externamente, solo accesible desde la red Docker</div>
+                    </div>
+                    <div class="arch-arrow"></div>
+                    <div class="arch-box fade-in-delay-3" style="width: 80%; border-color: var(--success); background-color: rgba(46, 204, 113, 0.1); margin-bottom: 0.5rem;">
+                        Servicios Internos
+                        <div style="font-size: 0.9rem; margin-top: 0.5rem;">Solo accesibles dentro de la red Docker</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="service-box" style="margin-top: 1.5rem;">
+                <h4>Ventajas del modelo de red</h4>
+                <div class="two-columns">
+                    <div class="column">
+                        <ul>
+                            <li>Aislamiento completo de servicios internos</li>
+                            <li>Red bridge privada entre contenedores</li>
+                            <li>Única entrada externa a través del proxy</li>
+                        </ul>
+                    </div>
+                    <div class="column">
+                        <ul>
+                            <li>Superficie de ataque mínima</li>
+                            <li>Comunicación TLS para endpoints externos</li>
+                            <li>Segmentación de tráfico por servicio</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="slide-number">11</div>
+        </div>
+    </section>
+
+    <!-- Diapositiva 12: Modelo de Seguridad Multicapa -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Modelo de Seguridad Multicapa</h2>
+            <div class="modern-diagram" style="align-items: center;">
+                <div style="display: flex; flex-direction: column; align-items: center; width: 100%;">
+                    <div class="security-layer fade-in" style="width: 85%;">
+                        <div style="text-align: center; margin-bottom: 0.5rem; font-weight: bold;">Perímetro de Red (Firewall + Proxy)</div>
+                    </div>
+                    <div class="arch-arrow"></div>
+                    <div class="security-layer fade-in-delay-1" style="width: 75%;">
+                        <div style="text-align: center; margin-bottom: 0.5rem; font-weight: bold;">API Gateway (Rate limiting + CORS + Validación)</div>
+                    </div>
+                    <div class="arch-arrow"></div>
+                    <div class="security-layer fade-in-delay-2" style="width: 65%;">
+                        <div style="text-align: center; margin-bottom: 0.5rem; font-weight: bold;">Autenticación y Autorización (JWT + RBAC)</div>
+                    </div>
+                    <div class="arch-arrow"></div>
+                    <div class="security-layer fade-in-delay-3" style="width: 55%;">
+                        <div style="text-align: center; margin-bottom: 0.5rem; font-weight: bold;">Seguridad a Nivel de Servicio (Input validation + Logging)</div>
+                    </div>
+                    <div class="arch-arrow"></div>
+                    <div class="security-layer fade-in-delay-3" style="width: 45%;">
+                        <div style="text-align: center; margin-bottom: 0.5rem; font-weight: bold;">Seguridad a Nivel de Datos (Encryption + Access control)</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="service-box" style="margin-top: 1.5rem;">
+                <h4>Implementación de seguridad por capa</h4>
+                <div class="two-columns">
+                    <div class="column">
+                        <ul>
+                            <li><strong>Red:</strong> Aislamiento por contenedor</li>
+                            <li><strong>API:</strong> Rate limiting, CORS estricto</li>
+                            <li><strong>Auth:</strong> JWT con tokens de acceso/refresco</li>
+                        </ul>
+                    </div>
+                    <div class="column">
+                        <ul>
+                            <li><strong>Servicio:</strong> Verificación host keys SSH</li>
+                            <li><strong>Datos:</strong> Credenciales cifradas con bcrypt</li>
+                            <li><strong>Terminal:</strong> Validación de comandos</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="slide-number">12</div>
+        </div>
+    </section>
+
+    <!-- Diapositiva 13: Monitoreo y Escalabilidad -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Monitoreo y Escalabilidad</h2>
+            <div class="two-columns">
+                <div class="column">
+                    <div class="service-box">
+                        <h4>Monitoreo</h4>
+                        <ul>
+                            <li>Endpoints de salud para cada servicio</li>
+                            <li>Métricas en formato Prometheus</li>
+                            <li>Logging estructurado JSON</li>
+                            <li>Alertas configurables por umbral</li>
+                            <li>Dashboards Grafana para visualización</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="service-box">
+                        <h4>Ejemplo de métricas</h4>
+                        <pre style="background-color: #2d2d2d; padding: 0.5rem; border-radius: 4px; font-size: 0.8rem; overflow-x: auto;">
+{
+  "service": "embedding-service",
+  "status": "healthy",
+  "metrics": {
+    "requests_per_minute": 125,
+    "avg_response_time_ms": 350,
+    "active_connections": 18,
+    "memory_usage_mb": 1250
+  }
+}</pre>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="service-box">
+                        <h4>Escalabilidad</h4>
+                        <ul>
+                            <li>Servicios stateless para escalado horizontal</li>
+                            <li>Bases de datos configurables para replicación</li>
+                            <li>API Gateway con balanceo de carga</li>
+                            <li>Procesamiento por lotes para operaciones intensivas</li>
+                            <li>Particionamiento de datos por cliente/área</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="service-box">
+                        <h4>Optimizaciones</h4>
+                        <ul>
+                            <li><strong>Caché de embeddings</strong>: Reutilización para textos similares</li>
+                            <li><strong>Optimizaciones GPU</strong>: Precisión FP16, batch processing</li>
+                            <li><strong>Pool de conexiones</strong>: Reutilización eficiente</li>
+                            <li><strong>Buffering adaptativo</strong>: Ajuste según la carga</li>
+                            <li><strong>Compresión de datos</strong>: Reduce transferencia</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="slide-number">13</div>
+        </div>
+    </section>
+
+    <!-- SECCIÓN CASOS DE USO -->
+
+    <!-- Diapositiva 14: Caso 0 - Configuración del Sistema -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Caso 0: Configuración Inicial del Sistema</h2>
+            
+            <div class="use-case-box">
+                <h3>Preparación para Locked Shields 2025</h3>
+                
+                <div class="use-case-step fade-in">
+                    <h4>1. Creación de Áreas de Conocimiento</h4>
+                    <p>Se definen múltiples áreas especializadas para el ejercicio, organizadas jerárquicamente.</p>
+                    <div style="display: flex; flex-direction: column; align-items: center; width: 100%;">
+                        <div class="arch-component" style="width: 80%; margin-bottom: 0.5rem;">Área de Conocimiento 1</div>
+                        <div class="arch-component" style="width: 80%; margin-bottom: 0.5rem;">Área de Conocimiento 2</div>
+                        <div class="arch-component" style="width: 80%; margin-bottom: 0.5rem;">Área de Conocimiento 3</div>
+                        <div class="arch-component" style="width: 80%; margin-bottom: 0.5rem;">Área de Conocimiento 4</div>
+                    </div>
+                </div>
+                
+                <div class="use-case-step fade-in-delay-1">
+                    <h4>2. Importación de Documentación</h4>
+                    <p>Carga de playbooks, manuales técnicos, procedimientos y documentación del escenario.</p>
+                </div>
+                
+                <div class="use-case-step fade-in-delay-2">
+                    <h4>3. Conexión a CMDB del Escenario</h4>
+                    <p>Integración con la CMDB para obtener información detallada de todos los sistemas del escenario.</p>
+                    <div class="two-columns">
+                        <div class="column">
+                            <ul>
+                                <li>Inventario de sistemas</li>
+                                <li>Configuraciones de red</li>
+                                <li>Versiones de software</li>
+                            </ul>
+                        </div>
+                        <div class="column">
+                            <ul>
+                                <li>Dependencias entre servicios</li>
+                                <li>Contactos responsables</li>
+                                <li>Clasificación de criticidad</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="use-case-step fade-in-delay-3">
+                    <h4>4. Generación de Embeddings y Estructuración de Conocimiento</h4>
+                    <p>El sistema procesa la información para generar embeddings semánticos y estructurar toda la documentación para búsquedas eficientes.</p>
+                </div>
+            </div>
+            <div class="slide-number">14</div>
+        </div>
+    </section>
+
+    <!-- Diapositiva 15: Caso 1 - STRATCOM -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Caso 1: STRATCOM - Comunicación de Prensa</h2>
+            
+            <div class="use-case-box">
+                <h3>Elaboración Asistida de Comunicados</h3>
+                
+                <div class="two-columns">
+                    <div class="column">
+                        <div class="use-case-step fade-in">
+                            <h4>1. Solicitud de Información</h4>
+                            <p>El responsable de STRATCOM solicita información sobre directrices de comunicación para un incidente específico.</p>
+                        </div>
+                        
+                        <div class="use-case-step fade-in-delay-1">
+                            <h4>2. Recuperación de Contexto</h4>
+                            <p>El sistema recupera:</p>
+                            <ul>
+                                <li>Playbooks de comunicación en crisis</li>
+                                <li>Plantillas oficiales aprobadas</li>
+                                <li>Comunicados previos similares</li>
+                                <li>Mensajes clave para stakeholders</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="column">
+                        <div class="use-case-step fade-in-delay-2">
+                            <h4>3. Análisis de Información</h4>
+                            <p>RAG Agent analiza y extrae:</p>
+                            <ul>
+                                <li>Tipo de incidente y mensajes apropiados</li>
+                                <li>Audiencias objetivo y canales adecuados</li>
+                                <li>Nivel de detalle técnico apropiado</li>
+                                <li>Cadenas de aprobación requeridas</li>
+                            </ul>
+                        </div>
+                        
+                        <div class="use-case-step fade-in-delay-3">
+                            <h4>4. Generación y Formato</h4>
+                            <p>El sistema genera un comunicado oficial con Structured Output, formateado según plantillas institucionales, listo para revisión y aprobación.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="slide-number">15</div>
+        </div>
+    </section>
+
+    <!-- Diapositiva 16: Caso 3 - Anomalía en Servicio -->
+    <section class="slide">
+        <div class="slide-content">
+            <h2 class="section-title">Caso 3: Resolución de Anomalía en Servicio</h2>
+            
+            <div class="use-case-box">
+                <h3>Soporte Interactivo en Resolución de Incidentes</h3>
+                
+                <div class="two-columns">
+                    <div class="column">
+                        <div class="use-case-step fade-in">
+                            <h4>1. Detección y Consulta Inicial</h4>
+                            <p>Un operador detecta una anomalía en un servicio y consulta al sistema información detallada sobre el servicio afectado.</p>
+                        </div>
+                        
+                        <div class="use-case-step fade-in-delay-1">
+                            <h4>2. Recuperación de Información Contextual</h4>
+                            <p>El sistema consulta su base de conocimiento y proporciona:</p>
+                            <ul>
+                                <li>Máquina donde se aloja el servicio</li>
+                                <li>Relaciones con otros servicios</li>
+                                <li>Nivel de criticidad</li>
+                                <li>Parámetros de configuración</li>
+                                <li>Documentación técnica relevante</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="column">
+                        <div class="use-case-step fade-in-delay-2">
+                            <h4>3. Acceso por Terminal e Inspección</h4>
+                            <p>El operador utiliza el Terminal Service para conectarse al servidor y acceder a logs y datos de diagnóstico del servicio afectado.</p>
+                        </div>
+                        
+                        <div class="use-case-step fade-in-delay-3">
+                            <h4>4. Análisis y Resolución</h4>
+                            <p>El sistema analiza los datos recuperados y proporciona:</p>
+                            <ul>
+                                <li>Identificación precisa del problema</li>
+                                <li>Causas posibles basadas en patrones conocidos</li>
+                                <li>Soluciones recomendadas con comandos específicos</li>
+                                <li>Métodos de verificación para confirmar la resolución</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="slide-number">16</div>
+        </div>
+    </section>
+
+    <!-- Diapositiva 17: Gracias -->
+    <section class="slide thanks">
+        <div class="slide-content">
+            <h2>¡Gracias!</h2>
+            <p>Backend AISS: Artificial Intelligence Support System</p>
+            <p style="margin-top: 1rem; font-size: 1.8rem; margin-bottom: 2rem;">Locked Shields 2025</p>
+            <p style="margin-top: 2rem; color: var(--accent);">Pablo Rodriguez Garcia</p>
+            <div class="slide-number">17</div>
+        </div>
+    </section>
+
+    <script>
+        // Script para inicializar animaciones y comportamiento interactivo
+        document.addEventListener('DOMContentLoaded', () => {
+            // Aplicar pequeño retraso para asegurar que las animaciones se ejecuten correctamente
+            setTimeout(() => {
+                const fadeElements = document.querySelectorAll('.fade-in, .fade-in-delay-1, .fade-in-delay-2, .fade-in-delay-3');
+                fadeElements.forEach(element => {
+                    element.style.opacity = '0';
+                });
+            }, 100);
+            
+            // Función para activar las animaciones cuando la diapositiva es visible
+            function checkVisibility() {
+                const slides = document.querySelectorAll('.slide');
+                
+                slides.forEach((slide, index) => {
+                    const rect = slide.getBoundingClientRect();
+                    const isVisible = (
+                        rect.top >= 0 &&
+                        rect.bottom <= (window.innerHeight || document.documentElement.clientHeight)
+                    );
+                    
+                    if (isVisible) {
+                        // Activar animaciones específicas para cada diapositiva
+                        activateAnimations(slide);
+                    }
+                });
+            }
+            
+            // Activar animaciones para una diapositiva visible
+            function activateAnimations(slide) {
+                const fadeInElements = slide.querySelectorAll('.fade-in');
+                const fadeInDelay1Elements = slide.querySelectorAll('.fade-in-delay-1');
+                const fadeInDelay2Elements = slide.querySelectorAll('.fade-in-delay-2');
+                const fadeInDelay3Elements = slide.querySelectorAll('.fade-in-delay-3');
+                
+                fadeInElements.forEach(el => el.style.opacity = '1');
+                
+                setTimeout(() => {
+                    fadeInDelay1Elements.forEach(el => el.style.opacity = '1');
+                }, 300);
+                
+                setTimeout(() => {
+                    fadeInDelay2Elements.forEach(el => el.style.opacity = '1');
+                }, 600);
+                
+                setTimeout(() => {
+                    fadeInDelay3Elements.forEach(el => el.style.opacity = '1');
+                }, 900);
+            }
+            
+            // Inicializar verificación de visibilidad
+            window.addEventListener('scroll', checkVisibility);
+            checkVisibility(); // Verificar estado inicial
+        });
+    </script>
+</body>
+</html>
