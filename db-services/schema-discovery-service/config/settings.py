@@ -48,6 +48,11 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         case_sensitive = False
     
+    # Configuración de Neo4j para GraphRAG
+    neo4j_uri: str = Field(default="bolt://neo4j:7687")
+    neo4j_username: str = Field(default="neo4j")
+    neo4j_password: str = Field(default="secretpassword")
+    
     def __init__(self, **kwargs):
         """Inicializar configuraciones con valores de variables de entorno"""
         super().__init__(**kwargs)
@@ -64,6 +69,11 @@ class Settings(BaseSettings):
         # URLs de servicios
         self.db_connection_url = os.getenv("DB_CONNECTION_URL", self.db_connection_url)
         self.embedding_service_url = os.getenv("EMBEDDING_SERVICE_URL", self.embedding_service_url)
+        
+        # Configuración de Neo4j
+        self.neo4j_uri = os.getenv("NEO4J_URI", self.neo4j_uri)
+        self.neo4j_username = os.getenv("NEO4J_USERNAME", self.neo4j_username)
+        self.neo4j_password = os.getenv("NEO4J_PASSWORD", self.neo4j_password)
         
         # Configuración de descubrimiento de esquemas
         timeout = os.getenv("SCHEMA_DISCOVERY_TIMEOUT")

@@ -153,6 +153,10 @@ discovery_service = SchemaDiscoveryService(http_client, settings)
 vectorization_service = SchemaVectorizationService(http_client, settings)
 analysis_service = SchemaAnalysisService(settings)
 
+# Inicializar servicio de extracción de grafos
+from services.graph_extraction_service import GraphExtractionService
+graph_extraction_service = GraphExtractionService(settings)
+
 # Función para actualizar métricas periódicamente
 async def update_metrics():
     while True:
@@ -445,6 +449,539 @@ async def vectorize_schema(connection_id: str):
     except Exception as e:
         logger.error(f"Error vectorizing schema: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/schema/{connection_id}/graph", tags=["Graph Knowledge"])
+async def extract_schema_graph(connection_id: str):
+    """
+    Extraer grafo de conocimiento del esquema en Neo4j
+    
+    Genera una representación en grafo del esquema de base de datos para GraphRAG
+    """
+    try:
+        # Verificar si tenemos el esquema
+        schema = await discovery_service.get_schema(connection_id)
+        
+        if not schema:
+            raise HTTPException(status_code=404, detail="Schema not found")
+        
+        if schema.status != SchemaDiscoveryStatus.COMPLETED:
+            raise HTTPException(status_code=400, detail="Schema discovery not completed")
+        
+        # Extraer grafo y almacenarlo en Neo4j
+        graph_result = graph_extraction_service.extract_schema_graph(schema)
+        
+        # Generar descripción textual del grafo para incluir en la respuesta
+        graph_description = graph_extraction_service.get_graph_description(connection_id)
+        
+        return {
+            "status": "success",
+            "connection_id": connection_id,
+            "nodes_count": graph_result.get("nodes_count", 0),
+            "edges_count": graph_result.get("edges_count", 0),
+            "communities_count": graph_result.get("communities_count", 0),
+            "description": graph_description
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error extracting schema graph: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/schema/{connection_id}/graph/info", tags=["Graph Knowledge"])
+async def get_graph_info(connection_id: str):
+    """
+    Obtener información detallada del grafo de conocimiento
+    
+    Devuelve estadísticas y metadatos sobre el grafo de conocimiento extraído
+    """
+    try:
+        # Verificar si tenemos el esquema
+        schema = await discovery_service.get_schema(connection_id)
+        
+        if not schema:
+            raise HTTPException(status_code=404, detail="Schema not found")
+        
+        # Obtener estadísticas del grafo
+        graph_stats = graph_extraction_service._get_graph_stats(connection_id)
+        
+        # Obtener información de comunidades
+        communities = graph_extraction_service._calculate_communities(schema)
+        
+        # Obtener información adicional
+        summary = graph_extraction_service.generate_graph_summary(connection_id)
+        
+        return {
+            "status": "success",
+            "connection_id": connection_id,
+            "stats": graph_stats,
+            "communities": communities,
+            "summary": summary
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting graph info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/schema/{connection_id}/graph/export", tags=["Graph Knowledge"])
+async def export_graph(connection_id: str):
+    """
+    Exportar grafo completo como JSON para visualización
+    
+    Devuelve una representación completa del grafo para su visualización en herramientas externas
+    """
+    try:
+        # Verificar conexión a Neo4j
+        if graph_extraction_service.driver is None:
+            raise HTTPException(status_code=503, detail="Neo4j connection not available")
+        
+        # Exportar grafo
+        async with graph_extraction_service.driver.session() as session:
+            # Obtener nodos
+            nodes_result = await session.run("""
+            MATCH (n)
+            WHERE (n:Database AND n.connection_id = $connection_id) OR 
+                  (n:Table AND n.table_id CONTAINS $connection_id) OR
+                  (n:Column AND n.column_id CONTAINS $connection_id)
+            RETURN n, labels(n) as labels
+            """, connection_id=connection_id)
+            
+            nodes_data = await nodes_result.data()
+            
+            # Obtener relaciones
+            rels_result = await session.run("""
+            MATCH (n)-[r]->(m)
+            WHERE (n:Database AND n.connection_id = $connection_id) OR 
+                  (n:Table AND n.table_id CONTAINS $connection_id) OR
+                  (n:Column AND n.column_id CONTAINS $connection_id)
+            RETURN id(n) as source, id(m) as target, type(r) as type, properties(r) as properties
+            """, connection_id=connection_id)
+            
+            rels_data = await rels_result.data()
+            
+            # Formatear resultados para visualización
+            formatted_nodes = []
+            for node in nodes_data:
+                n_data = dict(node["n"])
+                n_data["labels"] = node["labels"]
+                n_data["id"] = n_data.get("table_id", n_data.get("column_id", n_data.get("connection_id", "")))
+                formatted_nodes.append(n_data)
+                
+            formatted_rels = []
+            for rel in rels_data:
+                formatted_rels.append({
+                    "source": rel["source"],
+                    "target": rel["target"],
+                    "type": rel["type"],
+                    "properties": rel["properties"]
+                })
+            
+            return {
+                "nodes": formatted_nodes,
+                "relationships": formatted_rels
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting graph: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/schema/{connection_id}/graph/visualize", tags=["Graph Knowledge"])
+async def visualize_graph(connection_id: str):
+    """
+    Obtener datos del grafo en formato optimizado para visualización con D3.js
+    
+    Devuelve una representación del grafo adaptada específicamente para visualización en el frontend
+    """
+    try:
+        # Verificar conexión a Neo4j
+        if graph_extraction_service.driver is None:
+            raise HTTPException(status_code=503, detail="Neo4j connection not available")
+        
+        # Obtener datos para visualización
+        async with graph_extraction_service.driver.session() as session:
+            # Obtener todas las tablas (nodos principales)
+            tables_result = await session.run("""
+            MATCH (t:Table)
+            WHERE t.table_id CONTAINS $connection_id
+            OPTIONAL MATCH (t)-[r:RELATES_TO]-(related:Table)
+            WITH t, count(r) AS rel_count, collect(DISTINCT related.name) AS related_tables
+            RETURN t.name AS id, t.name AS label, t.schema AS group, t.description AS title,
+                   rel_count as value, related_tables
+            """, connection_id=connection_id)
+            
+            tables_data = await tables_result.data()
+            
+            # Obtener todas las relaciones entre tablas
+            rels_result = await session.run("""
+            MATCH (t1:Table)-[r:RELATES_TO]->(t2:Table)
+            WHERE t1.table_id CONTAINS $connection_id AND t2.table_id CONTAINS $connection_id
+            RETURN t1.name AS source, t2.name AS target, r.via_column AS label,
+                   'table_relation' AS type, 1 AS value
+            """, connection_id=connection_id)
+            
+            rels_data = await rels_result.data()
+            
+            # Formatear para D3.js
+            nodes = []
+            links = []
+            
+            # Añadir nodos
+            for table in tables_data:
+                nodes.append({
+                    "id": table["id"],
+                    "label": table["label"],
+                    "group": table["group"] or "default",
+                    "title": table["title"] or table["label"],
+                    "value": table["value"] or 1,
+                    "related": table["related_tables"]
+                })
+                
+            # Añadir links
+            for rel in rels_data:
+                links.append({
+                    "source": rel["source"],
+                    "target": rel["target"],
+                    "label": rel["label"],
+                    "type": rel["type"],
+                    "value": rel["value"]
+                })
+                
+            # Añadir información de comunidades si está disponible
+            communities = graph_extraction_service._calculate_communities(await discovery_service.get_schema(connection_id))
+            
+            return {
+                "nodes": nodes,
+                "links": links,
+                "communities": communities
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error visualizing graph: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/schema/{connection_id}/graph/relationship", tags=["Graph Knowledge"])
+async def update_graph_relationship(
+    connection_id: str, 
+    relationship: Dict[str, Any]
+):
+    """
+    Actualizar o crear una relación en el grafo de conocimiento
+    
+    Permite a los administradores modificar las relaciones entre entidades del grafo
+    """
+    try:
+        # Verificar conexión a Neo4j
+        if graph_extraction_service.driver is None:
+            raise HTTPException(status_code=503, detail="Neo4j connection not available")
+        
+        # Validar datos de la relación
+        if not relationship.get("source_id") or not relationship.get("target_id"):
+            raise HTTPException(status_code=400, detail="Source and target IDs are required")
+        
+        # Actualizar o crear relación
+        async with graph_extraction_service.driver.session() as session:
+            # Verificar que los nodos existen
+            nodes_check = await session.run("""
+            MATCH (s:Table {name: $source_name}), (t:Table {name: $target_name})
+            WHERE s.table_id CONTAINS $connection_id AND t.table_id CONTAINS $connection_id
+            RETURN count(*) AS nodes_found
+            """, 
+            connection_id=connection_id,
+            source_name=relationship["source_id"],
+            target_name=relationship["target_id"])
+            
+            nodes_data = await nodes_check.data()
+            
+            if not nodes_data or nodes_data[0]["nodes_found"] == 0:
+                raise HTTPException(status_code=404, detail="Source or target node not found")
+            
+            # Actualizar o crear relación
+            rel_type = relationship.get("relationship_type", "RELATES_TO")
+            properties = relationship.get("properties", {})
+            
+            update_result = await session.run("""
+            MATCH (s:Table {name: $source_name}), (t:Table {name: $target_name})
+            WHERE s.table_id CONTAINS $connection_id AND t.table_id CONTAINS $connection_id
+            MERGE (s)-[r:RELATES_TO]->(t)
+            SET r += $properties
+            RETURN s.name AS source, t.name AS target, type(r) AS type
+            """, 
+            connection_id=connection_id,
+            source_name=relationship["source_id"],
+            target_name=relationship["target_id"],
+            properties=properties)
+            
+            update_data = await update_result.data()
+            
+            if not update_data:
+                raise HTTPException(status_code=500, detail="Failed to update relationship")
+                
+            return {
+                "status": "success",
+                "relationship": update_data[0]
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating graph relationship: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/schema/{connection_id}/graph/node", tags=["Graph Knowledge"])
+async def update_graph_node(
+    connection_id: str, 
+    node_update: Dict[str, Any]
+):
+    """
+    Actualizar metadatos de un nodo en el grafo
+    
+    Permite a los administradores modificar propiedades y metadatos de los nodos
+    """
+    try:
+        # Verificar conexión a Neo4j
+        if graph_extraction_service.driver is None:
+            raise HTTPException(status_code=503, detail="Neo4j connection not available")
+        
+        # Validar datos del nodo
+        if not node_update.get("node_id"):
+            raise HTTPException(status_code=400, detail="Node ID is required")
+        
+        # Obtener propiedades a actualizar
+        properties = node_update.get("properties", {})
+        
+        # Actualizar nodo
+        async with graph_extraction_service.driver.session() as session:
+            # Verificar que el nodo existe
+            node_check = await session.run("""
+            MATCH (n:Table {name: $node_name})
+            WHERE n.table_id CONTAINS $connection_id
+            RETURN count(*) AS node_found
+            """, 
+            connection_id=connection_id,
+            node_name=node_update["node_id"])
+            
+            node_data = await node_check.data()
+            
+            if not node_data or node_data[0]["node_found"] == 0:
+                raise HTTPException(status_code=404, detail="Node not found")
+            
+            # Actualizar propiedades del nodo
+            update_result = await session.run("""
+            MATCH (n:Table {name: $node_name})
+            WHERE n.table_id CONTAINS $connection_id
+            SET n += $properties
+            RETURN n.name AS name, n.schema AS schema, properties(n) AS properties
+            """, 
+            connection_id=connection_id,
+            node_name=node_update["node_id"],
+            properties=properties)
+            
+            update_data = await update_result.data()
+            
+            if not update_data:
+                raise HTTPException(status_code=500, detail="Failed to update node")
+                
+            return {
+                "status": "success",
+                "node": update_data[0]
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating graph node: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/schema/{connection_id}/graph/node", tags=["Graph Knowledge"])
+async def add_graph_node(
+    connection_id: str, 
+    node_data: Dict[str, Any]
+):
+    """
+    Añadir un nuevo nodo al grafo de conocimiento
+    
+    Permite a los administradores añadir nuevas entidades al grafo
+    """
+    try:
+        # Verificar conexión a Neo4j
+        if graph_extraction_service.driver is None:
+            raise HTTPException(status_code=503, detail="Neo4j connection not available")
+        
+        # Validar datos del nodo
+        if not node_data.get("name"):
+            raise HTTPException(status_code=400, detail="Node name is required")
+        
+        # Verificar que el esquema existe
+        schema = await discovery_service.get_schema(connection_id)
+        if not schema:
+            raise HTTPException(status_code=404, detail="Schema not found")
+        
+        # Preparar datos del nodo
+        node_schema = node_data.get("schema", "custom")
+        node_type = node_data.get("type", "table")
+        node_description = node_data.get("description", "")
+        properties = node_data.get("properties", {})
+        
+        # Crear nodo
+        async with graph_extraction_service.driver.session() as session:
+            # Verificar si el nodo ya existe
+            node_check = await session.run("""
+            MATCH (n:Table {name: $node_name})
+            WHERE n.table_id CONTAINS $connection_id
+            RETURN count(*) AS node_exists
+            """, 
+            connection_id=connection_id,
+            node_name=node_data["name"])
+            
+            node_check_data = await node_check.data()
+            
+            if node_check_data and node_check_data[0]["node_exists"] > 0:
+                raise HTTPException(status_code=409, detail="Node already exists")
+            
+            # Crear ID único para la tabla
+            table_id = f"{connection_id}:{node_schema}:{node_data['name']}"
+            
+            # Crear nodo
+            create_result = await session.run("""
+            MATCH (db:Database {connection_id: $connection_id})
+            CREATE (t:Table {
+                table_id: $table_id,
+                name: $name,
+                schema: $schema,
+                description: $description,
+                type: $type
+            })
+            SET t += $additional_properties
+            CREATE (db)-[:CONTAINS]->(t)
+            RETURN t.name AS name, t.schema AS schema, t.description AS description
+            """, 
+            connection_id=connection_id,
+            table_id=table_id,
+            name=node_data["name"],
+            schema=node_schema,
+            description=node_description,
+            type=node_type,
+            additional_properties=properties)
+            
+            create_data = await create_result.data()
+            
+            if not create_data:
+                raise HTTPException(status_code=500, detail="Failed to create node")
+                
+            return {
+                "status": "success",
+                "node": create_data[0]
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding graph node: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/schema/{connection_id}/graph/community", tags=["Graph Knowledge"])
+async def get_graph_communities(connection_id: str):
+    """
+    Obtener información de comunidades del grafo de conocimiento
+    
+    Devuelve las comunidades detectadas y su composición
+    """
+    try:
+        # Verificar si tenemos el esquema
+        schema = await discovery_service.get_schema(connection_id)
+        
+        if not schema:
+            raise HTTPException(status_code=404, detail="Schema not found")
+            
+        # Obtener comunidades
+        communities = graph_extraction_service._calculate_communities(schema)
+        
+        return {
+            "status": "success",
+            "connection_id": connection_id,
+            "communities_count": len(communities),
+            "communities": communities
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting graph communities: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/schema/{connection_id}/graph/path", tags=["Graph Knowledge"])
+async def find_path_between_tables(
+    connection_id: str, 
+    from_table: str = Query(..., description="Nombre de la tabla de origen"),
+    to_table: str = Query(..., description="Nombre de la tabla de destino"),
+    max_depth: int = Query(3, description="Profundidad máxima de búsqueda")
+):
+    """
+    Encontrar caminos en el grafo entre dos tablas
+    
+    Útil para entender cómo se relacionan las tablas en la base de datos
+    """
+    try:
+        # Verificar si tenemos el esquema
+        schema = await discovery_service.get_schema(connection_id)
+        
+        if not schema:
+            raise HTTPException(status_code=404, detail="Schema not found")
+            
+        # Buscar caminos
+        paths = graph_extraction_service.find_paths(connection_id, from_table, to_table, max_depth)
+        
+        return {
+            "status": "success",
+            "connection_id": connection_id,
+            "from_table": from_table,
+            "to_table": to_table,
+            "paths_found": len(paths),
+            "paths": paths
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error finding paths: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/schema/{connection_id}/graph/related", tags=["Graph Knowledge"])
+async def find_related_tables(
+    connection_id: str, 
+    table_name: str = Query(..., description="Nombre de la tabla"),
+    max_depth: int = Query(2, description="Profundidad máxima de búsqueda")
+):
+    """
+    Encontrar tablas relacionadas con una tabla dada
+    
+    Útil para explorar el contexto de una tabla en la base de datos
+    """
+    try:
+        # Verificar si tenemos el esquema
+        schema = await discovery_service.get_schema(connection_id)
+        
+        if not schema:
+            raise HTTPException(status_code=404, detail="Schema not found")
+            
+        # Buscar tablas relacionadas
+        related_tables = graph_extraction_service.find_related_tables(connection_id, table_name, max_depth)
+        
+        return {
+            "status": "success",
+            "connection_id": connection_id,
+            "table_name": table_name,
+            "related_tables_count": len(related_tables),
+            "related_tables": related_tables
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error finding related tables: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # Función para ejecutar descubrimiento en segundo plano con mejoras
 async def discover_schema_background(job_id: str, connection_id: str, options: Optional[Any] = None):

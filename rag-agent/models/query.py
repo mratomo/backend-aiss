@@ -9,6 +9,7 @@ class QueryType(str, Enum):
     RAG = "rag"                # Consulta RAG tradicional
     DB = "db"                  # Consulta a base de datos
     HYBRID = "hybrid"          # Consulta híbrida (RAG + DB)
+    GRAPH = "graph"            # Consulta GraphRAG con Neo4j
 
 # Modelos para solicitudes de consulta
 
@@ -194,3 +195,18 @@ class DBQueryRequest(BaseModel):
     query: str
     connections: Optional[List[str]] = None
     options: Optional[Dict[str, Any]] = None
+
+
+class GraphQueryRequest(BaseModel):
+    """Solicitud para una consulta GraphRAG"""
+    query: str = Field(..., description="Consulta del usuario")
+    user_id: str = Field(..., description="ID del usuario que realiza la consulta")
+    connection_id: Optional[str] = Field(None, description="ID de la conexión de base de datos")
+    area_id: Optional[str] = Field(None, description="ID del área específica para consultar")
+    llm_provider_id: Optional[str] = Field(None, description="ID del proveedor LLM a utilizar")
+    max_sources: int = Field(5, ge=1, le=20, description="Número máximo de fuentes a incluir")
+    temperature: Optional[float] = Field(None, ge=0.0, le=1.0, description="Temperatura para generación")
+    max_tokens: Optional[int] = Field(None, ge=1, description="Número máximo de tokens en la respuesta")
+    exploration_depth: Optional[int] = Field(2, ge=1, le=5, description="Profundidad de exploración del grafo")
+    include_communities: bool = Field(True, description="Incluir información de comunidades en el grafo")
+    include_paths: bool = Field(True, description="Incluir caminos entre entidades en el grafo")

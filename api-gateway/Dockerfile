@@ -6,18 +6,20 @@ WORKDIR /app
 RUN apk add --no-cache gcc musl-dev
 
 # Copiar archivos de módulos Go
-COPY go.mod go.sum go.work ./
+COPY go.mod go.sum go.work* ./
 
-# Descargar dependencias
-RUN go mod download || true
-RUN GOWORK=off go mod download || true
+# Descargar dependencias (con mejor manejo de errores)
+RUN go mod download || echo "Warning: Some dependencies may not have been downloaded"
+RUN if [ -f go.work ]; then GOWORK=off go mod download || echo "Warning: Workspace dependencies may not have been downloaded"; fi
 
 # Copiar código fuente
 COPY . .
 
-# Compilar la aplicación (ignore dependency checks)
+# Compilar la aplicación con manejo más robusto de errores
 RUN CGO_ENABLED=0 GOWORK=off go build -ldflags="-s -w" -o api-gateway . || \
-    (echo "Building with Skip Resolve..." && GOWORK=off go build -o api-gateway -tags skipresolver .)
+    (echo "Retrying build with Skip Resolve..." && \
+     GOWORK=off go build -o api-gateway -tags skipresolver . || \
+     (echo "Build failed even with skipresolver tag" && exit 1))
 
 # Imagen final
 FROM alpine:3.18

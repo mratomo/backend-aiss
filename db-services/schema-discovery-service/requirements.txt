@@ -26,6 +26,7 @@ aiomysql==0.2.0       # MySQL
 pyodbc==5.0.1         # SQL Server
 elasticsearch==8.10.0  # Elasticsearch
 aioinflux==0.9.0      # InfluxDB
+neo4j==5.14.1         # Neo4j para GraphRAG
 
 # Análisis de datos (optimizados)
 pandas==2.1.1

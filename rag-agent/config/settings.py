@@ -169,3 +169,8 @@ class Settings(BaseSettings):
         # Configuración de MCP
         self.use_mcp_tools = os.getenv("USE_MCP_TOOLS", "true").lower() in ("true", "1", "yes")
         self.prefer_direct_mcp = os.getenv("PREFER_DIRECT_MCP", "true").lower() in ("true", "1", "yes")
+        
+        # Configuración de Neo4j para GraphRAG
+        self.neo4j_uri = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
+        self.neo4j_username = os.getenv("NEO4J_USERNAME", "neo4j")
+        self.neo4j_password = os.getenv("NEO4J_PASSWORD", "secretpassword")

@@ -75,7 +75,7 @@ except ImportError:
     structlog_available = False
 
 from config.settings import Settings
-from models.query import QueryRequest, AreaQueryRequest, PersonalQueryRequest, QueryResponse
+from models.query import QueryRequest, AreaQueryRequest, PersonalQueryRequest, QueryResponse, GraphQueryRequest, QueryType
 from models.llm_settings import GlobalSystemPromptUpdate
 from services.llm_service import LLMService
 from services.llm_settings_service import LLMSettingsService
@@ -233,6 +233,10 @@ else:
 
     # Inicializar nuevo servicio de Ollama MCP
     ollama_service = OllamaMCPService(settings)
+    
+    # Inicializar servicio GraphRAG para consultas basadas en grafos
+    from services.graph_rag_service import GraphRAGService
+    graph_rag_service = GraphRAGService(db, llm_service, retrieval_service, mcp_service, settings)
 
     # Inicializar servicio de consultas con el servicio de Ollama
     query_service = QueryService(db, llm_service, retrieval_service, mcp_service, settings, ollama_service=ollama_service)
@@ -295,6 +299,11 @@ async def shutdown_event():
         if ollama_service:
             await ollama_service.close()
             logger.info("Ollama service closed")
+        
+        # Cerrar servicio GraphRAG si está disponible
+        if graph_rag_service:
+            await graph_rag_service.close()
+            logger.info("GraphRAG service closed")
         
         # Cerrar otros servicios que puedan tener recursos abiertos
         # Por ejemplo, si query_service tiene un db_query_service inicializado
@@ -409,6 +418,82 @@ async def query_personal_knowledge(request: PersonalQueryRequest):
         temperature=request.temperature,
         max_tokens=request.max_tokens
     )
+
+
+@app.post("/query/graph", response_model=QueryResponse, tags=["Queries"])
+async def query_graph_knowledge(request: QueryRequest):
+    """
+    Realizar una consulta utilizando GraphRAG para mejorar los resultados.
+    
+    Utiliza un grafo de conocimiento estructurado en Neo4j para enriquecer el contexto de la consulta.
+    Especialmente útil para consultas sobre relaciones entre entidades en bases de datos.
+    """
+    # Si hay área específica, usar su connection_id
+    connection_id = None
+    if request.area_ids and len(request.area_ids) > 0:
+        area = await mcp_service.get_area(request.area_ids[0])
+        if area and area.get("metadata", {}).get("connection_id"):
+            connection_id = area["metadata"]["connection_id"]
+    
+    response = await graph_rag_service.process_query_with_graph(
+        query=request.query,
+        connection_id=connection_id,
+        user_id=request.user_id,
+        area_id=request.area_ids[0] if request.area_ids else None,
+        llm_provider_id=request.llm_provider_id,
+        max_sources=request.max_sources,
+        temperature=request.temperature,
+        max_tokens=request.max_tokens
+    )
+    
+    # Establecer el tipo de consulta como GRAPH
+    response.query_type = QueryType.GRAPH
+    
+    return response
+
+@app.post("/query/graph/advanced", response_model=QueryResponse, tags=["Queries"])
+async def query_graph_knowledge_advanced(request: GraphQueryRequest):
+    """
+    Realizar una consulta GraphRAG avanzada con parámetros específicos para el grafo.
+    
+    Permite controlar aspectos más detallados del procesamiento del grafo, como:
+    - Profundidad de exploración
+    - Inclusión de comunidades
+    - Inclusión de caminos entre entidades
+    - Conexión específica de base de datos
+    
+    Especialmente útil para consultas complejas sobre estructura y relaciones en bases de datos.
+    """
+    # Determinar connection_id basado en area_id si no se proporciona
+    connection_id = request.connection_id
+    if not connection_id and request.area_id:
+        area = await mcp_service.get_area(request.area_id)
+        if area and area.get("metadata", {}).get("connection_id"):
+            connection_id = area["metadata"]["connection_id"]
+    
+    # Opciones avanzadas para el procesamiento del grafo
+    options = {
+        "exploration_depth": request.exploration_depth,
+        "include_communities": request.include_communities,
+        "include_paths": request.include_paths
+    }
+    
+    response = await graph_rag_service.process_query_with_graph(
+        query=request.query,
+        connection_id=connection_id,
+        user_id=request.user_id,
+        area_id=request.area_id,
+        llm_provider_id=request.llm_provider_id,
+        max_sources=request.max_sources,
+        temperature=request.temperature,
+        max_tokens=request.max_tokens,
+        options=options
+    )
+    
+    # Establecer el tipo de consulta como GRAPH
+    response.query_type = QueryType.GRAPH
+    
+    return response
 
 @app.get("/query/history", tags=["Queries"])
 async def get_query_history(user_id: str, limit: int = 10, offset: int = 0):

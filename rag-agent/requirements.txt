@@ -19,3 +19,8 @@ git+https://github.com/modelcontextprotocol/python-sdk.git@v0.3.0#egg=mcp&subdir
 mcp-python>=0.2.0  # Cliente puro de Python para MCP
 # Dependencia para Ollama
 fastmcp>=0.2.0     # Implementación FastAPI para servidores MCP
+
+# GraphRAG con LangGraph
+langgraph>=0.0.19
+neo4j>=5.14.1      # Cliente Neo4j
+networkx>=3.1.0    # Para manipulación de grafos
