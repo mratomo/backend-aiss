@@ -2,7 +2,7 @@
 
 ## Visión General
 
-El Ollama MCP Server es un componente especializado del sistema AISS que proporciona una implementación del Machine Conversation Protocol (MCP) para trabajar con modelos de lenguaje locales a través de Ollama. Este servicio permite integrar modelos de lenguaje locales en la arquitectura general del sistema, ofreciendo una alternativa a las APIs externas de LLM.
+El Ollama MCP Server es un componente especializado del sistema AISS que proporciona una implementación del Machine Conversation Protocol (MCP) para trabajar con modelos de lenguaje locales a través de Ollama. Este servicio permite integrar modelos de lenguaje locales en la arquitectura general del sistema, ofreciendo una alternativa a las APIs externas de LLM. Es importante destacar que este servidor es intercambiable con cualquier otro proveedor de LLM, ya que simplemente implementa la interfaz MCP estándar que utilizan otros servicios del sistema.
 
 ## Características Principales
 
@@ -10,6 +10,7 @@ El Ollama MCP Server es un componente especializado del sistema AISS que proporc
 - **Integración con Ollama**: Se conecta con el servicio Ollama para acceder a modelos locales
 - **Operación Independiente**: Funciona como un servicio autónomo dentro de la arquitectura
 - **Configuración Flexible**: Permite configurar diferentes modelos de Ollama según las necesidades
+- **Intercambiabilidad**: Puede ser reemplazado por cualquier otro proveedor de LLM que implemente MCP
 
 ## Configuración
 
@@ -32,6 +33,8 @@ DISABLE_MAIN_APP=true
 ## Integración con el Sistema
 
 El Ollama MCP Server se integra con el resto del sistema AISS principalmente a través del RAG Agent, que puede enrutar solicitudes de generación de texto tanto a servicios externos (OpenAI, Anthropic) como a este servidor MCP local.
+
+### Integración para Generación de Texto
 
 ```
 ┌────────────────┐

@@ -21,6 +21,16 @@ class AnthropicSettings(BaseSettings):
     timeout_seconds: int = Field(default=60)
 
 
+class GoogleSettings(BaseSettings):
+    """Configuración para proveedores Google AI (Gemini)"""
+    default_model: str = Field(default="gemini-1.5-pro")
+    default_temperature: float = Field(default=0.0)
+    default_max_tokens: int = Field(default=4096)
+    timeout_seconds: int = Field(default=60)
+    api_base: str = Field(default="https://generativelanguage.googleapis.com/v1beta")
+    enable_mcp: bool = Field(default=True)  # Habilitar integración MCP para Google
+
+
 class OllamaSettings(BaseSettings):
     """Configuración para proveedores Ollama (local o remoto)"""
     default_model: str = Field(default="llama3")
@@ -69,6 +79,7 @@ class Settings(BaseSettings):
     # Configuración de proveedores LLM
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
     anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
+    google: GoogleSettings = Field(default_factory=GoogleSettings)
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
 
     # Configuración de servicios
@@ -135,6 +146,14 @@ class Settings(BaseSettings):
         self.anthropic.default_model = os.getenv(
             "ANTHROPIC_DEFAULT_MODEL", self.anthropic.default_model
         )
+        # Google
+        self.google.default_model = os.getenv(
+            "GOOGLE_DEFAULT_MODEL", self.google.default_model
+        )
+        self.google.api_base = os.getenv(
+            "GOOGLE_API_BASE", self.google.api_base
+        )
+        self.google.enable_mcp = os.getenv("GOOGLE_ENABLE_MCP", "true").lower() in ("true", "1", "yes")
         # Ollama
         self.ollama.default_model = os.getenv(
             "OLLAMA_DEFAULT_MODEL", self.ollama.default_model

@@ -457,6 +457,48 @@ async def get_area_system_prompt(area_id: str = Path(..., description="ID del á
             detail=f"Error getting area system prompt: {str(e)}"
         )
 
+# ----- Endpoints para gestión del LLM principal en Áreas -----
+
+class PrimaryLLMUpdateRequest(BaseModel):
+    llm_provider_id: str = Field(..., description="ID del proveedor LLM principal para el área")
+
+@app.put("/areas/{area_id}/primary-llm", response_model=AreaResponse, tags=["Areas"])
+async def update_area_primary_llm(area_id: str, request: PrimaryLLMUpdateRequest):
+    """
+    Asignar o actualizar el proveedor LLM principal de un área de conocimiento
+    """
+    try:
+        updated_area = await area_service.update_area_primary_llm(area_id, request.llm_provider_id)
+        return AreaResponse.from_db_model(updated_area)
+    except Exception as e:
+        logger.error(f"Error updating area primary LLM: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating area primary LLM: {str(e)}"
+        )
+
+@app.get("/areas/{area_id}/primary-llm", tags=["Areas"])
+async def get_area_primary_llm(area_id: str = Path(..., description="ID del área")):
+    """
+    Obtener el proveedor LLM principal de un área de conocimiento
+    """
+    try:
+        area = await area_service.get_area(area_id)
+        if not area:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Area not found: {area_id}"
+            )
+        return {"area_id": area_id, "primary_llm_provider_id": area.primary_llm_provider_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting area primary LLM: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error getting area primary LLM: {str(e)}"
+        )
+
 
 # ----- Rutas para Contextos MCP -----
 

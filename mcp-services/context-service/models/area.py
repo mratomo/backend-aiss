@@ -15,6 +15,7 @@ class AreaCreate(BaseModel):
     color: Optional[str] = Field(None, description="Color asociado al área")
     tags: List[str] = Field(default_factory=list, description="Etiquetas asociadas al área")
     metadata: Dict[str, str] = Field(default_factory=dict, description="Metadatos adicionales")
+    primary_llm_provider_id: Optional[str] = Field(None, description="ID del proveedor LLM principal para esta área")
 
 
 # Modelo para actualizar un área de conocimiento
@@ -26,6 +27,7 @@ class AreaUpdate(BaseModel):
     tags: Optional[List[str]] = Field(None, description="Nuevas etiquetas")
     metadata: Optional[Dict[str, str]] = Field(None, description="Nuevos metadatos")
     active: Optional[bool] = Field(None, description="Estado de activación del área")
+    primary_llm_provider_id: Optional[str] = Field(None, description="ID del proveedor LLM principal para esta área")
 
 
 # Modelo para representar un área en la base de datos
@@ -38,6 +40,7 @@ class Area(BaseModel):
     tags: List[str] = Field(default_factory=list)
     metadata: Dict[str, str] = Field(default_factory=dict)
     mcp_context_id: Optional[str] = None
+    primary_llm_provider_id: Optional[str] = None
     active: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -55,6 +58,7 @@ class Area(BaseModel):
                 "tags": ["IA", "Machine Learning", "Deep Learning"],
                 "metadata": {"source": "manual", "level": "advanced"},
                 "mcp_context_id": "ctx_123456789",
+                "primary_llm_provider_id": "llm_provider_openai_123",
                 "active": True
             }
         }
@@ -70,6 +74,7 @@ class AreaResponse(BaseModel):
     tags: List[str]
     metadata: Dict[str, str]
     mcp_context_id: Optional[str] = None
+    primary_llm_provider_id: Optional[str] = None
     active: bool
     created_at: datetime
     updated_at: datetime
@@ -85,6 +90,7 @@ class AreaResponse(BaseModel):
             tags=area.tags,
             metadata=area.metadata,
             mcp_context_id=area.mcp_context_id,
+            primary_llm_provider_id=area.primary_llm_provider_id,
             active=area.active,
             created_at=area.created_at,
             updated_at=area.updated_at

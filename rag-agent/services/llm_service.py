@@ -11,6 +11,9 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+from services.google_gemini import generate_google, generate_google_mcp
+from services.llm_service_area_llm import get_area_primary_llm
+
 # Intentar cargar httpx para cliente HTTP alternativo
 try:
     import httpx
@@ -570,7 +573,8 @@ class LLMService:
                             max_tokens: Optional[int] = None,
                             temperature: Optional[float] = None,
                             advanced_settings: Optional[Dict[str, Any]] = None,
-                            active_contexts: Optional[List[str]] = None) -> Dict[str, Any]:
+                            active_contexts: Optional[List[str]] = None,
+                            area_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Generar texto utilizando un proveedor LLM con soporte para contextos MCP
 
@@ -583,10 +587,24 @@ class LLMService:
             temperature: Temperatura (anula configuración del proveedor)
             advanced_settings: Configuraciones avanzadas para la generación
             active_contexts: Lista de IDs de contextos MCP a activar (nuevo)
+            area_id: ID del área de conocimiento (para usar su LLM específico)
 
         Returns:
             Respuesta del LLM
         """
+        # Si tenemos un area_id, intentamos obtener su LLM específico
+        if area_id:
+            # Consultamos el área para ver si tiene un LLM primario configurado
+            try:
+                logger.debug(f"Consultando LLM específico para el área {area_id}")
+                area_provider_id = await get_area_primary_llm(self, area_id, self.settings.mcp.context_service_url)
+                if area_provider_id:
+                    logger.info(f"Usando proveedor LLM específico {area_provider_id} para el área {area_id}")
+                    provider = self._get_provider(area_provider_id)
+            except Exception as e:
+                logger.warning(f"Error al obtener LLM específico para el área {area_id}: {e}")
+                # Si hay error, continuamos con el provider proporcionado o default
+        
         if not provider:
             provider = self._get_provider(provider_id)
             
@@ -694,6 +712,30 @@ class LLMService:
                         advanced_settings=advanced_settings
                     )
 
+            elif provider.type == LLMProviderType.GOOGLE:
+                if has_mcp_native_support and active_mcp_contexts:
+                    # Google Gemini con soporte MCP
+                    response["text"] = await generate_google_mcp(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        provider=provider,
+                        active_contexts=active_mcp_contexts,
+                        max_tokens=actual_max_tokens,
+                        temperature=actual_temperature,
+                        timeout_seconds=self.settings.google.timeout_seconds,
+                        advanced_settings=advanced_settings
+                    )
+                else:
+                    response["text"] = await generate_google(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        provider=provider,
+                        max_tokens=actual_max_tokens,
+                        temperature=actual_temperature,
+                        timeout_seconds=self.settings.google.timeout_seconds,
+                        advanced_settings=advanced_settings
+                    )
+
             elif provider.type == LLMProviderType.OLLAMA:
                 response["text"] = await self._generate_ollama(
                     prompt=prompt,
@@ -704,14 +746,13 @@ class LLMService:
                     advanced_settings=advanced_settings
                 )
 
-            # Esta sección es redundante ya que el tipo "anthropic" ya está manejado arriba, pero se mantiene para compatibilidad
-            # en caso de que alguna parte del código haga referencia explícita a este tipo de proveedor
+            # Esta sección es redundante ya que los tipos ya están manejados arriba, pero se mantiene para compatibilidad
             # Se eliminará en una futura actualización
             
             elif provider.type == "ollama":
                 # Ollama no admite MCP nativo, usar siempre API estándar
                 logger.info(f"Using standard API for Ollama (MCP not supported)")
-                response = await self._generate_ollama(
+                response["text"] = await self._generate_ollama(
                     prompt=prompt,
                     system_prompt=system_prompt,
                     provider=provider,

@@ -58,6 +58,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 			areas.POST("", middleware.AdminRequired(), handlers.CreateArea)
 			areas.PUT("/:id", middleware.AdminRequired(), handlers.UpdateArea)
 			areas.DELETE("/:id", middleware.AdminRequired(), handlers.DeleteArea)
+			areas.GET("/:id/primary-llm", handlers.GetAreaPrimaryLLM)
+			areas.PUT("/:id/primary-llm", middleware.AdminRequired(), handlers.UpdateAreaPrimaryLLM)
 		}
 
 		// RAG

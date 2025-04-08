@@ -313,6 +313,16 @@ func (h *ContextHandler) UpdateAreaSystemPrompt(c *gin.Context) {
 	proxyRequest(c, h.serviceURL+"/areas/"+c.Param("id")+"/system-prompt", "PUT")
 }
 
+// GetAreaPrimaryLLM obtiene el proveedor LLM principal de un área
+func (h *ContextHandler) GetAreaPrimaryLLM(c *gin.Context) {
+	proxyRequest(c, h.serviceURL+"/areas/"+c.Param("id")+"/primary-llm", "GET")
+}
+
+// UpdateAreaPrimaryLLM actualiza el proveedor LLM principal de un área (admin)
+func (h *ContextHandler) UpdateAreaPrimaryLLM(c *gin.Context) {
+	proxyRequest(c, h.serviceURL+"/areas/"+c.Param("id")+"/primary-llm", "PUT")
+}
+
 // EmbeddingHandler maneja solicitudes relacionadas con embeddings
 type EmbeddingHandler struct {
 	serviceURL string

@@ -2,11 +2,11 @@
 
 ## Visión General
 
-Los Model Context Protocol (MCP) Services son componentes esenciales del backend que implementan el protocolo MCP para la gestión contextual de datos y la generación de embeddings. Estos servicios permiten la estructuración, recuperación y utilización inteligente de la información. Incluyen el Context Service, Embedding Service y Ollama MCP Server.
+Los Model Context Protocol (MCP) Services son componentes esenciales del backend que implementan el protocolo MCP para la gestión contextual de datos y la generación de embeddings. Estos servicios permiten la estructuración, recuperación y utilización inteligente de la información. Incluyen el Context Service, Embedding Service y servicios compatibles con múltiples proveedores de LLM como OpenAI, Anthropic, Google Gemini y Ollama a través de una interfaz común.
 
 ## Componentes Principales
 
-El sistema MCP está compuesto por tres servicios principales: Context Service, Embedding Service y Ollama MCP Server. Estos servicios trabajan en conjunto para proporcionar capacidades avanzadas de procesamiento y recuperación contextual.
+El sistema MCP está compuesto por varios servicios principales: Context Service, Embedding Service, Ollama MCP Server y Attack Vulnerability Service. Estos servicios trabajan en conjunto para proporcionar capacidades avanzadas de procesamiento, recuperación contextual y análisis de seguridad.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
@@ -32,6 +32,12 @@ El sistema MCP está compuesto por tres servicios principales: Context Service, 
 │  │                     │       │                     │    │
 │  └─────────────────────┘       └─────────────────────┘    │
 │                                                           │
+│  ┌─────────────────────┐       ┌─────────────────────┐    │
+│  │                     │       │                     │    │
+│  │  Attack Vulnera-    │◀─────▶│ Terminal Gateway    │    │
+│  │  bility Service     │       │ Service             │    │
+│  └─────────────────────┘       └─────────────────────┘    │
+│                                                           │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -46,6 +52,8 @@ El Context Service es responsable de la gestión de contextos y áreas de conoci
 - **Estructuración jerárquica**: Relaciones padre-hijo entre áreas
 - **Metadatos avanzados**: Asociación de metadatos a contextos para optimizar la recuperación
 - **Indexación inteligente**: Preprocesamiento para mejorar la relevancia de las búsquedas
+- **Asignación de LLM por área**: Capacidad de asignar un proveedor LLM específico a cada área de conocimiento
+- **Compatibilidad multi-proveedor**: Soporte para OpenAI, Anthropic, Google Gemini y Ollama
 
 #### Tecnologías Utilizadas:
 
@@ -76,6 +84,26 @@ El Embedding Service es responsable de la generación, almacenamiento y búsqued
 - **Qdrant**: Base de datos vectorial para almacenamiento y búsqueda
 - **PyTorch**: Framework de aprendizaje automático
 - **CUDA/ROCm**: Aceleración por GPU (opcional)
+
+### Attack Vulnerability Service
+
+El Attack Vulnerability Service es responsable de analizar vulnerabilidades en sistemas remotos basándose en el framework MITRE ATT&CK, proporcionando alertas de seguridad en tiempo real durante sesiones SSH.
+
+#### Características Principales:
+
+- **Análisis basado en MITRE ATT&CK**: Identificación de técnicas y tácticas aplicables a software detectado
+- **Detección automática de software**: Identificación de sistemas operativos y aplicaciones instaladas
+- **Clasificación de vulnerabilidades**: Categorización por nivel de severidad y impacto
+- **Notificaciones en tiempo real**: Alertas inmediatas sobre vulnerabilidades críticas
+- **Integración con terminal**: Funcionamiento transparente con las sesiones SSH existentes
+
+#### Tecnologías Utilizadas:
+
+- **Python 3.9+**: Lenguaje de programación principal
+- **FastAPI**: Framework web de alto rendimiento
+- **attackcti**: Cliente Python para MITRE ATT&CK
+- **MongoDB**: Almacenamiento de información temporal de sesiones
+- **packaging**: Para comparación y análisis de versiones de software
 
 ## Arquitectura y Flujo de Datos
 
@@ -151,6 +179,47 @@ El Embedding Service es responsable de la generación, almacenamiento y búsqued
                                 └────────────────┘
 ```
 
+### Diagrama de Flujo para Análisis de Vulnerabilidades
+
+```
+┌─────────────┐     ┌────────────────┐     ┌────────────────┐
+│ Usuario     │────▶│ Terminal       │────▶│ SSH            │
+│             │     │ Gateway        │     │ Connection     │
+└─────────────┘     └────────┬───────┘     └────────┬───────┘
+                             │                      │
+                             │                      │
+                             │     ┌───────────────▶│
+                             │     │                │
+                             ▼     │                ▼
+                    ┌────────────────┐      ┌────────────────┐
+                    │ detectOSInfo   │      │ Remote System  │
+                    │ detectSoftware │      │ (OS + Apps)    │
+                    └────────┬───────┘      └────────────────┘
+                             │
+                             ▼
+                    ┌────────────────┐
+                    │ Attack         │
+                    │ Vulnerability  │
+                    │ Service        │
+                    └────────┬───────┘
+                             │
+                             │
+              ┌──────────────┴───────────┐
+              │                          │
+              ▼                          ▼
+     ┌────────────────┐         ┌────────────────┐
+     │ MITRE ATT&CK   │         │ Local Cache    │
+     │ Data           │         │                │
+     └────────────────┘         └────────────────┘
+                             │
+                             ▼
+                    ┌────────────────┐
+                    │ Vulnerability   │
+                    │ Notifications   │
+                    │ to User        │
+                    └────────────────┘
+```
+
 ## APIs y Endpoints
 
 ### Context Service API
@@ -162,6 +231,10 @@ El Embedding Service es responsable de la generación, almacenamiento y búsqued
 - **POST /api/v1/areas**: Crear nueva área
 - **PUT /api/v1/areas/{id}**: Actualizar área existente
 - **DELETE /api/v1/areas/{id}**: Eliminar área
+- **PUT /api/v1/areas/{id}/primary-llm**: Asignar un LLM principal a un área
+- **GET /api/v1/areas/{id}/primary-llm**: Obtener el LLM principal de un área
+- **PUT /api/v1/areas/{id}/system-prompt**: Actualizar el prompt de sistema de un área
+- **GET /api/v1/areas/{id}/system-prompt**: Obtener el prompt de sistema de un área
 
 #### Contextos
 
@@ -210,6 +283,8 @@ El Embedding Service es responsable de la generación, almacenamiento y búsqued
     "icon": "document",
     "color": "blue"
   },
+  "primary_llm_provider_id": "llm_provider_openai_123",
+  "mcp_context_id": "ctx_123456789",
   "created_by": "user123",
   "created_at": "2023-01-01T00:00:00Z",
   "updated_at": "2023-01-02T00:00:00Z"
@@ -360,6 +435,47 @@ SIMILARITY_THRESHOLD=0.65
 
 - **GET /health**: Estado del servicio y sus dependencias
 - **GET /metrics**: Métricas en formato Prometheus
+
+## Asignación de Proveedores LLM por Área
+
+El sistema permite asignar un proveedor LLM específico a cada área de conocimiento, lo que permite especializar los modelos según el dominio o las necesidades específicas del conocimiento.
+
+### Beneficios
+
+- **Especialización por dominio**: Usar modelos específicos optimizados para cada tipo de conocimiento
+- **Optimización de recursos**: Asignar modelos más grandes o potentes solo a las áreas que lo requieren
+- **Balanceo de carga**: Distribuir las consultas entre diferentes proveedores según las áreas
+- **Fallback automático**: Si el proveedor específico no está disponible, se usa el proveedor predeterminado
+
+### Flujo de asignación
+
+1. El administrador del sistema crea un proveedor LLM en la base de datos (OpenAI, Anthropic, Google, Ollama)
+2. Al crear o editar un área de conocimiento, se asigna un proveedor LLM específico usando la API
+3. Cuando se realizan consultas a esa área específica, el sistema automáticamente usa el proveedor asignado
+
+### Ejemplo de uso
+
+```json
+// Asignar un proveedor LLM específico al área "Documentación Técnica"
+PUT /api/v1/areas/area123/primary-llm
+{
+  "llm_provider_id": "provider_anthropic_456"
+}
+
+// Consultar el proveedor LLM asignado
+GET /api/v1/areas/area123/primary-llm
+{
+  "area_id": "area123",
+  "primary_llm_provider_id": "provider_anthropic_456"
+}
+
+// Al realizar consultas al RAG Agent, se especifica el área
+POST /api/v1/llm
+{
+  "prompt": "¿Cómo funciona la arquitectura MCP?",
+  "area_id": "area123"  // Con esto, el sistema usa automáticamente el proveedor Anthropic
+}
+```
 
 ### Logs y Trazas
 

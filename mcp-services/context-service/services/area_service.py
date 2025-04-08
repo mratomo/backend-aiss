@@ -156,6 +156,32 @@ class AreaService:
         updated_area = await self.collection.find_one({"_id": obj_id})
 
         return Area(**updated_area)
+        
+    async def update_area_primary_llm(self, area_id: str, llm_provider_id: str) -> Area:
+        """Actualizar el proveedor LLM principal de un área"""
+        try:
+            obj_id = ObjectId(area_id)
+        except:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"ID de área inválido: {area_id}"
+            )
+
+        # Actualizar en la base de datos
+        await self.collection.update_one(
+            {"_id": obj_id},
+            {
+                "$set": {
+                    "primary_llm_provider_id": llm_provider_id,
+                    "updated_at": datetime.utcnow()
+                }
+            }
+        )
+
+        # Obtener documento actualizado
+        updated_area = await self.collection.find_one({"_id": obj_id})
+
+        return Area(**updated_area)
 
     async def update_area_system_prompt(self, area_id: str, system_prompt: str) -> Area:
         """Actualizar específicamente el prompt de sistema de un área"""
