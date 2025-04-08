@@ -44,6 +44,7 @@ type SSHManager struct {
 	keyDir        string
 	maxSessions   int
 	sessionClient *services.SessionClient
+	vulnerabilityClient *services.VulnerabilityClient
 	authToken     string
 	// WebSocket clients tracking for broadcasting events
 	wsClients      map[string][]*websocket.Conn // Map sessionID -> array of websocket connections
@@ -67,17 +68,31 @@ func NewSSHManager(timeout, keepAlive time.Duration, keyDir string, maxSessions 
 		sessionClient.SetAuthToken(authToken)
 	}
 
+	// Create vulnerability client if URL is provided
+	var vulnerabilityClient *services.VulnerabilityClient
+	vulnServiceURL := os.Getenv("ATTACK_VULNERABILITY_SERVICE_URL")
+	if vulnServiceURL != "" {
+		vulnerabilityClient = services.NewVulnerabilityClient(vulnServiceURL, timeout)
+		if authToken != "" {
+			vulnerabilityClient.SetAuthToken(authToken)
+		}
+		log.Printf("Vulnerability service enabled at %s", vulnServiceURL)
+	} else {
+		log.Printf("Vulnerability service disabled (ATTACK_VULNERABILITY_SERVICE_URL not set)")
+	}
+
 	// Create the SSH manager
 	manager := &SSHManager{
-		sessions:      make(map[string]*models.SSHConnection),
-		timeout:       timeout,
-		keepAlive:     keepAlive,
-		keyDir:        keyDir,
-		maxSessions:   maxSessions,
-		sessionClient: sessionClient,
-		authToken:     authToken,
-		wsClients:     make(map[string][]*websocket.Conn),
-		workerPool:    make(chan struct{}, 100), // Limit concurrent goroutines
+		sessions:            make(map[string]*models.SSHConnection),
+		timeout:             timeout,
+		keepAlive:           keepAlive,
+		keyDir:              keyDir,
+		maxSessions:         maxSessions,
+		sessionClient:       sessionClient,
+		vulnerabilityClient: vulnerabilityClient,
+		authToken:           authToken,
+		wsClients:           make(map[string][]*websocket.Conn),
+		workerPool:          make(chan struct{}, 100), // Limit concurrent goroutines
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -663,6 +678,18 @@ func (m *SSHManager) updateSessionTargetInfo(sessionID string, info models.Targe
 	if conn, exists := m.sessions[sessionID]; exists {
 		conn.OSInfo.Type = info.OSType
 		conn.OSInfo.Version = info.OSVersion
+		if info.OSType == "Linux" || info.OSType == "GNU/Linux" {
+			// Try to extract distribution information
+			if strings.Contains(info.OSVersion, "Ubuntu") {
+				conn.OSInfo.Distribution = "Ubuntu"
+			} else if strings.Contains(info.OSVersion, "Debian") {
+				conn.OSInfo.Distribution = "Debian"
+			} else if strings.Contains(info.OSVersion, "Red Hat") || strings.Contains(info.OSVersion, "RHEL") {
+				conn.OSInfo.Distribution = "Red Hat Enterprise Linux"
+			} else if strings.Contains(info.OSVersion, "CentOS") {
+				conn.OSInfo.Distribution = "CentOS"
+			}
+		}
 	}
 	m.sessionMutex.Unlock()
 }
@@ -736,6 +763,8 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 			}
 		}
 
+		// After OS detection, check for software (asynchronously)
+		go m.detectSoftwareAndCheckVulnerabilities(conn.SessionID, conn)
 		return info, nil
 	}
 
@@ -777,6 +806,9 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 		}
 
 		info.OSVersion = osVersion
+		
+		// After OS detection, check for software (asynchronously)
+		go m.detectSoftwareAndCheckVulnerabilities(conn.SessionID, conn)
 		return info, nil
 	}
 
@@ -832,6 +864,8 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 			}
 		}
 
+		// After OS detection, check for software (asynchronously)
+		go m.detectSoftwareAndCheckVulnerabilities(conn.SessionID, conn)
 		return info, nil
 	}
 
@@ -840,6 +874,256 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 	info.OSVersion = "Unknown"
 
 	return info, nil
+}
+
+// detectSoftwareAndCheckVulnerabilities detects software and checks for vulnerabilities (asynchronously)
+func (m *SSHManager) detectSoftwareAndCheckVulnerabilities(sessionID string, conn *models.SSHConnection) {
+	// Detect software
+	softwareList, err := m.detectSoftwareInfo(conn)
+	if err != nil {
+		log.Printf("Failed to detect software for session %s: %v", sessionID, err)
+		return
+	}
+
+	// Create OSInfo from SSHConnection data
+	m.sessionMutex.RLock()
+	osInfo := models.OSInfo{
+		Type:         conn.OSInfo.Type,
+		Version:      conn.OSInfo.Version,
+		Distribution: conn.OSInfo.Distribution,
+	}
+	m.sessionMutex.RUnlock()
+
+	// Check for vulnerabilities
+	if m.vulnerabilityClient != nil {
+		resp, err := m.vulnerabilityClient.CheckVulnerabilities(sessionID, osInfo, softwareList)
+		if err != nil {
+			log.Printf("Failed to check vulnerabilities for session %s: %v", sessionID, err)
+			return
+		}
+
+		// Send notifications for high severity vulnerabilities
+		for _, vuln := range resp.Vulnerabilities {
+			if vuln.Severity == models.SeverityHigh {
+				// Create vulnerability alert
+				alert := models.VulnerabilityAlert{
+					ID:                vuln.ID,
+					SessionID:         sessionID,
+					Severity:          vuln.Severity,
+					Title:             vuln.Title,
+					Description:       vuln.Description,
+					AffectedItem:      vuln.AffectedSoftware,
+					MitreID:           vuln.MitreTechniqueID,
+					RecommendedAction: vuln.Mitigation,
+					Timestamp:         time.Now(),
+				}
+
+				// Marshal to JSON and send as notification
+				alertData, _ := json.Marshal(alert)
+				m.SessionEventHandler(sessionID, "vulnerability_alert", string(alertData))
+			}
+		}
+
+		// Send summary notification
+		summaryData, _ := json.Marshal(map[string]interface{}{
+			"high_risk":   resp.Summary.HighRisk,
+			"medium_risk": resp.Summary.MediumRisk,
+			"low_risk":    resp.Summary.LowRisk,
+			"total":       resp.Summary.Total,
+			"session_id":  sessionID,
+			"timestamp":   time.Now(),
+		})
+		m.SessionEventHandler(sessionID, "vulnerability_summary", string(summaryData))
+	}
+}
+
+// detectSoftwareInfo attempts to identify important software packages
+func (m *SSHManager) detectSoftwareInfo(conn *models.SSHConnection) ([]models.SoftwareInfo, error) {
+	var softwareList []models.SoftwareInfo
+	
+	// Check OS type to determine appropriate detection methods
+	if strings.Contains(strings.ToLower(conn.OSInfo.Type), "windows") {
+		// Windows software detection using PowerShell
+		output, err := m.executeCommandWithOutput(conn.Client, "powershell -Command \"Get-WmiObject -Class Win32_Product | Select-Object Name, Version | ForEach-Object { $_.Name + ',' + $_.Version }\"")
+		if err == nil {
+			// Parse output line by line
+			lines := strings.Split(output, "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				
+				parts := strings.Split(line, ",")
+				if len(parts) >= 2 {
+					software := models.SoftwareInfo{
+						Name:            parts[0],
+						Version:         parts[1],
+						Type:            models.SoftwareTypeApplication,
+						DetectionMethod: "wmi",
+						DetectionCommand: "Get-WmiObject -Class Win32_Product",
+					}
+					softwareList = append(softwareList, software)
+				}
+			}
+		}
+		
+		// Detect common Windows components
+		windowsComponents := []struct {
+			name    string
+			command string
+		}{
+			{"PowerShell", "powershell -Command \"$PSVersionTable.PSVersion.ToString()\""},
+			{".NET Framework", "powershell -Command \"[System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription\""},
+			{"Internet Explorer", "powershell -Command \"(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Internet Explorer').svcVersion\""},
+		}
+		
+		for _, component := range windowsComponents {
+			output, err := m.executeCommandWithOutput(conn.Client, component.command)
+			if err == nil && output != "" {
+				software := models.SoftwareInfo{
+					Name:             component.name,
+					Version:          strings.TrimSpace(output),
+					Type:             models.SoftwareTypeApplication,
+					DetectionMethod:  "powershell",
+					DetectionCommand: component.command,
+				}
+				softwareList = append(softwareList, software)
+			}
+		}
+	} else {
+		// Linux/Unix software detection
+		
+		// Check for common package managers
+		
+		// 1. Debian/Ubuntu (apt)
+		output, err := m.executeCommandWithOutput(conn.Client, "dpkg-query -W -f='${Package},${Version}\n' openssh-server apache2 nginx mysql-server postgresql 2>/dev/null")
+		if err == nil && len(output) > 0 {
+			// Parse output line by line
+			lines := strings.Split(output, "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				
+				parts := strings.Split(line, ",")
+				if len(parts) >= 2 {
+					software := models.SoftwareInfo{
+						Name:            parts[0],
+						Version:         parts[1],
+						Type:            getSoftwareType(parts[0]),
+						DetectionMethod: "dpkg",
+						DetectionCommand: "dpkg-query",
+					}
+					softwareList = append(softwareList, software)
+				}
+			}
+		}
+		
+		// 2. RHEL/CentOS (rpm)
+		output, err = m.executeCommandWithOutput(conn.Client, "rpm -qa --queryformat '%{NAME},%{VERSION}\n' openssh-server httpd nginx mysql-server postgresql-server 2>/dev/null")
+		if err == nil && len(output) > 0 {
+			// Parse output line by line
+			lines := strings.Split(output, "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				
+				parts := strings.Split(line, ",")
+				if len(parts) >= 2 {
+					software := models.SoftwareInfo{
+						Name:            parts[0],
+						Version:         parts[1],
+						Type:            getSoftwareType(parts[0]),
+						DetectionMethod: "rpm",
+						DetectionCommand: "rpm -qa",
+					}
+					softwareList = append(softwareList, software)
+				}
+			}
+		}
+		
+		// 3. Try to detect kernel version
+		output, err = m.executeCommandWithOutput(conn.Client, "uname -r")
+		if err == nil && len(output) > 0 {
+			software := models.SoftwareInfo{
+				Name:            "kernel",
+				Version:         strings.TrimSpace(output),
+				Type:            models.SoftwareTypeOS,
+				DetectionMethod: "uname",
+				DetectionCommand: "uname -r",
+			}
+			softwareList = append(softwareList, software)
+		}
+		
+		// 4. Check for specific software versions
+		commonSoftware := []struct {
+			name     string
+			command  string
+			swType   models.SoftwareType
+		}{
+			{"bash", "bash --version | head -1", models.SoftwareTypeApplication},
+			{"python", "python --version 2>&1", models.SoftwareTypeApplication},
+			{"python3", "python3 --version 2>&1", models.SoftwareTypeApplication},
+			{"openssl", "openssl version", models.SoftwareTypeLibrary},
+			{"nginx", "nginx -v 2>&1", models.SoftwareTypeWebServer},
+			{"apache", "apache2 -v 2>&1 || httpd -v 2>&1", models.SoftwareTypeWebServer},
+			{"mysql", "mysql --version", models.SoftwareTypeDatabase},
+			{"postgresql", "psql --version", models.SoftwareTypeDatabase},
+			{"docker", "docker --version", models.SoftwareTypeContainer},
+		}
+		
+		for _, sw := range commonSoftware {
+			output, err := m.executeCommandWithOutput(conn.Client, sw.command)
+			if err == nil && output != "" {
+				// Extract version using simple pattern matching
+				software := models.SoftwareInfo{
+					Name:             sw.name,
+					Type:             sw.swType,
+					DetectionMethod:  "version-command",
+					DetectionCommand: sw.command,
+				}
+				
+				// Extract version number with a generic regex
+				versionPattern := regexp.MustCompile(`(\d+\.\d+(\.\d+)*)`)
+				if matches := versionPattern.FindStringSubmatch(output); len(matches) > 1 {
+					software.Version = matches[1]
+				} else {
+					software.Version = "Unknown"
+				}
+				
+				softwareList = append(softwareList, software)
+			}
+		}
+	}
+	
+	return softwareList, nil
+}
+
+// getSoftwareType determines the type of software based on name
+func getSoftwareType(name string) models.SoftwareType {
+	name = strings.ToLower(name)
+	
+	if strings.Contains(name, "kernel") || strings.HasPrefix(name, "linux") {
+		return models.SoftwareTypeOS
+	} else if strings.Contains(name, "ssh") || strings.Contains(name, "openssh") {
+		return models.SoftwareTypeService
+	} else if strings.Contains(name, "nginx") || strings.Contains(name, "apache") || strings.Contains(name, "httpd") {
+		return models.SoftwareTypeWebServer
+	} else if strings.Contains(name, "mysql") || strings.Contains(name, "mariadb") || strings.Contains(name, "postgresql") || strings.Contains(name, "mongo") {
+		return models.SoftwareTypeDatabase
+	} else if strings.Contains(name, "docker") || strings.Contains(name, "containerd") || strings.Contains(name, "kubernetes") {
+		return models.SoftwareTypeContainer
+	} else if strings.Contains(name, "python") || strings.Contains(name, "ruby") || strings.Contains(name, "node") || strings.Contains(name, "php") {
+		return models.SoftwareTypeFramework
+	} else if strings.Contains(name, "lib") {
+		return models.SoftwareTypeLibrary
+	} else {
+		return models.SoftwareTypeApplication
+	}
 }
 
 // HandleWebSocket handles a WebSocket connection for terminal I/O

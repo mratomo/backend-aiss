@@ -341,10 +341,13 @@ services:
       - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8093
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://app.domain.com}
       - SSH_KEY_DIR=/app/keys
+      - ATTACK_VULNERABILITY_SERVICE_URL=http://attack-vulnerability-service:8094
     volumes:
       - terminal-ssh-keys:/app/keys
     depends_on:
       terminal-session-service:
+        condition: service_started
+      attack-vulnerability-service:
         condition: service_started
     networks:
       - mcp-network
@@ -444,6 +447,35 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8093/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+      
+  # Attack Vulnerability Service (Python)
+  attack-vulnerability-service:
+    build:
+      context: ./attack-vulnerability-service
+      dockerfile: Dockerfile
+    ports:
+      - "8094:8094"
+    environment:
+      - PORT=8094
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - AUTH_ENABLED=true
+      - API_KEY=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
+      - ATTACK_CACHE_DIR=/app/cache
+      - ATTACK_CACHE_TTL_HOURS=24
+      - LOG_LEVEL=INFO
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://app.domain.com}
+    volumes:
+      - attack-cache:/app/cache
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8094/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -588,3 +620,4 @@ volumes:
   minio-data:
   ollama-data:
   terminal-ssh-keys:
+  attack-cache:

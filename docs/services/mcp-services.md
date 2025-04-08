@@ -2,9 +2,11 @@
 
 ## Visión General
 
-Los Model Context Protocol (MCP) Services son componentes esenciales del backend que implementan el protocolo MCP para la gestión contextual de datos y la generación de embeddings. Estos servicios permiten la estructuración, recuperación y utilización inteligente de la información.
+Los Model Context Protocol (MCP) Services son componentes esenciales del backend que implementan el protocolo MCP para la gestión contextual de datos y la generación de embeddings. Estos servicios permiten la estructuración, recuperación y utilización inteligente de la información. Incluyen el Context Service, Embedding Service y Ollama MCP Server.
 
 ## Componentes Principales
+
+El sistema MCP está compuesto por tres servicios principales: Context Service, Embedding Service y Ollama MCP Server. Estos servicios trabajan en conjunto para proporcionar capacidades avanzadas de procesamiento y recuperación contextual.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
@@ -22,13 +24,20 @@ Los Model Context Protocol (MCP) Services son componentes esenciales del backend
 │  │     MongoDB         │       │      Qdrant         │    │
 │  │                     │       │                     │    │
 │  └─────────────────────┘       └─────────────────────┘    │
+│                │                                          │
+│                ▼                                          │
+│  ┌─────────────────────┐       ┌─────────────────────┐    │
+│  │                     │       │                     │    │
+│  │  Ollama MCP Server  │◀─────▶│      Ollama         │    │
+│  │                     │       │                     │    │
+│  └─────────────────────┘       └─────────────────────┘    │
 │                                                           │
 └───────────────────────────────────────────────────────────┘
 ```
 
 ### Context Service
 
-El Context Service es responsable de la gestión de contextos y áreas de conocimiento, permitiendo la organización jerárquica de la información.
+El Context Service es responsable de la gestión de contextos y áreas de conocimiento, permitiendo la organización jerárquica de la información y proporcionando capacidades para estructurar el conocimiento en dominios específicos.
 
 #### Características Principales:
 
@@ -44,6 +53,7 @@ El Context Service es responsable de la gestión de contextos y áreas de conoci
 - **FastAPI**: Framework web de alto rendimiento
 - **MongoDB**: Base de datos para almacenamiento de contextos y áreas
 - **Pydantic**: Validación de datos y serialización
+- **PyMongo**: Cliente MongoDB para Python
 
 ### Embedding Service
 
@@ -61,7 +71,7 @@ El Embedding Service es responsable de la generación, almacenamiento y búsqued
 
 - **Python 3.10+**: Lenguaje de programación principal
 - **FastAPI**: Framework web de alto rendimiento
-- **BAAI/bge-large-en-v1.5**: Modelo de embeddings principal
+- **nomic-ai/nomic-embed-text-v1.5-fp16**: Modelo de embeddings principal
 - **Transformers (Hugging Face)**: Librería para modelos de NLP
 - **Qdrant**: Base de datos vectorial para almacenamiento y búsqueda
 - **PyTorch**: Framework de aprendizaje automático
@@ -126,10 +136,19 @@ El Embedding Service es responsable de la generación, almacenamiento y búsqued
               └──────────────┬───────────┘
                              │
                              ▼
-                    ┌────────────────┐
-                    │ External LLM   │
-                    │ Provider       │
-                    └────────────────┘
+              ┌───────────────────────────┐
+              │                           │
+              ▼                           ▼
+     ┌────────────────┐         ┌────────────────┐
+     │ External LLM   │         │ Ollama MCP     │
+     │ Provider       │         │ Server         │
+     └────────────────┘         └────────┬───────┘
+                                         │
+                                         ▼
+                                ┌────────────────┐
+                                │ Ollama         │
+                                │ (Local LLM)    │
+                                └────────────────┘
 ```
 
 ## APIs y Endpoints
@@ -225,7 +244,7 @@ El Embedding Service es responsable de la generación, almacenamiento y búsqued
 {
   "id": "emb789",
   "content_id": "ctx123",
-  "model": "BAAI/bge-large-en-v1.5",
+  "model": "nomic-ai/nomic-embed-text-v1.5-fp16",
   "vector": [0.123, 0.456, ...],
   "dimensions": 1024,
   "content_hash": "a1b2c3d4...",
@@ -244,7 +263,7 @@ El Embedding Service es responsable de la generación, almacenamiento y búsqued
 {
   "name": "general_knowledge",
   "vector_size": 1024,
-  "model": "BAAI/bge-large-en-v1.5",
+  "model": "nomic-ai/nomic-embed-text-v1.5-fp16",
   "distance": "cosine",
   "count": 12345,
   "created_at": "2023-01-01T00:00:00Z",
@@ -295,8 +314,8 @@ QDRANT_URL=http://qdrant:6333
 QDRANT_API_KEY=
 
 # Configuración de modelos
-GENERAL_EMBEDDING_MODEL=BAAI/bge-large-en-v1.5
-PERSONAL_EMBEDDING_MODEL=BAAI/bge-large-en-v1.5
+GENERAL_EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5-fp16
+PERSONAL_EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5-fp16
 USE_GPU=true
 USE_FP16=true
 USE_8BIT=false
@@ -393,7 +412,7 @@ curl http://embedding-service:8084/metrics
 # Testear generación de embeddings
 curl -X POST http://embedding-service:8084/api/v1/embeddings \
   -H "Content-Type: application/json" \
-  -d '{"text": "Texto de prueba", "model": "BAAI/bge-large-en-v1.5"}'
+  -d '{"text": "Texto de prueba", "model": "nomic-ai/nomic-embed-text-v1.5-fp16"}'
 
 # Verificar índices de Qdrant
 curl http://qdrant:6333/collections/general_knowledge
@@ -405,4 +424,4 @@ curl http://qdrant:6333/collections/general_knowledge
 - [MongoDB Documentation](https://docs.mongodb.com/)
 - [Qdrant Documentation](https://qdrant.tech/documentation/)
 - [Hugging Face Transformers](https://huggingface.co/docs/transformers/)
-- [BAAI/bge-large-en-v1.5](https://huggingface.co/BAAI/bge-large-en-v1.5)
+- [nomic-ai/nomic-embed-text-v1.5-fp16](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-fp16)
