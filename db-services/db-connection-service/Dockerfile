@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Instalar dependencias para clientes de base de datos
+# Instalar dependencias para clientes de base de datos y monitoreo
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     unixodbc-dev \
     curl \
+    git \
+    procps \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

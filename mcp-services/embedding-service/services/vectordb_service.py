@@ -1,14 +1,45 @@
 import logging
 import uuid
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Protocol
+
+try:
+    import structlog
+    logger = structlog.get_logger("vectordb_service")
+    structlog_available = True
+except ImportError:
+    logger = logging.getLogger("vectordb_service")
+    structlog_available = False
+
+# Soporte para múltiples clientes HTTP
+try:
+    import httpx
+    HTTPX_AVAILABLE = True
+except ImportError:
+    HTTPX_AVAILABLE = False
 
 import aiohttp
 from fastapi import HTTPException
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+
+# Métricas si están disponibles
+try:
+    from prometheus_client import Counter
+    prometheus_available = True
+    
+    # Definir métricas específicas para Qdrant
+    QDRANT_OPERATIONS = Counter('qdrant_operations_total', 'Operaciones realizadas en Qdrant', ['operation', 'status'])
+except ImportError:
+    prometheus_available = False
 
 from config.settings import Settings
 from models.embedding import EmbeddingType, SearchResult
 
-logger = logging.getLogger(__name__)
+# Protocolo para abstraer clientes HTTP
+class HTTPClient(Protocol):
+    async def get(self, url: str, **kwargs): ...
+    async def post(self, url: str, **kwargs): ...
+    async def put(self, url: str, **kwargs): ...
+    async def delete(self, url: str, **kwargs): ...
 
 class VectorDBService:
     """Servicio para interactuar con la base de datos vectorial (Qdrant)"""
@@ -22,10 +53,16 @@ class VectorDBService:
         self.collection_personal = settings.qdrant.collection_personal
         self.vector_size = settings.qdrant.vector_size
         self.distance = settings.qdrant.distance
+        self.use_httpx = HTTPX_AVAILABLE
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError, aiohttp.ClientError))
+    )
     async def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
         """
-        Realizar una petición a la API de Qdrant
+        Realizar una petición a la API de Qdrant con reintentos automáticos
 
         Args:
             method: Método HTTP (GET, POST, PUT, DELETE)
@@ -43,26 +80,110 @@ class VectorDBService:
         if method not in {"GET", "POST", "PUT", "DELETE"}:
             logger.error(f"Método HTTP no soportado: {method}")
             raise HTTPException(status_code=500, detail=f"Método HTTP no soportado: {method}")
-        try:
-            async with aiohttp.ClientSession() as session:
-                kwargs = {"headers": headers}
-                if data is not None:
-                    kwargs["json"] = data
-                async with session.request(method, url, **kwargs) as response:
-                    if response.status >= 400:
-                        error_text = await response.text()
-                        logger.error(f"Error en petición Qdrant {method} {url}: {response.status} - {error_text}")
-                        raise HTTPException(status_code=response.status, detail=f"Error en Qdrant: {error_text}")
-                    return await response.json()
-        except aiohttp.ClientConnectionError as e:
-            logger.error(f"Error de conexión con Qdrant en {method} {url}: {e}")
-            raise HTTPException(status_code=502, detail=f"Error de conexión con Qdrant: {e}")
-        except aiohttp.ClientResponseError as e:
-            logger.error(f"Error de respuesta de Qdrant en {method} {url}: {e.status} - {e.message}")
-            raise HTTPException(status_code=e.status, detail=f"Error en respuesta de Qdrant: {e.message}")
-        except aiohttp.ClientError as e:
-            logger.error(f"Error de cliente en petición Qdrant {method} {url}: {e}")
-            raise HTTPException(status_code=502, detail=f"Error de conexión con Qdrant: {e}")
+        
+        operation = endpoint.split("/")[0] if "/" in endpoint else endpoint
+        
+        # Determinar qué cliente HTTP usar
+        if self.use_httpx:
+            # Usar httpx (cliente HTTP más moderno)
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    kwargs = {"headers": headers}
+                    if data is not None:
+                        kwargs["json"] = data
+                    
+                    response = await getattr(client, method.lower())(url, **kwargs)
+                    
+                    if response.status_code >= 400:
+                        error_text = response.text
+                        logger.error("Error en petición Qdrant", 
+                                   method=method, 
+                                   url=url, 
+                                   status=response.status_code, 
+                                   error=error_text)
+                        
+                        if prometheus_available:
+                            QDRANT_OPERATIONS.labels(operation=operation, status="error").inc()
+                            
+                        raise HTTPException(status_code=response.status_code, 
+                                          detail=f"Error en Qdrant: {error_text}")
+                    
+                    if prometheus_available:
+                        QDRANT_OPERATIONS.labels(operation=operation, status="success").inc()
+                        
+                    return response.json()
+            except httpx.HTTPError as e:
+                logger.error("Error de conexión con Qdrant (httpx)", 
+                           method=method, 
+                           url=url, 
+                           error=str(e))
+                
+                if prometheus_available:
+                    QDRANT_OPERATIONS.labels(operation=operation, status="error").inc()
+                    
+                raise HTTPException(status_code=502, 
+                                  detail=f"Error de conexión con Qdrant: {str(e)}")
+        else:
+            # Usar aiohttp (cliente tradicional)
+            try:
+                async with aiohttp.ClientSession() as session:
+                    kwargs = {"headers": headers}
+                    if data is not None:
+                        kwargs["json"] = data
+                        
+                    async with session.request(method, url, **kwargs) as response:
+                        if response.status >= 400:
+                            error_text = await response.text()
+                            logger.error("Error en petición Qdrant", 
+                                       method=method, 
+                                       url=url, 
+                                       status=response.status, 
+                                       error=error_text)
+                            
+                            if prometheus_available:
+                                QDRANT_OPERATIONS.labels(operation=operation, status="error").inc()
+                                
+                            raise HTTPException(status_code=response.status, 
+                                              detail=f"Error en Qdrant: {error_text}")
+                        
+                        if prometheus_available:
+                            QDRANT_OPERATIONS.labels(operation=operation, status="success").inc()
+                            
+                        return await response.json()
+            except aiohttp.ClientConnectionError as e:
+                logger.error("Error de conexión con Qdrant", 
+                           method=method, 
+                           url=url, 
+                           error=str(e))
+                
+                if prometheus_available:
+                    QDRANT_OPERATIONS.labels(operation=operation, status="error").inc()
+                    
+                raise HTTPException(status_code=502, 
+                                  detail=f"Error de conexión con Qdrant: {str(e)}")
+            except aiohttp.ClientResponseError as e:
+                logger.error("Error de respuesta de Qdrant", 
+                           method=method, 
+                           url=url, 
+                           status=e.status, 
+                           error=e.message)
+                
+                if prometheus_available:
+                    QDRANT_OPERATIONS.labels(operation=operation, status="error").inc()
+                    
+                raise HTTPException(status_code=e.status, 
+                                  detail=f"Error en respuesta de Qdrant: {e.message}")
+            except aiohttp.ClientError as e:
+                logger.error("Error de cliente en petición Qdrant", 
+                           method=method, 
+                           url=url, 
+                           error=str(e))
+                
+                if prometheus_available:
+                    QDRANT_OPERATIONS.labels(operation=operation, status="error").inc()
+                    
+                raise HTTPException(status_code=502, 
+                                  detail=f"Error de conexión con Qdrant: {str(e)}")
 
     async def get_status(self) -> Dict:
         """Verificar estado de Qdrant"""

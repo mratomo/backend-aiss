@@ -2,7 +2,14 @@ import json
 import logging
 import hashlib
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union, Protocol
+
+# Soporte para múltiples clientes HTTP
+try:
+    import httpx
+    HTTPX_AVAILABLE = True
+except ImportError:
+    HTTPX_AVAILABLE = False
 
 import aiohttp
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -12,21 +19,26 @@ from models.models import DatabaseSchema, TableSchema, ColumnSchema
 
 logger = logging.getLogger(__name__)
 
+# Protocolo para abstraer clientes HTTP
+class HTTPClient(Protocol):
+    async def post(self, url: str, **kwargs): ...
+
 class SchemaVectorizationService:
     """Servicio para vectorización de esquemas para búsquedas semánticas"""
 
-    def __init__(self, http_client: aiohttp.ClientSession, settings: Settings):
+    def __init__(self, http_client: Any, settings: Settings):
         """
         Inicializar servicio de vectorización
         
         Args:
-            http_client: Cliente HTTP para comunicación con otros servicios
+            http_client: Cliente HTTP para comunicación con otros servicios (httpx.AsyncClient o aiohttp.ClientSession)
             settings: Configuración global
         """
         self.http_client = http_client
         self.settings = settings
+        self.use_httpx = HTTPX_AVAILABLE and isinstance(http_client, httpx.AsyncClient)
 
-    async def vectorize_schema(self, schema: DatabaseSchema, session: Optional[aiohttp.ClientSession] = None) -> str:
+    async def vectorize_schema(self, schema: DatabaseSchema, session: Optional[Any] = None) -> str:
         """
         Vectorizar esquema de base de datos para búsqueda semántica
         
@@ -72,16 +84,36 @@ class SchemaVectorizationService:
             use_provided_session = session is not None
             http_client = session if use_provided_session else self.http_client
             
-            # Realizar la solicitud HTTP con manejo adecuado de sesión
+            # Verificar tipo de cliente HTTP (httpx o aiohttp)
+            client_is_httpx = False
+            if HTTPX_AVAILABLE:
+                if isinstance(http_client, httpx.AsyncClient):
+                    client_is_httpx = True
+                elif use_provided_session and hasattr(http_client, "request"):
+                    # Detectar si es un cliente compatible con httpx por duck typing
+                    client_is_httpx = True
+            
+            # Realizar la solicitud HTTP según el tipo de cliente
             try:
-                async with http_client.post(url, json=payload, timeout=60) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
+                if client_is_httpx:
+                    # Usar cliente httpx
+                    response = await http_client.post(url, json=payload, timeout=60.0)
+                    if response.status_code != 200:
+                        error_text = response.text
                         logger.error(f"Error vectorizing schema: {error_text}")
                         raise ValueError(f"Error vectorizing schema: {error_text}")
                     
-                    result = await response.json()
                     return vector_id
+                else:
+                    # Usar cliente aiohttp
+                    async with http_client.post(url, json=payload, timeout=60) as response:
+                        if response.status != 200:
+                            error_text = await response.text()
+                            logger.error(f"Error vectorizing schema: {error_text}")
+                            raise ValueError(f"Error vectorizing schema: {error_text}")
+                        
+                        result = await response.json()
+                        return vector_id
             except asyncio.TimeoutError:
                 logger.error(f"Timeout vectorizing schema for {schema.connection_id}")
                 raise ValueError(f"Timeout vectorizing schema: operation took too long")

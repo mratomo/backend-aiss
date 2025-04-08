@@ -11,6 +11,9 @@ Esta documentación proporciona información detallada sobre todos los endpoints
 - [RAG (Retrieval Augmented Generation)](#rag-retrieval-augmented-generation)
 - [LLM (Modelos de Lenguaje)](#llm-modelos-de-lenguaje)
 - [Bases de Datos](#bases-de-datos)
+  - [Conexiones](#conexiones)
+  - [Agentes Verificadores de Consultas](#agentes-verificadores-de-consultas)
+  - [Consultas](#consultas)
 - [Terminal](#terminal)
 - [Ollama](#ollama)
 
@@ -866,7 +869,9 @@ Actualiza la configuración LLM del usuario.
 
 ## Bases de Datos
 
-### GET /api/v1/db-connections
+### Conexiones
+
+#### GET /api/v1/db-connections
 
 Obtiene las conexiones a bases de datos configuradas.
 
@@ -895,7 +900,33 @@ Obtiene las conexiones a bases de datos configuradas.
 }
 ```
 
-### POST /api/v1/db-connections
+#### GET /api/v1/db-connections/{id}
+
+Obtiene detalles de una conexión a base de datos específica.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "conn123",
+    "name": "Base de datos principal",
+    "description": "PostgreSQL principal",
+    "db_type": "postgresql",
+    "host": "db.example.com",
+    "port": 5432,
+    "database": "maindb",
+    "username": "user",
+    "created_by": "user123",
+    "created_at": "2023-01-01T00:00:00Z",
+    "updated_at": "2023-01-01T00:00:00Z",
+    "last_used": "2023-01-02T00:00:00Z",
+    "status": "connected"
+  }
+}
+```
+
+#### POST /api/v1/db-connections
 
 Crea una nueva conexión a base de datos.
 
@@ -934,7 +965,78 @@ Crea una nueva conexión a base de datos.
 }
 ```
 
-### GET /api/v1/db-connections/{id}/schema
+#### PUT /api/v1/db-connections/{id}
+
+Actualiza una conexión existente.
+
+**Request:**
+```json
+{
+  "name": "Base de datos actualizada",
+  "description": "MySQL actualizada",
+  "host": "new-mysql.example.com",
+  "port": 3306,
+  "username": "newuser",
+  "password": "newpassword"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "conn456",
+    "name": "Base de datos actualizada",
+    "description": "MySQL actualizada",
+    "db_type": "mysql",
+    "host": "new-mysql.example.com",
+    "port": 3306,
+    "database": "secondarydb",
+    "username": "newuser",
+    "created_by": "user123",
+    "created_at": "2023-01-03T00:00:00Z",
+    "updated_at": "2023-01-04T00:00:00Z",
+    "status": "connected"
+  }
+}
+```
+
+#### DELETE /api/v1/db-connections/{id}
+
+Elimina una conexión.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "message": "Database connection deleted successfully"
+  }
+}
+```
+
+#### POST /api/v1/db-connections/{id}/test
+
+Prueba una conexión a base de datos.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "status": "connected",
+    "message": "Connection successful",
+    "latency_ms": 25,
+    "server_info": {
+      "version": "MySQL 8.0.28",
+      "timezone": "UTC"
+    }
+  }
+}
+```
+
+#### GET /api/v1/db-connections/{id}/schema
 
 Obtiene el esquema de una base de datos.
 
@@ -978,70 +1080,381 @@ Obtiene el esquema de una base de datos.
 }
 ```
 
-### POST /api/v1/db-queries
+### Agentes Verificadores de Consultas
 
-Ejecuta una consulta SQL o natural language.
+#### GET /api/v1/db-agents
 
-**Request:**
+Obtiene todos los agentes verificadores de consultas de base de datos.
+
+**Response:**
 ```json
 {
-  "connection_id": "conn123",
-  "query_type": "sql", // o "natural"
-  "query": "SELECT * FROM users LIMIT 10",
-  "parameters": {}
+  "status": "success",
+  "data": [
+    {
+      "id": "agent123",
+      "name": "Verificador Principal",
+      "description": "Agente para bases de datos principales",
+      "type": "rag+db",
+      "model_id": "gpt-4o",
+      "allowed_operations": ["SELECT", "SHOW", "DESCRIBE"],
+      "max_result_size": 1000,
+      "query_timeout_secs": 30,
+      "active": true,
+      "default_system_prompt": "Eres un asistente especializado en verificar y generar consultas SQL seguras.",
+      "created_at": "2023-01-01T00:00:00Z",
+      "updated_at": "2023-01-01T00:00:00Z",
+      "created_by": "user123"
+    },
+    // ...más agentes
+  ]
 }
 ```
 
-**Response (SQL):**
+#### GET /api/v1/db-agents/{id}
+
+Obtiene un agente verificador específico por ID.
+
+**Response:**
 ```json
 {
   "status": "success",
   "data": {
-    "columns": [
-      "id",
-      "username",
-      "email",
-      "created_at"
-    ],
-    "rows": [
-      ["user1", "johndoe", "john@example.com", "2023-01-01T00:00:00Z"],
-      // ...más filas
-    ],
-    "row_count": 10,
-    "execution_time_ms": 15
+    "id": "agent123",
+    "name": "Verificador Principal",
+    "description": "Agente para bases de datos principales",
+    "type": "rag+db",
+    "model_id": "gpt-4o",
+    "allowed_operations": ["SELECT", "SHOW", "DESCRIBE"],
+    "max_result_size": 1000,
+    "query_timeout_secs": 30,
+    "active": true,
+    "default_system_prompt": "Eres un asistente especializado en verificar y generar consultas SQL seguras.",
+    "created_at": "2023-01-01T00:00:00Z",
+    "updated_at": "2023-01-01T00:00:00Z",
+    "created_by": "user123",
+    "connections_count": 3
   }
 }
 ```
 
-**Request (Natural Language):**
+#### POST /api/v1/db-agents
+
+Crea un nuevo agente verificador (solo administradores).
+
+**Request:**
 ```json
 {
-  "connection_id": "conn123",
-  "query_type": "natural",
-  "query": "Muéstrame los 10 usuarios más recientes",
-  "parameters": {}
+  "name": "Nuevo Verificador",
+  "description": "Verificador para bases de datos de test",
+  "type": "db-only",
+  "model_id": "claude-3-haiku-20240307",
+  "allowed_operations": ["SELECT"],
+  "max_result_size": 500,
+  "query_timeout_secs": 15,
+  "default_system_prompt": "Eres un asistente especializado en verificar consultas a bases de datos de test."
 }
 ```
 
-**Response (Natural Language):**
+**Response:**
 ```json
 {
   "status": "success",
   "data": {
-    "sql": "SELECT * FROM users ORDER BY created_at DESC LIMIT 10",
-    "explanation": "Esta consulta selecciona todos los campos de la tabla users, ordenados por fecha de creación en orden descendente, y limita los resultados a 10 registros.",
-    "columns": [
-      "id",
-      "username",
-      "email",
-      "created_at"
+    "id": "agent456",
+    "name": "Nuevo Verificador",
+    "description": "Verificador para bases de datos de test",
+    "type": "db-only",
+    "model_id": "claude-3-haiku-20240307",
+    "allowed_operations": ["SELECT"],
+    "max_result_size": 500,
+    "query_timeout_secs": 15,
+    "active": true,
+    "default_system_prompt": "Eres un asistente especializado en verificar consultas a bases de datos de test.",
+    "created_at": "2023-01-03T00:00:00Z",
+    "updated_at": "2023-01-03T00:00:00Z",
+    "created_by": "user123",
+    "connections_count": 0
+  }
+}
+```
+
+#### PUT /api/v1/db-agents/{id}
+
+Actualiza un agente verificador existente (solo administradores).
+
+**Request:**
+```json
+{
+  "name": "Verificador Actualizado",
+  "model_id": "llama3",
+  "allowed_operations": ["SELECT", "DESCRIBE"],
+  "active": true,
+  "default_system_prompt": "Eres un asistente experto en seguridad de bases de datos que verifica y genera consultas SQL seguras."
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "agent123",
+    "name": "Verificador Actualizado",
+    "description": "Agente para bases de datos principales",
+    "type": "rag+db",
+    "model_id": "llama3",
+    "allowed_operations": ["SELECT", "DESCRIBE"],
+    "max_result_size": 1000,
+    "query_timeout_secs": 30,
+    "active": true,
+    "default_system_prompt": "Eres un asistente experto en seguridad de bases de datos que verifica y genera consultas SQL seguras.",
+    "created_at": "2023-01-01T00:00:00Z",
+    "updated_at": "2023-01-03T00:00:00Z",
+    "created_by": "user123",
+    "connections_count": 3
+  }
+}
+```
+
+#### DELETE /api/v1/db-agents/{id}
+
+Elimina un agente verificador (solo administradores).
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "message": "Database agent deleted successfully"
+  }
+}
+```
+
+#### GET /api/v1/db-agents/{id}/prompts
+
+Obtiene los prompts configurados para un agente verificador.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "system_prompt": "Eres un asistente especializado en consultas a bases de datos. Tu tarea es analizar consultas en lenguaje natural y convertirlas en consultas estructuradas SQL/NoSQL según corresponda.",
+    "query_evaluation_prompt": "Evalúa si esta consulta requiere acceso a base de datos o puede resolverse con RAG convencional.\n\nEjemplos que requieren BD:\n- \"Consulta el estado actual de la máquina SRV-2023-089\"\n- \"Muéstrame las últimas alertas de seguridad\"\n\nEjemplos que NO requieren BD:\n- \"Explícame el procedimiento de mantenimiento\"\n- \"Resume la política de seguridad\"\n\nConsulta: \"{query}\"\n\nResponde solo con 'DB' o 'RAG' seguido de un breve razonamiento.",
+    "query_generation_prompt": "Convierte la siguiente consulta en lenguaje natural a una consulta estructurada para {db_type}.\n\nInformación del esquema:\n{schema_info}\n\nConsulta en lenguaje natural: \"{query}\"\n\nGenera solo la consulta SQL/NoSQL sin explicaciones adicionales.",
+    "result_formatting_prompt": "Formatea los resultados de la consulta de manera clara y concisa para el usuario.\n\nConsulta original: \"{query}\"\n\nResultados de la consulta:\n{results}\n\nPor favor, formatea estos resultados de manera clara y concisa, incluyendo tablas si es apropiado.",
+    "example_db_queries": "1. Consulta original: \"Muéstrame los 5 productos más vendidos del mes pasado\"\n   SQL: SELECT p.product_name, SUM(oi.quantity) as total_sold FROM products p JOIN order_items oi ON p.id = oi.product_id JOIN orders o ON oi.order_id = o.id WHERE o.order_date >= DATE_SUB(CURDATE(), INTERVAL 1 MONTH) GROUP BY p.id ORDER BY total_sold DESC LIMIT 5;\n\n2. Consulta original: \"¿Cuántos usuarios nuevos se registraron esta semana?\"\n   SQL: SELECT COUNT(*) as new_users FROM users WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 1 WEEK);"
+  }
+}
+```
+
+#### PUT /api/v1/db-agents/{id}/prompts
+
+Actualiza los prompts de un agente verificador (solo administradores).
+
+**Request:**
+```json
+{
+  "system_prompt": "Eres un verificador experto en bases de datos que analiza y genera consultas seguras en lenguaje SQL.",
+  "query_evaluation_prompt": "Determina si esta consulta necesita acceso a una base de datos real o puede responderse con conocimiento general.\n\nConsulta: \"{query}\"\n\nResponde con 'DB' o 'RAG' según corresponda, y explica brevemente tu razonamiento.",
+  "query_generation_prompt": "Convierte esta consulta en lenguaje natural a SQL optimizado y seguro para {db_type}.\n\nEsquema disponible:\n{schema_info}\n\nConsulta: \"{query}\"\n\nGenera solo la consulta SQL sin comentarios adicionales.",
+  "result_formatting_prompt": "Presenta estos resultados de base de datos de forma clara y útil para el usuario.\n\nConsulta original: \"{query}\"\n\nDatos obtenidos:\n{results}",
+  "example_db_queries": "Ejemplo 1: \"Encuentra usuarios inactivos por más de 90 días\"\nSELECT * FROM users WHERE last_login < NOW() - INTERVAL 90 DAY;"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "system_prompt": "Eres un verificador experto en bases de datos que analiza y genera consultas seguras en lenguaje SQL.",
+    "query_evaluation_prompt": "Determina si esta consulta necesita acceso a una base de datos real o puede responderse con conocimiento general.\n\nConsulta: \"{query}\"\n\nResponde con 'DB' o 'RAG' según corresponda, y explica brevemente tu razonamiento.",
+    "query_generation_prompt": "Convierte esta consulta en lenguaje natural a SQL optimizado y seguro para {db_type}.\n\nEsquema disponible:\n{schema_info}\n\nConsulta: \"{query}\"\n\nGenera solo la consulta SQL sin comentarios adicionales.",
+    "result_formatting_prompt": "Presenta estos resultados de base de datos de forma clara y útil para el usuario.\n\nConsulta original: \"{query}\"\n\nDatos obtenidos:\n{results}",
+    "example_db_queries": "Ejemplo 1: \"Encuentra usuarios inactivos por más de 90 días\"\nSELECT * FROM users WHERE last_login < NOW() - INTERVAL 90 DAY;"
+  }
+}
+```
+
+#### GET /api/v1/db-agents/{id}/connections
+
+Obtiene las conexiones asignadas a un agente verificador.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "id": "assign123",
+      "agent_id": "agent123",
+      "connection": {
+        "id": "conn123",
+        "name": "Base de datos principal",
+        "db_type": "postgresql",
+        "host": "db.example.com",
+        "database": "maindb"
+      },
+      "permissions": ["read"],
+      "assigned_at": "2023-01-01T00:00:00Z",
+      "assigned_by": "user123"
+    },
+    // ...más asignaciones
+  ]
+}
+```
+
+#### POST /api/v1/db-agents/{id}/connections
+
+Asigna una conexión a un agente verificador (solo administradores).
+
+**Request:**
+```json
+{
+  "connection_id": "conn456",
+  "permissions": ["read", "write"]
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "assign789",
+    "agent_id": "agent123",
+    "connection": {
+      "id": "conn456",
+      "name": "Base de datos secundaria",
+      "db_type": "mysql",
+      "host": "mysql.example.com",
+      "database": "secondarydb"
+    },
+    "permissions": ["read", "write"],
+    "assigned_at": "2023-01-03T00:00:00Z",
+    "assigned_by": "user123"
+  }
+}
+```
+
+#### DELETE /api/v1/db-agents/{id}/connections/{connectionId}
+
+Elimina una asignación de conexión a un agente (solo administradores).
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "message": "Connection assignment removed successfully"
+  }
+}
+```
+
+### Consultas
+
+#### POST /api/v1/db-queries
+
+Ejecuta una consulta a través de un agente verificador.
+
+**Request:**
+```json
+{
+  "agent_id": "agent123",
+  "query": "Obtener los 10 clientes con más compras en el último mes",
+  "connections": ["conn123", "conn456"],
+  "options": {
+    "max_results": 500,
+    "timeout": 60
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "query123",
+    "query_type": "db",
+    "answer": "Aquí están los 10 clientes que realizaron más compras el mes pasado:\n\n| Cliente | Compras | Total |\n|---------|---------|-------|\n| John Smith | 15 | $1,245.65 |\n| Jane Doe | 12 | $987.40 |\n...",
+    "generated_queries": [
+      {
+        "connection_id": "conn123",
+        "query_text": "SELECT c.customer_name, COUNT(o.id) as total_orders, SUM(o.total) as total_amount FROM customers c JOIN orders o ON c.id = o.customer_id WHERE o.order_date >= DATE_SUB(CURDATE(), INTERVAL 1 MONTH) GROUP BY c.id ORDER BY total_orders DESC LIMIT 10"
+      }
     ],
-    "rows": [
-      ["user1", "johndoe", "john@example.com", "2023-01-01T00:00:00Z"],
-      // ...más filas
+    "execution_time_ms": 250,
+    "has_error": false,
+    "timestamp": "2023-01-03T00:00:00Z"
+  }
+}
+```
+
+#### GET /api/v1/db-queries/history
+
+Obtiene el historial de consultas del usuario actual.
+
+**Query Parameters:**
+- `limit`: (opcional) Número máximo de resultados (default: 20)
+- `offset`: (opcional) Índice de inicio para paginación (default: 0)
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "id": "query123",
+      "query": "Obtener los 10 clientes con más compras en el último mes",
+      "query_type": "db",
+      "status": "completed",
+      "execution_time_ms": 250,
+      "created_at": "2023-01-03T00:00:00Z",
+      "completed_at": "2023-01-03T00:00:05Z"
+    },
+    // ...más consultas
+  ],
+  "meta": {
+    "total": 45,
+    "limit": 20,
+    "offset": 0
+  }
+}
+```
+
+#### GET /api/v1/db-queries/history/{id}
+
+Obtiene el detalle de una consulta específica.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "id": "query123",
+    "original_query": "Obtener los 10 clientes con más compras en el último mes",
+    "query_type": "db",
+    "status": "completed",
+    "result": "Aquí están los 10 clientes que realizaron más compras el mes pasado:\n\n| Cliente | Compras | Total |\n|---------|---------|-------|\n| John Smith | 15 | $1,245.65 |\n| Jane Doe | 12 | $987.40 |\n...",
+    "generated_queries": [
+      {
+        "connection_id": "conn123",
+        "connection_name": "Base de datos principal",
+        "query_text": "SELECT c.customer_name, COUNT(o.id) as total_orders, SUM(o.total) as total_amount FROM customers c JOIN orders o ON c.id = o.customer_id WHERE o.order_date >= DATE_SUB(CURDATE(), INTERVAL 1 MONTH) GROUP BY c.id ORDER BY total_orders DESC LIMIT 10"
+      }
     ],
-    "row_count": 10,
-    "execution_time_ms": 120
+    "execution_time_ms": 250,
+    "has_error": false,
+    "error_message": null,
+    "created_at": "2023-01-03T00:00:00Z",
+    "completed_at": "2023-01-03T00:00:05Z",
+    "agent": {
+      "id": "agent123",
+      "name": "Verificador Principal"
+    }
   }
 }
 ```

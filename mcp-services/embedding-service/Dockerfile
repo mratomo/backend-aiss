@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.1.1-base-ubuntu22.04 AS base
+FROM python:3.11-slim AS base
 
 # Configuración de variables de entorno
 ENV PYTHONUNBUFFERED=1 \
@@ -7,15 +7,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Instalar dependencias del sistema
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 \
-    python3-pip \
-    python3-dev \
     build-essential \
+    curl \
+    git \
+    procps \
     && rm -rf /var/lib/apt/lists/*
-
-# Configurar Python
-RUN ln -sf /usr/bin/python3 /usr/bin/python && \
-    ln -sf /usr/bin/pip3 /usr/bin/pip
 
 WORKDIR /app
 

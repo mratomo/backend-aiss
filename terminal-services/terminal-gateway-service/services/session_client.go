@@ -836,17 +836,22 @@ func (c *SessionClient) ProcessRagQuery(query string, userID string, areaID stri
 	}
 	url := fmt.Sprintf("%s/api/v1/query", ragUrl)
 	
-	// Build query payload
+	// Build query payload according to latest RAG API standard
 	queryData := map[string]interface{}{
-		"query":           query,
-		"user_id":         userID,
-		"area_id":         areaID,
-		"include_context": true,
+		"query": query,
+		"metadata": map[string]interface{}{
+			"user_id": userID,
+			"area_id": areaID,
+			"source": "terminal",
+			"include_sources": true, // Always include sources for terminal queries
+		},
 	}
 	
 	// Add terminal context if available
 	if terminalContext != nil {
-		queryData["terminal_context"] = terminalContext
+		queryData["context"] = map[string]interface{}{
+			"terminal_context": terminalContext,
+		}
 	}
 
 	jsonData, err := json.Marshal(queryData)
@@ -863,24 +868,51 @@ func (c *SessionClient) ProcessRagQuery(query string, userID string, areaID stri
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 
+	// Custom transport with sensible defaults for LLM requests
+	transport := &http.Transport{
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		// Prevent connection reuse for long-running requests
+		DisableKeepAlives: true,
+	}
+
 	// Custom timeout for RAG queries
 	httpClient := &http.Client{
-		Timeout: 60 * time.Second, // Longer timeout for LLM generation
+		Timeout: 120 * time.Second, // 2 minute timeout for LLM generation
+		Transport: transport,
 	}
+	
+	// Log query start
+	log.Printf("Sending RAG query to %s for area %s", shortenURL(ragUrl), areaID)
+	startTime := time.Now()
 	
 	// Execute request with longer timeout
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
+		return nil, fmt.Errorf("failed to send request to RAG agent: %w", err)
 	}
 	defer resp.Body.Close()
 
+	// Log query duration
+	duration := time.Since(startTime)
+	log.Printf("RAG query completed in %v", duration)
+	
 	if resp.StatusCode >= 400 {
 		var errorResp struct {
 			Error string `json:"error"`
+			Detail string `json:"detail"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err == nil && errorResp.Error != "" {
-			return nil, fmt.Errorf("RAG agent error: %s", errorResp.Error)
+		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err == nil {
+			errorMsg := errorResp.Error
+			if errorMsg == "" {
+				errorMsg = errorResp.Detail
+			}
+			if errorMsg != "" {
+				return nil, fmt.Errorf("RAG agent error: %s", errorMsg)
+			}
 		}
 		return nil, fmt.Errorf("RAG agent returned error: %s", resp.Status)
 	}
@@ -888,6 +920,11 @@ func (c *SessionClient) ProcessRagQuery(query string, userID string, areaID stri
 	var response RagResponse
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return nil, fmt.Errorf("failed to decode RAG response: %w", err)
+	}
+
+	// Validate response fields
+	if response.Answer == "" {
+		return nil, fmt.Errorf("invalid RAG response: empty answer")
 	}
 
 	return &response, nil

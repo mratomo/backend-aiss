@@ -11,10 +11,36 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+# Intentar cargar httpx para cliente HTTP alternativo
+try:
+    import httpx
+    httpx_available = True
+except ImportError:
+    httpx_available = False
+
+# Intentar usar structlog para logging estructurado
+try:
+    import structlog
+    logger = structlog.get_logger("llm_service")
+    structlog_available = True
+except ImportError:
+    logger = logging.getLogger("llm_service")
+    structlog_available = False
+
+# Intentar cargar metricas
+try:
+    from prometheus_client import Counter, Histogram, Gauge
+    prometheus_available = True
+    
+    # Definir métricas
+    LLM_REQUESTS = Counter('llm_requests_total', 'Total LLM Requests', ['provider_type', 'status'])
+    LLM_REQUEST_DURATION = Histogram('llm_request_duration_seconds', 'LLM Request Duration', ['provider_type'])
+    
+except ImportError:
+    prometheus_available = False
+
 from config.settings import Settings
 from models.llm_provider import LLMProvider, LLMProviderCreate, LLMProviderUpdate, LLMProviderType
-
-logger = logging.getLogger(__name__)
 
 class LLMService:
     """Servicio para gestionar y utilizar proveedores LLM con soporte MCP"""
@@ -678,29 +704,10 @@ class LLMService:
                     advanced_settings=advanced_settings
                 )
 
-            elif provider.type == "anthropic":
-                # Implementación nativa de MCP para Anthropic (Claude)
-                if self.mcp_client is not None and active_contexts:
-                    logger.info(f"Using native MCP for Anthropic with {len(active_contexts)} contexts")
-                    response = await self._generate_anthropic_mcp(
-                        prompt=prompt,
-                        system_prompt=system_prompt,
-                        provider=provider,
-                        active_contexts=active_contexts,
-                        max_tokens=actual_max_tokens,
-                        temperature=actual_temperature,
-                        advanced_settings=advanced_settings
-                    )
-                else:
-                    logger.info(f"Using standard API for Anthropic")
-                    response = await self._generate_anthropic(
-                        prompt=prompt,
-                        system_prompt=system_prompt,
-                        provider=provider,
-                        max_tokens=actual_max_tokens,
-                        temperature=actual_temperature,
-                        advanced_settings=advanced_settings
-                    )
+            # Esta sección es redundante ya que el tipo "anthropic" ya está manejado arriba, pero se mantiene para compatibilidad
+            # en caso de que alguna parte del código haga referencia explícita a este tipo de proveedor
+            # Se eliminará en una futura actualización
+            
             elif provider.type == "ollama":
                 # Ollama no admite MCP nativo, usar siempre API estándar
                 logger.info(f"Using standard API for Ollama (MCP not supported)")

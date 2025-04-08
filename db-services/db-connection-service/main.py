@@ -1,12 +1,26 @@
 import logging
 import os
+import time
 from typing import List, Optional, Dict, Any
+from datetime import datetime
+import platform
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends, Query, Path, Body, status
+from fastapi import FastAPI, HTTPException, Depends, Query, Path, Body, status, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
+from fastapi.exceptions import RequestValidationError
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
+try:
+    import uvloop
+    uvloop.install()
+    uvloop_available = True
+except ImportError:
+    uvloop_available = False
 
 from config.settings import Settings
 from models.models import (
@@ -20,21 +34,45 @@ from services.agent_service import AgentService
 from services.encryption_service import EncryptionService
 from services.security_service import SecurityService
 
-# Configurar logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+# Configurar logging estructurado
+try:
+    import structlog
+    
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.JSONRenderer()
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+    )
+    logger = structlog.get_logger("db_connection_service")
+    structlog_available = True
+except ImportError:
+    # Fallback a logging tradicional
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger = logging.getLogger("db_connection_service")
+    structlog_available = False
+
+# Métricas para Prometheus
+HTTP_REQUESTS = Counter('http_requests_total', 'Total HTTP Requests', ['method', 'endpoint', 'status'])
+HTTP_REQUEST_DURATION = Histogram('http_request_duration_seconds', 'HTTP Request Duration', ['method', 'endpoint'])
+DB_OPERATIONS = Counter('db_operations_total', 'Total Database Operations', ['operation', 'status'])
+DB_OPERATION_DURATION = Histogram('db_operation_duration_seconds', 'Database Operation Duration', ['operation'])
 
 # Cargar configuración
 settings = Settings()
 
-# Crear aplicación FastAPI
+# Crear aplicación FastAPI con respuestas optimizadas
 app = FastAPI(
     title="DB Connection Service",
     description="Servicio de gestión de conexiones a bases de datos",
-    version="1.0.0",
+    version="1.1.0",
+    default_response_class=ORJSONResponse,
 )
 
 # Configurar CORS
@@ -46,8 +84,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Middleware para métricas
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start_time = time.time()
+    
+    # Extraer información de la ruta
+    path = request.url.path
+    method = request.method
+    
+    try:
+        # Procesar la solicitud
+        response = await call_next(request)
+        status_code = response.status_code
+        
+    except Exception as e:
+        status_code = 500
+        raise e
+    finally:
+        # Registrar métricas
+        duration = time.time() - start_time
+        HTTP_REQUESTS.labels(method=method, endpoint=path, status=status_code).inc()
+        HTTP_REQUEST_DURATION.labels(method=method, endpoint=path).observe(duration)
+        
+    return response
+
+# Inicializar servicios con reintentos
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type(Exception)
+)
+def init_mongodb_client():
+    return AsyncIOMotorClient(
+        settings.mongodb.uri,
+        serverSelectionTimeoutMS=5000,
+        connectTimeoutMS=5000,
+        maxPoolSize=50,
+        minPoolSize=10
+    )
+
 # Inicializar servicios
-motor_client = AsyncIOMotorClient(settings.mongodb.uri)
+motor_client = init_mongodb_client()
 db = motor_client[settings.mongodb.database]
 encryption_service = EncryptionService(settings.db_connections.encryption_key)
 security_service = SecurityService(settings.security)
@@ -57,36 +135,77 @@ agent_service = AgentService(db, connection_service, settings)
 @app.on_event("startup")
 async def startup_db_client():
     """Inicializar cliente de MongoDB al iniciar la aplicación"""
+    logger.info("Starting DB Connection Service",
+                version="1.1.0",
+                python_version=platform.python_version(),
+                uvloop_enabled=uvloop_available,
+                structlog_enabled=structlog_available)
+    
     logger.info("Connecting to MongoDB...")
     try:
-        await motor_client.admin.command("ping")
-        logger.info("Successfully connected to MongoDB")
+        # Usar tenacity para reintentos de conexión
+        for attempt in range(1, 6):
+            try:
+                await motor_client.admin.command("ping")
+                logger.info("Successfully connected to MongoDB")
+                break
+            except Exception as e:
+                if attempt < 5:
+                    wait_time = 2 ** attempt  # Espera exponencial
+                    logger.warning(f"MongoDB connection attempt {attempt} failed. Retrying in {wait_time}s...", error=str(e))
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Failed to connect to MongoDB after 5 attempts", error=str(e))
+                    raise
     except Exception as e:
-        logger.error(f"Error connecting to MongoDB: {e}")
+        logger.error(f"Error connecting to MongoDB", error=str(e))
         raise
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
     """Cerrar cliente de MongoDB al detener la aplicación"""
-    logger.info("Closing MongoDB connection...")
-    motor_client.close()
-    logger.info("MongoDB connection closed")
+    logger.info("Shutting down DB Connection Service...")
+    try:
+        motor_client.close()
+        logger.info("MongoDB connection closed")
+    except Exception as e:
+        logger.error("Error during MongoDB connection close", error=str(e))
+
+# Endpoint para métricas de Prometheus
+@app.get("/metrics", tags=["Monitoring"])
+async def metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 # Endpoint de health check
 @app.get("/health", tags=["Health"])
 async def health_check():
     """Verificar salud del servicio"""
-    try:
-        await motor_client.admin.command("ping")
-        mongo_status = "ok"
-    except Exception as e:
-        mongo_status = f"error: {str(e)}"
-
-    return {
+    start_time = time.time()
+    health_status = {
         "status": "ok",
-        "mongodb": mongo_status,
+        "service": "db-connection-service",
+        "version": "1.1.0",
+        "timestamp": datetime.utcnow().isoformat(),
+        "uptime": os.getenv("UPTIME", "unknown"),
+        "mongodb": "unknown",
         "encryption": encryption_service.is_available,
     }
+    
+    try:
+        await motor_client.admin.command("ping")
+        health_status["mongodb"] = "ok"
+        DB_OPERATIONS.labels(operation="ping", status="success").inc()
+    except Exception as e:
+        health_status["mongodb"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+        DB_OPERATIONS.labels(operation="ping", status="error").inc()
+    
+    # Agregar métricas de rendimiento
+    duration = time.time() - start_time
+    health_status["response_time_ms"] = round(duration * 1000, 2)
+    DB_OPERATION_DURATION.labels(operation="health_check").observe(duration)
+    
+    return health_status
 
 # --- Rutas para conexiones a BD ---
 

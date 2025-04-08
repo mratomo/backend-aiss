@@ -28,6 +28,13 @@ type JWTClaims struct {
 // AuthRequired is a middleware that checks for a valid JWT token
 func AuthRequired(config JWTConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Validate config
+		if config.Secret == "" {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "JWT configuration error"})
+			c.Abort()
+			return
+		}
+
 		// Get token from Authorization header
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
@@ -48,15 +55,24 @@ func AuthRequired(config JWTConfig) gin.HandlerFunc {
 
 		// Parse and validate the token
 		token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
-			// Validate the signing method
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			// Validate the signing method explicitly (only accept HS256)
+			if token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
 				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
 			return []byte(config.Secret), nil
 		})
 
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
+			var validationError *jwt.ValidationError
+			if errors.As(err, &validationError) {
+				if validationError.Errors&jwt.ValidationErrorExpired != 0 {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "Token has expired"})
+				} else {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token: " + err.Error()})
+				}
+			} else {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Token validation error: " + err.Error()})
+			}
 			c.Abort()
 			return
 		}
@@ -71,7 +87,14 @@ func AuthRequired(config JWTConfig) gin.HandlerFunc {
 		// Get claims
 		claims, ok := token.Claims.(*JWTClaims)
 		if !ok {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims format"})
+			c.Abort()
+			return
+		}
+
+		// Check token expiration
+		if claims.ExpiresAt == nil || claims.ExpiresAt.Before(time.Now()) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token has expired"})
 			c.Abort()
 			return
 		}
@@ -90,7 +113,14 @@ func AdminRequired() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Check if the user is an admin
 		isAdmin, exists := c.Get("isAdmin")
-		if !exists || !isAdmin.(bool) {
+		if !exists {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Admin status not found in context"})
+			c.Abort()
+			return
+		}
+
+		isAdminValue, ok := isAdmin.(bool)
+		if !ok || !isAdminValue {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Admin privileges required"})
 			c.Abort()
 			return
@@ -110,6 +140,10 @@ func GenerateToken(userID, role string, config JWTConfig) (string, error) {
 		return "", errors.New("role is required")
 	}
 
+	if config.Secret == "" {
+		return "", errors.New("JWT secret is required")
+	}
+
 	// Set expiration time
 	expirationTime := time.Now().Add(time.Duration(config.ExpiryHours) * time.Hour)
 
@@ -125,7 +159,7 @@ func GenerateToken(userID, role string, config JWTConfig) (string, error) {
 		},
 	}
 
-	// Create token
+	// Create token with explicit algorithm
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
 	// Sign token

@@ -2,14 +2,73 @@ import asyncio
 import json
 import logging
 import os
+import time
+import platform
+from datetime import datetime
 from typing import Dict, List, Optional, Union, Any
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
-from fastmcp import MountMCP  # Nuevo: importar MountMCP
+from fastmcp import MountMCP
+
+# Mejoras de rendimiento
+try:
+    import uvloop
+    uvloop.install()
+    uvloop_available = True
+except ImportError:
+    uvloop_available = False
+
+# Métricas y monitoreo
+try:
+    from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+    prometheus_available = True
+    
+    # Definir métricas
+    HTTP_REQUESTS = Counter('context_http_requests_total', 'Total HTTP Requests', ['method', 'endpoint', 'status'])
+    HTTP_REQUEST_DURATION = Histogram('context_http_request_duration_seconds', 'HTTP Request Duration', ['method', 'endpoint'])
+    DB_OPERATIONS = Counter('context_db_operations_total', 'Total Database Operations', ['operation', 'status'])
+    EMBEDDING_REQUESTS = Counter('context_embedding_requests_total', 'Requests to Embedding Service', ['status'])
+    
+except ImportError:
+    prometheus_available = False
+
+# Monitoreo de recursos
+try:
+    import psutil
+    psutil_available = True
+    if prometheus_available:
+        MEMORY_USAGE = Gauge('context_memory_usage_bytes', 'Memory Usage in Bytes')
+except ImportError:
+    psutil_available = False
+
+# Logging estructurado
+try:
+    import structlog
+    
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.JSONRenderer()
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+    )
+    logger = structlog.get_logger("context_service")
+    structlog_available = True
+except ImportError:
+    # Fallback a logging tradicional
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger = logging.getLogger("context_service")
+    structlog_available = False
 
 from config.settings import Settings
 from models.area import Area, AreaCreate, AreaResponse, AreaUpdate
@@ -19,21 +78,15 @@ from services.context_service import ContextService
 from services.mcp_service import MCPService
 from services.embedding_service_client import EmbeddingServiceClient
 
-# Configurar logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
-
 # Cargar configuración
 settings = Settings()
 
-# Crear aplicación FastAPI
+# Crear aplicación FastAPI con respuestas optimizadas
 app = FastAPI(
     title="MCP Context Service",
     description="Servicio de gestión de contextos para Model Context Protocol",
-    version="1.0.0",
+    version="1.1.0",
+    default_response_class=ORJSONResponse,  # Usar orjson para respuestas más rápidas
 )
 
 # Configurar CORS
@@ -45,8 +98,67 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Conexión a MongoDB
-motor_client = AsyncIOMotorClient(settings.mongodb_uri)
+# Middleware para métricas si están disponibles
+if prometheus_available:
+    @app.middleware("http")
+    async def metrics_middleware(request: Request, call_next):
+        start_time = time.time()
+        
+        # Extraer información de la ruta
+        path = request.url.path
+        method = request.method
+        
+        try:
+            # Procesar la solicitud
+            response = await call_next(request)
+            status_code = response.status_code
+            
+        except Exception as e:
+            status_code = 500
+            raise e
+        finally:
+            # Registrar métricas
+            duration = time.time() - start_time
+            HTTP_REQUESTS.labels(method=method, endpoint=path, status=status_code).inc()
+            HTTP_REQUEST_DURATION.labels(method=method, endpoint=path).observe(duration)
+            
+        return response
+
+# Función para actualizar métricas periódicamente
+async def update_metrics():
+    if prometheus_available and psutil_available:
+        while True:
+            try:
+                # Actualizar métrica de uso de memoria
+                process = psutil.Process(os.getpid())
+                memory_info = process.memory_info()
+                MEMORY_USAGE.set(memory_info.rss)
+                
+                # Ejecutar cada 15 segundos
+                await asyncio.sleep(15)
+            except Exception as e:
+                logger.error("Error updating metrics", error=str(e))
+                await asyncio.sleep(30)  # Esperar más tiempo si hay un error
+
+# Conexión a MongoDB con reintentos
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type(Exception)
+)
+def init_mongodb_client():
+    return AsyncIOMotorClient(
+        settings.mongodb_uri,
+        serverSelectionTimeoutMS=5000,
+        connectTimeoutMS=5000,
+        maxPoolSize=50,
+        minPoolSize=10
+    )
+
+# Inicializar cliente MongoDB
+motor_client = init_mongodb_client()
 db = motor_client[settings.mongodb_database]
 
 # Inicializar servicios
@@ -59,30 +171,122 @@ mcp_service = MCPService(settings, area_service, embedding_client)
 MountMCP(app, mcp_service.server, settings.mcp.api_route)
 
 @app.on_event("startup")
-async def startup_db_client():
-    """Inicializar cliente de MongoDB al iniciar la aplicación"""
+async def startup_event():
+    """Inicializar recursos al iniciar la aplicación"""
+    logger.info("Starting MCP Context Service",
+               version="1.1.0",
+               python_version=platform.python_version(),
+               uvloop_enabled=uvloop_available,
+               structlog_enabled=structlog_available,
+               prometheus_enabled=prometheus_available)
+    
+    # Iniciar tarea de monitoreo si está disponible
+    if prometheus_available and psutil_available:
+        asyncio.create_task(update_metrics())
+        logger.info("Metrics monitoring started")
+    
+    # Verificar conexión a MongoDB
     logger.info("Connecting to MongoDB...")
     try:
-        await motor_client.admin.command("ping")
-        logger.info("Successfully connected to MongoDB")
+        for attempt in range(1, 6):
+            try:
+                await motor_client.admin.command("ping")
+                logger.info("Successfully connected to MongoDB")
+                if prometheus_available:
+                    DB_OPERATIONS.labels(operation="connect", status="success").inc()
+                break
+            except Exception as e:
+                if attempt < 5:
+                    wait_time = 2 ** attempt  # Espera exponencial
+                    logger.warning(f"MongoDB connection attempt {attempt} failed. Retrying in {wait_time}s...", error=str(e))
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"Failed to connect to MongoDB after 5 attempts", error=str(e))
+                    if prometheus_available:
+                        DB_OPERATIONS.labels(operation="connect", status="error").inc()
+                    raise
     except Exception as e:
-        logger.error(f"Error connecting to MongoDB: {e}")
+        logger.error("Error connecting to MongoDB", error=str(e))
         raise
 
 
 @app.on_event("shutdown")
-async def shutdown_db_client():
-    """Cerrar cliente de MongoDB al detener la aplicación"""
-    logger.info("Closing MongoDB connection...")
-    motor_client.close()
-    logger.info("MongoDB connection closed")
+async def shutdown_event():
+    """Limpiar recursos al detener la aplicación"""
+    logger.info("Shutting down MCP Context Service...")
+    
+    try:
+        # Cerrar conexión a MongoDB
+        motor_client.close()
+        logger.info("MongoDB connection closed")
+        
+        # Liberar otros recursos si es necesario
+    except Exception as e:
+        logger.error("Error during shutdown", error=str(e))
 
 
-# Endpoint de health check
+# Endpoint para métricas de Prometheus
+if prometheus_available:
+    @app.get("/metrics", tags=["Monitoring"])
+    async def metrics():
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# Endpoint de health check optimizado
 @app.get("/health", tags=["Health"])
 async def health_check():
     """Verificar salud del servicio"""
-    return {"status": "ok"}
+    start_time = time.time()
+    
+    health_status = {
+        "status": "ok",
+        "service": "mcp-context-service",
+        "version": "1.1.0",
+        "timestamp": datetime.utcnow().isoformat() if 'datetime' in globals() else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "uptime": os.getenv("UPTIME", "unknown")
+    }
+    
+    # Verificar MongoDB
+    try:
+        await motor_client.admin.command("ping")
+        health_status["mongodb"] = "ok"
+        if prometheus_available:
+            DB_OPERATIONS.labels(operation="ping", status="success").inc()
+    except Exception as e:
+        health_status["mongodb"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+        if prometheus_available:
+            DB_OPERATIONS.labels(operation="ping", status="error").inc()
+    
+    # Verificar MCP
+    try:
+        mcp_status = mcp_service.get_status()
+        health_status["mcp"] = {
+            "server_name": mcp_status.get("name"),
+            "contexts_count": mcp_status.get("contexts_count", 0),
+            "active_contexts": mcp_status.get("active_contexts", 0)
+        }
+    except Exception as e:
+        health_status["mcp"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    # Añadir información de memoria si está disponible
+    if psutil_available:
+        try:
+            process = psutil.Process(os.getpid())
+            memory_info = process.memory_info()
+            health_status["memory_usage"] = {
+                "rss_bytes": memory_info.rss,
+                "rss_mb": round(memory_info.rss / (1024 * 1024), 2)
+            }
+        except Exception as e:
+            health_status["memory_usage"] = {"error": str(e)}
+    
+    # Añadir tiempo de respuesta
+    duration = time.time() - start_time
+    health_status["response_time_ms"] = round(duration * 1000, 2)
+    
+    return health_status
 
 
 # ----- Rutas para Áreas de Conocimiento -----

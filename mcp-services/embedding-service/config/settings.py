@@ -22,9 +22,11 @@ class QdrantSettings(BaseSettings):
 class ModelSettings(BaseSettings):
     """Configuración para modelos de embeddings"""
     # Modelos actualizados
-    general_model: str = Field(default="BAAI/bge-large-en-v1.5")
-    personal_model: str = Field(default="BAAI/bge-large-en-v1.5")
-    # O alternativa multilingüe: "intfloat/multilingual-e5-base"
+    general_model: str = Field(default="nomic-ai/nomic-embed-text-v1.5-fp16")
+    personal_model: str = Field(default="nomic-ai/nomic-embed-text-v1.5-fp16")
+    # O alternativas:
+    # "BAAI/bge-large-en-v1.5" (HuggingFace)
+    # "intfloat/multilingual-e5-base" (HuggingFace multilingüe)
 
     # Configuración común
     batch_size: int = Field(default=32)
@@ -34,7 +36,7 @@ class ModelSettings(BaseSettings):
     # Opciones de optimización
     use_8bit: bool = Field(default=False)  # Cuantización 8-bit para ahorrar memoria
     use_fp16: bool = Field(default=True)   # Habilitar media precisión cuando hay GPU
-    max_length: int = Field(default=512)   # Máxima longitud de secuencia para BGE
+    max_length: int = Field(default=512)   # Máxima longitud de secuencia para modelos HuggingFace
 
     # Umbral de similaridad (0.0 a 1.0)
     similarity_threshold: float = Field(default=0.65)

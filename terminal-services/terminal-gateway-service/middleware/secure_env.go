@@ -23,24 +23,32 @@ func initSecretKey() {
 		// Get encryption key from environment
 		envKey := os.Getenv("ENCRYPTION_KEY")
 		if envKey == "" {
-			// If not set, generate a warning and create a temporary key
-			// This should never happen in production - always set ENCRYPTION_KEY environment variable
-			fmt.Println("WARNING: ENCRYPTION_KEY not set in environment. Using insecure default key.")
-			fmt.Println("Set ENCRYPTION_KEY to a 32-byte base64 encoded string for secure encryption.")
-			envKey = "0000000000000000000000000000000000000000000000000000000000000000"
+			// In production, we should fail securely
+			if os.Getenv("ENV") == "production" {
+				panic("ENCRYPTION_KEY environment variable is required in production")
+			}
+
+			// For development only, generate a secure random key
+			fmt.Println("WARNING: ENCRYPTION_KEY not set in environment. Generating a secure random key.")
+			fmt.Println("This key will change on service restart. For persistent encryption, set ENCRYPTION_KEY.")
+
+			// Generate a secure random key
+			newKey := make([]byte, 32)
+			if _, err := io.ReadFull(rand.Reader, newKey); err != nil {
+				panic(fmt.Sprintf("failed to generate random key: %v", err))
+			}
+
+			encodedKey := base64.StdEncoding.EncodeToString(newKey)
+			fmt.Println("Generated key (add to your environment): ", encodedKey)
+			envKey = encodedKey
 		}
 
 		// Decode the key
 		var err error
 		secretKey, err = base64.StdEncoding.DecodeString(envKey)
 		if err != nil || len(secretKey) != 32 {
-			// If the key is invalid, generate a new one
-			secretKey = make([]byte, 32)
-			if _, err := io.ReadFull(rand.Reader, secretKey); err != nil {
-				panic(fmt.Sprintf("failed to generate random key: %v", err))
-			}
-			fmt.Println("WARNING: Invalid ENCRYPTION_KEY format. Generated a temporary key.")
-			fmt.Println("New key (use this in your environment): ", base64.StdEncoding.EncodeToString(secretKey))
+			// If the key is invalid, fail rather than use an insecure key
+			panic(fmt.Sprintf("Invalid ENCRYPTION_KEY: must be a 32-byte key encoded as base64. Current length: %d", len(secretKey)))
 		}
 	})
 }
@@ -119,7 +127,7 @@ func CreateEncryptionKey() string {
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		panic(fmt.Sprintf("failed to generate random key: %v", err))
 	}
-	
+
 	encodedKey := base64.StdEncoding.EncodeToString(key)
 	return encodedKey
 }

@@ -8,6 +8,18 @@ aiohttp==3.8.5
 tenacity==8.2.3
 cryptography==41.0.4
 
+# Mejoras de rendimiento y robustez
+orjson==3.9.15         # Serialización JSON más rápida para FastAPI
+ujson==5.9.0           # Procesamiento JSON más rápido
+uvloop==0.19.0         # Mejora de rendimiento para asyncio (solo para Unix)
+httpx==0.25.2          # Cliente HTTP más moderno que aiohttp
+backoff==2.2.1         # Para reintentos exponenciales
+psutil==5.9.8          # Monitoreo de recursos del sistema
+
+# Monitoreo y logging
+structlog==23.2.0      # Logging estructurado
+prometheus-client==0.18.0  # Métricas y monitoreo
+
 # Clientes de bases de datos
 asyncpg==0.28.0       # PostgreSQL
 aiomysql==0.2.0       # MySQL

@@ -5,7 +5,7 @@
 QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
 GENERAL_COLLECTION=${QDRANT_COLLECTION_GENERAL:-general_knowledge}
 PERSONAL_COLLECTION=${QDRANT_COLLECTION_PERSONAL:-personal_knowledge}
-VECTOR_SIZE=${VECTOR_SIZE:-384}
+VECTOR_SIZE=${VECTOR_SIZE:-1024}
 
 echo "Esperando a que Qdrant esté disponible..."
 max_retries=20

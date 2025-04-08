@@ -19,24 +19,24 @@ type SessionRepository interface {
 	GetUserSessions(userID string, status string, limit, offset int) ([]*models.Session, error)
 	SearchSessions(req *models.SessionSearchRequest) ([]*models.Session, int, error)
 	UpdateSessionStatus(sessionID string, status models.SessionStatus) error
-	
+
 	SaveCommand(command *models.Command) error
 	GetCommand(commandID string) (*models.Command, error)
 	GetSessionCommands(sessionID string, limit, offset int) ([]*models.Command, error)
 	GetUserCommands(userID string, limit, offset int) ([]*models.Command, error)
 	SearchCommands(req *models.HistorySearchRequest) ([]*models.Command, int, error)
-	
+
 	SaveBookmark(bookmark *models.Bookmark) error
 	GetBookmark(bookmarkID string) (*models.Bookmark, error)
 	GetUserBookmarks(userID string, limit, offset int) ([]*models.Bookmark, error)
 	DeleteBookmark(bookmarkID string) error
-	
+
 	SaveContext(context *models.SessionContext) error
 	GetContext(sessionID string) (*models.SessionContext, error)
-	
+
 	PurgeOldSessions(days int) (int, error)
 	PurgeOldCommands(days int) (int, error)
-	
+
 	Close() error
 }
 
@@ -61,6 +61,36 @@ func NewSessionHandler(repo SessionRepository) *SessionHandler {
 	}
 }
 
+// getUserID safely extracts the user ID from the context
+func getUserID(c *gin.Context) (string, bool) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		return "", false
+	}
+
+	id, ok := userID.(string)
+	if !ok {
+		return "", false
+	}
+
+	return id, true
+}
+
+// isUserAdmin safely checks if the user is an admin
+func isUserAdmin(c *gin.Context) bool {
+	isAdmin, exists := c.Get("isAdmin")
+	if !exists {
+		return false
+	}
+
+	admin, ok := isAdmin.(bool)
+	if !ok {
+		return false
+	}
+
+	return admin
+}
+
 // CreateSession creates a new terminal session record
 func (h *SessionHandler) CreateSession(c *gin.Context) {
 	var session models.Session
@@ -70,14 +100,14 @@ func (h *SessionHandler) CreateSession(c *gin.Context) {
 	}
 
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
 	// Set user ID
-	session.UserID = userID.(string)
+	session.UserID = userID
 
 	// Set session ID if not provided
 	if session.SessionID == "" {
@@ -85,7 +115,7 @@ func (h *SessionHandler) CreateSession(c *gin.Context) {
 	}
 
 	// Set timestamps
-	now := time.Now()
+	now := time.Now().UTC()
 	session.CreatedAt = now
 	session.LastActivity = now
 
@@ -107,19 +137,25 @@ func (h *SessionHandler) CreateSession(c *gin.Context) {
 // GetSessions returns all sessions for the current user
 func (h *SessionHandler) GetSessions(c *gin.Context) {
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
 	// Get query parameters
 	status := c.Query("status")
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if err != nil {
+		limit = 20
+	}
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil {
+		offset = 0
+	}
 
 	// Get sessions
-	sessions, err := h.repo.GetUserSessions(userID.(string), status, limit, offset)
+	sessions, err := h.repo.GetUserSessions(userID, status, limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -138,8 +174,8 @@ func (h *SessionHandler) GetSession(c *gin.Context) {
 	sessionID := c.Param("id")
 
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
@@ -152,10 +188,9 @@ func (h *SessionHandler) GetSession(c *gin.Context) {
 	}
 
 	// Verify the session belongs to the user
-	if session.UserID != userID.(string) {
+	if session.UserID != userID {
 		// Check if user is admin
-		isAdmin, _ := c.Get("isAdmin")
-		if isAdmin == nil || !isAdmin.(bool) {
+		if !isUserAdmin(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 			return
 		}
@@ -169,8 +204,8 @@ func (h *SessionHandler) UpdateSessionStatus(c *gin.Context) {
 	sessionID := c.Param("id")
 
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
@@ -183,10 +218,9 @@ func (h *SessionHandler) UpdateSessionStatus(c *gin.Context) {
 	}
 
 	// Verify the session belongs to the user
-	if session.UserID != userID.(string) {
+	if session.UserID != userID {
 		// Check if user is admin
-		isAdmin, _ := c.Get("isAdmin")
-		if isAdmin == nil || !isAdmin.(bool) {
+		if !isUserAdmin(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 			return
 		}
@@ -218,8 +252,8 @@ func (h *SessionHandler) UpdateSessionStatus(c *gin.Context) {
 // SearchSessions searches for sessions based on criteria
 func (h *SessionHandler) SearchSessions(c *gin.Context) {
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
@@ -232,9 +266,8 @@ func (h *SessionHandler) SearchSessions(c *gin.Context) {
 	}
 
 	// Set user ID if not admin
-	isAdmin, _ := c.Get("isAdmin")
-	if isAdmin == nil || !isAdmin.(bool) {
-		req.UserID = userID.(string)
+	if !isUserAdmin(c) {
+		req.UserID = userID
 	}
 
 	// Set default values if not provided
@@ -282,14 +315,14 @@ func (h *CommandHandler) SaveCommand(c *gin.Context) {
 	}
 
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
 	// Set user ID
-	command.UserID = userID.(string)
+	command.UserID = userID
 
 	// Generate command ID if not provided
 	if command.CommandID == "" {
@@ -298,7 +331,7 @@ func (h *CommandHandler) SaveCommand(c *gin.Context) {
 
 	// Set execution time if not provided
 	if command.ExecutedAt.IsZero() {
-		command.ExecutedAt = time.Now()
+		command.ExecutedAt = time.Now().UTC()
 	}
 
 	// Save command
@@ -315,8 +348,8 @@ func (h *CommandHandler) GetCommand(c *gin.Context) {
 	commandID := c.Param("id")
 
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
@@ -329,10 +362,9 @@ func (h *CommandHandler) GetCommand(c *gin.Context) {
 	}
 
 	// Verify the command belongs to the user
-	if command.UserID != userID.(string) {
+	if command.UserID != userID {
 		// Check if user is admin
-		isAdmin, _ := c.Get("isAdmin")
-		if isAdmin == nil || !isAdmin.(bool) {
+		if !isUserAdmin(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 			return
 		}
@@ -346,8 +378,8 @@ func (h *CommandHandler) GetSessionCommands(c *gin.Context) {
 	sessionID := c.Param("id")
 
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
@@ -360,18 +392,23 @@ func (h *CommandHandler) GetSessionCommands(c *gin.Context) {
 	}
 
 	// Verify the session belongs to the user
-	if session.UserID != userID.(string) {
+	if session.UserID != userID {
 		// Check if user is admin
-		isAdmin, _ := c.Get("isAdmin")
-		if isAdmin == nil || !isAdmin.(bool) {
+		if !isUserAdmin(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 			return
 		}
 	}
 
 	// Get query parameters
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if err != nil {
+		limit = 20
+	}
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil {
+		offset = 0
+	}
 
 	// Get commands
 	commands, err := h.repo.GetSessionCommands(sessionID, limit, offset)
@@ -391,8 +428,8 @@ func (h *CommandHandler) GetSessionCommands(c *gin.Context) {
 // SearchCommands searches for commands based on criteria
 func (h *CommandHandler) SearchCommands(c *gin.Context) {
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
@@ -405,9 +442,8 @@ func (h *CommandHandler) SearchCommands(c *gin.Context) {
 	}
 
 	// Set user ID if not admin
-	isAdmin, _ := c.Get("isAdmin")
-	if isAdmin == nil || !isAdmin.(bool) {
-		req.UserID = userID.(string)
+	if !isUserAdmin(c) {
+		req.UserID = userID
 	}
 
 	// Set default values if not provided
@@ -455,14 +491,14 @@ func (h *BookmarkHandler) CreateBookmark(c *gin.Context) {
 	}
 
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
 	// Set user ID
-	bookmark.UserID = userID.(string)
+	bookmark.UserID = userID
 
 	// Set bookmark ID if not provided
 	if bookmark.BookmarkID == "" {
@@ -470,7 +506,7 @@ func (h *BookmarkHandler) CreateBookmark(c *gin.Context) {
 	}
 
 	// Set creation time
-	bookmark.CreatedAt = time.Now()
+	bookmark.CreatedAt = time.Now().UTC()
 
 	// Verify command exists and belongs to user
 	command, err := h.repo.GetCommand(bookmark.CommandID)
@@ -480,9 +516,8 @@ func (h *BookmarkHandler) CreateBookmark(c *gin.Context) {
 	}
 
 	// Verify ownership or admin rights
-	if command.UserID != userID.(string) {
-		isAdmin, _ := c.Get("isAdmin")
-		if isAdmin == nil || !isAdmin.(bool) {
+	if command.UserID != userID {
+		if !isUserAdmin(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot bookmark someone else's command"})
 			return
 		}
@@ -506,8 +541,8 @@ func (h *BookmarkHandler) GetBookmark(c *gin.Context) {
 	bookmarkID := c.Param("id")
 
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
@@ -520,10 +555,9 @@ func (h *BookmarkHandler) GetBookmark(c *gin.Context) {
 	}
 
 	// Verify the bookmark belongs to the user
-	if bookmark.UserID != userID.(string) {
+	if bookmark.UserID != userID {
 		// Check if user is admin
-		isAdmin, _ := c.Get("isAdmin")
-		if isAdmin == nil || !isAdmin.(bool) {
+		if !isUserAdmin(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 			return
 		}
@@ -535,18 +569,24 @@ func (h *BookmarkHandler) GetBookmark(c *gin.Context) {
 // GetUserBookmarks returns all bookmarks for the user
 func (h *BookmarkHandler) GetUserBookmarks(c *gin.Context) {
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
 	// Get query parameters
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if err != nil {
+		limit = 20
+	}
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil {
+		offset = 0
+	}
 
 	// Get bookmarks
-	bookmarks, err := h.repo.GetUserBookmarks(userID.(string), limit, offset)
+	bookmarks, err := h.repo.GetUserBookmarks(userID, limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -565,8 +605,8 @@ func (h *BookmarkHandler) DeleteBookmark(c *gin.Context) {
 	bookmarkID := c.Param("id")
 
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
@@ -579,10 +619,9 @@ func (h *BookmarkHandler) DeleteBookmark(c *gin.Context) {
 	}
 
 	// Verify the bookmark belongs to the user
-	if bookmark.UserID != userID.(string) {
+	if bookmark.UserID != userID {
 		// Check if user is admin
-		isAdmin, _ := c.Get("isAdmin")
-		if isAdmin == nil || !isAdmin.(bool) {
+		if !isUserAdmin(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 			return
 		}
@@ -621,14 +660,14 @@ func (h *ContextHandler) SaveContext(c *gin.Context) {
 	}
 
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
 	// Set user ID
-	context.UserID = userID.(string)
+	context.UserID = userID
 
 	// Verify session exists and belongs to user
 	session, err := h.repo.GetSession(context.SessionID)
@@ -638,16 +677,15 @@ func (h *ContextHandler) SaveContext(c *gin.Context) {
 	}
 
 	// Verify ownership or admin rights
-	if session.UserID != userID.(string) {
-		isAdmin, _ := c.Get("isAdmin")
-		if isAdmin == nil || !isAdmin.(bool) {
+	if session.UserID != userID {
+		if !isUserAdmin(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot update context for someone else's session"})
 			return
 		}
 	}
 
 	// Set last updated time
-	context.LastUpdated = time.Now()
+	context.LastUpdated = time.Now().UTC()
 
 	// Save context
 	if err := h.repo.SaveContext(&context); err != nil {
@@ -663,8 +701,8 @@ func (h *ContextHandler) GetContext(c *gin.Context) {
 	sessionID := c.Param("id")
 
 	// Get user ID from context (added by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	userID, ok := getUserID(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
@@ -677,9 +715,8 @@ func (h *ContextHandler) GetContext(c *gin.Context) {
 	}
 
 	// Verify ownership or admin rights
-	if session.UserID != userID.(string) {
-		isAdmin, _ := c.Get("isAdmin")
-		if isAdmin == nil || !isAdmin.(bool) {
+	if session.UserID != userID {
+		if !isUserAdmin(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot access context for someone else's session"})
 			return
 		}
@@ -697,7 +734,7 @@ func (h *ContextHandler) GetContext(c *gin.Context) {
 
 // MaintenanceHandler handles system maintenance operations
 type MaintenanceHandler struct {
-	repo                SessionRepository
+	repo                 SessionRepository
 	sessionRetentionDays int
 	commandRetentionDays int
 }
@@ -705,7 +742,7 @@ type MaintenanceHandler struct {
 // NewMaintenanceHandler creates a new MaintenanceHandler
 func NewMaintenanceHandler(repo SessionRepository, sessionDays, commandDays int) *MaintenanceHandler {
 	return &MaintenanceHandler{
-		repo:                repo,
+		repo:                 repo,
 		sessionRetentionDays: sessionDays,
 		commandRetentionDays: commandDays,
 	}
@@ -714,8 +751,7 @@ func NewMaintenanceHandler(repo SessionRepository, sessionDays, commandDays int)
 // PurgeOldData purges old sessions and commands
 func (h *MaintenanceHandler) PurgeOldData(c *gin.Context) {
 	// Only allow admins
-	isAdmin, _ := c.Get("isAdmin")
-	if isAdmin == nil || !isAdmin.(bool) {
+	if !isUserAdmin(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Admin privileges required"})
 		return
 	}
@@ -735,7 +771,7 @@ func (h *MaintenanceHandler) PurgeOldData(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":        "Purge completed successfully",
+		"message":         "Purge completed successfully",
 		"purged_sessions": sessionCount,
 		"purged_commands": commandCount,
 	})

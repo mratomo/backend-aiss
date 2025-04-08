@@ -1,13 +1,75 @@
 
+import asyncio
 import logging
 import os
-from typing import Optional
+import time
+import platform
+from datetime import datetime
+from typing import Optional, Dict, Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, status
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, status, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
+from fastapi.responses import ORJSONResponse  # Respuestas JSON más rápidas
+
+# Mejoras de rendimiento
+try:
+    import uvloop
+    uvloop.install()
+    uvloop_available = True
+except ImportError:
+    uvloop_available = False
+
+# Métricas y monitoreo
+try:
+    from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+    prometheus_available = True
+    
+    # Definir métricas
+    HTTP_REQUESTS = Counter('embedding_http_requests_total', 'Total HTTP Requests', ['method', 'endpoint', 'status'])
+    HTTP_REQUEST_DURATION = Histogram('embedding_http_request_duration_seconds', 'HTTP Request Duration', ['method', 'endpoint'])
+    DB_OPERATIONS = Counter('embedding_db_operations_total', 'Total Database Operations', ['operation', 'status'])
+    EMBEDDING_GENERATIONS = Counter('embedding_generations_total', 'Total Embedding Generations', ['type', 'status'])
+    VECTOR_SEARCHES = Counter('embedding_vector_searches_total', 'Total Vector Searches', ['status'])
+    
+except ImportError:
+    prometheus_available = False
+
+# Monitoreo de recursos
+try:
+    import psutil
+    psutil_available = True
+    if prometheus_available:
+        MEMORY_USAGE = Gauge('embedding_memory_usage_bytes', 'Memory Usage in Bytes')
+        CPU_USAGE = Gauge('embedding_cpu_usage_percent', 'CPU Usage Percentage')
+except ImportError:
+    psutil_available = False
+
+# Logging estructurado
+try:
+    import structlog
+    
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.JSONRenderer()
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+    )
+    logger = structlog.get_logger("embedding_service")
+    structlog_available = True
+except ImportError:
+    # Fallback a logging tradicional
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger = logging.getLogger("embedding_service")
+    structlog_available = False
 
 from config.settings import Settings
 from models.embedding import (
@@ -17,21 +79,15 @@ from models.embedding import (
 from services.embedding_service import EmbeddingService
 from services.vectordb_service import VectorDBService
 
-# Configurar logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
-
 # Cargar configuración
 settings = Settings()
 
-# Crear aplicación FastAPI
+# Crear aplicación FastAPI con respuestas optimizadas
 app = FastAPI(
     title="Embedding Service",
-    description="Servicio de generación de embeddings con soporte GPU",
-    version="1.0.0",
+    description="Servicio de generación de embeddings con soporte para modelos Nomic y HuggingFace",
+    version="1.1.0",
+    default_response_class=ORJSONResponse  # Usar orjson para respuestas más rápidas
 )
 
 # Configurar CORS
@@ -43,8 +99,71 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Conexión a MongoDB
-motor_client = AsyncIOMotorClient(settings.mongodb_uri)
+# Middleware para métricas si están disponibles
+if prometheus_available:
+    @app.middleware("http")
+    async def metrics_middleware(request: Request, call_next):
+        start_time = time.time()
+        
+        # Extraer información de la ruta
+        path = request.url.path
+        method = request.method
+        
+        try:
+            # Procesar la solicitud
+            response = await call_next(request)
+            status_code = response.status_code
+            
+        except Exception as e:
+            status_code = 500
+            raise e
+        finally:
+            # Registrar métricas
+            duration = time.time() - start_time
+            HTTP_REQUESTS.labels(method=method, endpoint=path, status=status_code).inc()
+            HTTP_REQUEST_DURATION.labels(method=method, endpoint=path).observe(duration)
+            
+        return response
+
+# Función para actualizar métricas periódicamente
+async def update_metrics():
+    if prometheus_available and psutil_available:
+        while True:
+            try:
+                # Actualizar métrica de uso de memoria
+                process = psutil.Process(os.getpid())
+                memory_info = process.memory_info()
+                MEMORY_USAGE.set(memory_info.rss)
+                
+                # Actualizar métrica de uso de CPU
+                cpu_percent = process.cpu_percent(interval=1)
+                CPU_USAGE.set(cpu_percent)
+                
+                # Ejecutar cada 15 segundos
+                await asyncio.sleep(15)
+            except Exception as e:
+                logger.error("Error updating metrics", error=str(e))
+                await asyncio.sleep(30)  # Esperar más tiempo si hay un error
+
+# Conexión a MongoDB con reintentos
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type(Exception)
+)
+def init_mongodb_client():
+    return AsyncIOMotorClient(
+        settings.mongodb_uri,
+        serverSelectionTimeoutMS=5000,
+        connectTimeoutMS=5000,
+        maxPoolSize=50,
+        minPoolSize=10
+    )
+
+# Inicializar cliente MongoDB
+motor_client = init_mongodb_client()
 db = motor_client[settings.mongodb_database]
 
 # Inicializar servicios
@@ -55,22 +174,49 @@ embedding_service = EmbeddingService(db, vectordb_service, settings)
 @app.on_event("startup")
 async def startup_event():
     """Inicializar servicios al iniciar la aplicación"""
-    logger.info("Starting Embedding Service...")
+    logger.info("Starting Embedding Service",
+               version="1.1.0",
+               python_version=platform.python_version(),
+               uvloop_enabled=uvloop_available,
+               structlog_enabled=structlog_available,
+               prometheus_enabled=prometheus_available)
+    
+    # Iniciar tarea de monitoreo si está disponible
+    if prometheus_available and psutil_available:
+        asyncio.create_task(update_metrics())
+        logger.info("Metrics monitoring started")
 
     # Verificar conexión a MongoDB
+    logger.info("Connecting to MongoDB...")
     try:
-        await motor_client.admin.command("ping")
-        logger.info("Successfully connected to MongoDB")
+        for attempt in range(1, 6):
+            try:
+                await motor_client.admin.command("ping")
+                logger.info("Successfully connected to MongoDB")
+                if prometheus_available:
+                    DB_OPERATIONS.labels(operation="connect", status="success").inc()
+                break
+            except Exception as e:
+                if attempt < 5:
+                    wait_time = 2 ** attempt  # Espera exponencial
+                    logger.warning(f"MongoDB connection attempt {attempt} failed. Retrying in {wait_time}s...", error=str(e))
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"Failed to connect to MongoDB after 5 attempts", error=str(e))
+                    if prometheus_available:
+                        DB_OPERATIONS.labels(operation="connect", status="error").inc()
+                    raise
     except Exception as e:
-        logger.error(f"Error connecting to MongoDB: {e}")
+        logger.error("Error connecting to MongoDB", error=str(e))
         raise
 
     # Verificar conexión a Qdrant
+    logger.info("Connecting to Vector DB...")
     try:
         status = await vectordb_service.get_status()
-        logger.info(f"Successfully connected to Vector DB: {status}")
+        logger.info("Successfully connected to Vector DB", status=status)
     except Exception as e:
-        logger.error(f"Error connecting to Vector DB: {e}")
+        logger.error("Error connecting to Vector DB", error=str(e))
         raise
 
     # Inicializar modelos de embeddings
@@ -80,11 +226,11 @@ async def startup_event():
 
         # Verificar disponibilidad de GPU
         if embedding_service.gpu_available:
-            logger.info(f"GPU detected and will be used: {embedding_service.gpu_info}")
+            logger.info("GPU detected and will be used", gpu_info=embedding_service.gpu_info)
         else:
             logger.warning("No GPU detected, using CPU for embeddings")
     except Exception as e:
-        logger.error(f"Error initializing embedding models: {e}")
+        logger.error("Error initializing embedding models", error=str(e))
         raise
 
 
@@ -92,37 +238,90 @@ async def startup_event():
 async def shutdown_event():
     """Limpiar recursos al detener la aplicación"""
     logger.info("Shutting down Embedding Service...")
-    motor_client.close()
-    await embedding_service.close()
+    
+    try:
+        # Cerrar conexión a MongoDB
+        motor_client.close()
+        logger.info("MongoDB connection closed")
+        
+        # Cerrar servicio de embeddings
+        await embedding_service.close()
+        logger.info("Embedding service resources released")
+        
+    except Exception as e:
+        logger.error("Error during shutdown", error=str(e))
 
 
-# Endpoint de health check
+# Endpoint para métricas de Prometheus
+if prometheus_available:
+    @app.get("/metrics", tags=["Monitoring"])
+    async def metrics():
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# Endpoint de health check optimizado
 @app.get("/health", tags=["Health"])
 async def health_check():
     """Verificar salud del servicio"""
+    start_time = time.time()
+    
+    health_status = {
+        "status": "ok",
+        "service": "embedding-service",
+        "version": "1.1.0",
+        "timestamp": datetime.utcnow().isoformat(),
+        "uptime": os.getenv("UPTIME", "unknown")
+    }
+    
     # Verificar MongoDB
     try:
         await motor_client.admin.command("ping")
-        mongo_status = "ok"
+        health_status["mongodb"] = "ok"
+        if prometheus_available:
+            DB_OPERATIONS.labels(operation="ping", status="success").inc()
     except Exception as e:
-        mongo_status = f"error: {str(e)}"
-
+        health_status["mongodb"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+        if prometheus_available:
+            DB_OPERATIONS.labels(operation="ping", status="error").inc()
+    
     # Verificar Qdrant
     try:
-        qdrant_status = await vectordb_service.get_status()
+        vectordb_status = await vectordb_service.get_status()
+        health_status["vectordb"] = vectordb_status
     except Exception as e:
-        qdrant_status = f"error: {str(e)}"
-
+        health_status["vectordb"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
     # Verificar GPU
-    gpu_status = "available" if embedding_service.gpu_available else "not available"
-
-    return {
-        "status": "ok",
-        "mongodb.js": mongo_status,
-        "vectordb": qdrant_status,
-        "gpu": gpu_status,
-        "gpu_info": embedding_service.gpu_info
+    health_status["gpu"] = {
+        "available": embedding_service.gpu_available,
+        "info": embedding_service.gpu_info
     }
+    
+    # Añadir información de memoria si está disponible
+    if psutil_available:
+        try:
+            process = psutil.Process(os.getpid())
+            memory_info = process.memory_info()
+            health_status["memory_usage"] = {
+                "rss_bytes": memory_info.rss,
+                "rss_mb": round(memory_info.rss / (1024 * 1024), 2)
+            }
+            
+            # Añadir uso de CPU
+            cpu_percent = process.cpu_percent(interval=0.1)
+            health_status["cpu_usage"] = {
+                "percent": cpu_percent
+            }
+        except Exception as e:
+            health_status["resource_monitor"] = {"error": str(e)}
+    
+    # Añadir tiempo de respuesta
+    duration = time.time() - start_time
+    health_status["response_time_ms"] = round(duration * 1000, 2)
+    
+    return health_status
 
 
 # ----- Rutas para Embeddings -----

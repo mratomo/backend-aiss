@@ -36,8 +36,11 @@ class Settings(BaseSettings):
     
     # Security
     API_KEY: Optional[str] = None
-    JWT_SECRET: str = "replace-in-production"
+    JWT_SECRET: str = os.environ.get("JWT_SECRET", "")
     JWT_ALGORITHM: str = "HS256"
+    
+    # CORS settings
+    ALLOWED_ORIGINS: List[str] = []
     
     # Suggestion promptbook paths
     PROMPT_TEMPLATES_DIR: str = "prompts"
@@ -47,3 +50,15 @@ class Settings(BaseSettings):
 
 # Create global settings object
 settings = Settings()
+
+# Set ALLOWED_ORIGINS from environment variable or use defaults for development
+origins_env = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+if origins_env:
+    settings.ALLOWED_ORIGINS = origins_env.split(",")
+else:
+    # Default to secure development origins only
+    settings.ALLOWED_ORIGINS = ["http://localhost:3000", "https://app.domain.com"]
+    
+# Validate JWT_SECRET
+if not settings.JWT_SECRET:
+    raise ValueError("JWT_SECRET environment variable is required")

@@ -150,8 +150,8 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_COLLECTION_GENERAL=general_knowledge
       - QDRANT_COLLECTION_PERSONAL=personal_knowledge
-      - GENERAL_EMBEDDING_MODEL=${GENERAL_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L12-v2}
-      - PERSONAL_EMBEDDING_MODEL=${PERSONAL_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L12-v2}
+      - GENERAL_EMBEDDING_MODEL=${GENERAL_EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v1.5-fp16}
+      - PERSONAL_EMBEDDING_MODEL=${PERSONAL_EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v1.5-fp16}
       - USE_GPU=${USE_GPU:-true}
       # Eliminamos dependencia circular con context-service
       # - MCP_SERVICE_URL=http://context-service:8083
@@ -212,7 +212,9 @@ services:
       - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-llama3}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://localhost:11434}
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://ollama:11434}
+      - OLLAMA_MCP_URL=${OLLAMA_MCP_URL:-http://ollama-mcp-server:8095}
+      - OLLAMA_IS_REMOTE=${OLLAMA_IS_REMOTE:-false}
       - USE_MCP_TOOLS=${USE_MCP_TOOLS:-true}
       - PREFER_DIRECT_MCP=${PREFER_DIRECT_MCP:-true}
       - DB_CONNECTIONS_URL=http://db-connection-service:8086
@@ -224,6 +226,10 @@ services:
         condition: service_started
       context-service:
         condition: service_started
+      ollama:
+        condition: service_healthy
+      ollama-mcp-server:
+        condition: service_started
     networks:
       - mcp-network
     restart: unless-stopped
@@ -233,6 +239,33 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # Ollama MCP Server (Python)
+  ollama-mcp-server:
+    build:
+      context: ./rag-agent
+      dockerfile: Dockerfile
+    ports:
+      - "8095:8095"
+    environment:
+      - PORT=8095
+      - ENVIRONMENT=production
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://ollama:11434}
+      - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-llama3}
+      - RUN_STANDALONE_MCP_SERVER=true
+      - DISABLE_MAIN_APP=true
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8095/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # DB Connection Service (Python)
   db-connection-service:
@@ -491,7 +524,7 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_COLLECTION_GENERAL=general_knowledge
       - QDRANT_COLLECTION_PERSONAL=personal_knowledge
-      - VECTOR_SIZE=384
+      - VECTOR_SIZE=1024
     entrypoint: ["/bin/sh", "/init_collections.sh"]
     depends_on:
       qdrant:
@@ -501,15 +534,15 @@ services:
 
   # MinIO Object Storage
   minio:
-    image: minio/minio:RELEASE.2023-06-02T21-20-33Z
+    image: quay.io/minio/minio:latest
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
       - minio-data:/data
     environment:
-      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
-      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
     command: server /data --console-address ":9001"
     networks:
       - mcp-network
@@ -523,16 +556,16 @@ services:
 
   # MinIO Setup (creates buckets)
   minio-setup:
-    image: minio/mc:RELEASE.2023-06-03T01-45-28Z
+    image: quay.io/minio/mc:latest
     depends_on:
       minio:
         condition: service_healthy
     environment:
-      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
-      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
     entrypoint: >
       /bin/sh -c "
-      until /usr/bin/mc config host add myminio http://minio:9000 ${MINIO_ACCESS_KEY} ${MINIO_SECRET_KEY}; do
+      until /usr/bin/mc config host add myminio http://minio:9000 ${MINIO_ACCESS_KEY:-minioadmin} ${MINIO_SECRET_KEY:-minioadmin}; do
         echo 'Waiting for MinIO to be available...'
         sleep 2
       done;

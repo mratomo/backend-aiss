@@ -22,11 +22,16 @@ class AnthropicSettings(BaseSettings):
 
 
 class OllamaSettings(BaseSettings):
-    """Configuración para proveedores Ollama (local)"""
+    """Configuración para proveedores Ollama (local o remoto)"""
     default_model: str = Field(default="llama3")
     default_temperature: float = Field(default=0.0)
     default_max_tokens: int = Field(default=4096)
     timeout_seconds: int = Field(default=120)
+    api_url: str = Field(default="http://localhost:11434")
+    mcp_url: str = Field(default="http://ollama-mcp-server:8095")  # URL del servidor MCP para Ollama
+    enable_mcp: bool = Field(default=True)  # Habilitar integración MCP para Ollama
+    models_path: str = Field(default="/usr/local/share/ollama/models")  # Ruta a los modelos de Ollama
+    is_remote: bool = Field(default=False)  # Indica si Ollama está en un servidor remoto
 
 
 class RetrievalSettings(BaseSettings):
@@ -134,6 +139,13 @@ class Settings(BaseSettings):
         self.ollama.default_model = os.getenv(
             "OLLAMA_DEFAULT_MODEL", self.ollama.default_model
         )
+        self.ollama.api_url = os.getenv(
+            "OLLAMA_API_BASE", self.ollama.api_url
+        )
+        self.ollama.mcp_url = os.getenv(
+            "OLLAMA_MCP_URL", self.ollama.mcp_url
+        )
+        self.ollama.is_remote = os.getenv("OLLAMA_IS_REMOTE", "false").lower() in ("true", "1", "yes")
 
         # Configuración de MCP
         self.use_mcp_tools = os.getenv("USE_MCP_TOOLS", "true").lower() in ("true", "1", "yes")

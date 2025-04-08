@@ -9,6 +9,7 @@ import torch
 from transformers import AutoModel, AutoTokenizer
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from fastapi import HTTPException
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
 from config.settings import Settings
 from models.embedding import (
@@ -90,48 +91,71 @@ class EmbeddingService:
     async def _load_model(self, model_name: str) -> Dict[str, Any]:
         """Cargar y optimizar modelo de embeddings"""
         try:
-            # Cargar tokenizer
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-            # Configurar opciones de carga
-            load_options = {}
-
-            # Activar cuantización 8-bit si está configurada
-            if self.gpu_available and self.settings.models.use_8bit:
+            # Verificar si es un modelo de Nomic
+            if "nomic" in model_name.lower():
                 try:
-                    import bitsandbytes as bnb
-                    logger.info(f"Cargando modelo {model_name} con cuantización 8-bit")
-                    load_options["load_in_8bit"] = True
+                    import nomic
+                    from nomic import embed
+                    
+                    # Los modelos Nomic tienen una dimensión fija de 1024
+                    vector_dim = 1024
+                    
+                    logger.info(f"Cargando modelo Nomic: {model_name}")
+                    
+                    # Nomic client es diferente a los modelos de HuggingFace
+                    return {
+                        "model_type": "nomic",
+                        "model_name": model_name,
+                        "vector_dim": vector_dim,
+                        "tokenizer": None  # Nomic maneja su propio tokenizado
+                    }
                 except ImportError:
-                    logger.warning("bitsandbytes no está instalado. Desactivando cuantización 8-bit.")
+                    logger.error("Biblioteca Nomic no está instalada. Instálala con 'pip install nomic'")
+                    raise
+            else:
+                # Cargar tokenizer de HuggingFace
+                tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-            # Usar asyncio para no bloquear el bucle de eventos durante la carga
-            model = await asyncio.to_thread(
-                AutoModel.from_pretrained, model_name, **load_options
-            )
+                # Configurar opciones de carga
+                load_options = {}
 
-            # Optimizar para inferencia
-            model = model.eval()
+                # Activar cuantización 8-bit si está configurada
+                if self.gpu_available and self.settings.models.use_8bit:
+                    try:
+                        import bitsandbytes as bnb
+                        logger.info(f"Cargando modelo {model_name} con cuantización 8-bit")
+                        load_options["load_in_8bit"] = True
+                    except ImportError:
+                        logger.warning("bitsandbytes no está instalado. Desactivando cuantización 8-bit.")
 
-            # Usar media precisión si está disponible
-            if self.gpu_available and self.settings.models.use_fp16:
-                model = model.half()  # FP16 para aumentar el rendimiento
+                # Usar asyncio para no bloquear el bucle de eventos durante la carga
+                model = await asyncio.to_thread(
+                    AutoModel.from_pretrained, model_name, **load_options
+                )
 
-            # Mover el modelo a la GPU si está disponible
-            model = model.to(self.device)
+                # Optimizar para inferencia
+                model = model.eval()
 
-            # Obtener dimensión del vector (útil para Qdrant)
-            # Para BGE, generalmente es 1024, para E5 podría ser 768
-            # Lo obtenemos dinámicamente a partir de la configuración del modelo
-            vector_dim = model.config.hidden_size
+                # Usar media precisión si está disponible
+                if self.gpu_available and self.settings.models.use_fp16:
+                    model = model.half()  # FP16 para aumentar el rendimiento
 
-            logger.info(f"Modelo {model_name} cargado exitosamente. Dimensión del vector: {vector_dim}")
+                # Mover el modelo a la GPU si está disponible
+                model = model.to(self.device)
 
-            return {
-                "model": model,
-                "tokenizer": tokenizer,
-                "vector_dim": vector_dim
-            }
+                # Obtener dimensión del vector (útil para Qdrant)
+                # Para BGE, generalmente es 1024, para E5 podría ser 768
+                # Lo obtenemos dinámicamente a partir de la configuración del modelo
+                vector_dim = model.config.hidden_size
+
+                logger.info(f"Modelo HuggingFace {model_name} cargado exitosamente. Dimensión del vector: {vector_dim}")
+
+                return {
+                    "model_type": "huggingface",
+                    "model": model,
+                    "tokenizer": tokenizer,
+                    "vector_dim": vector_dim
+                }
         except Exception as e:
             logger.error(f"Error cargando modelo {model_name}: {e}")
             raise
@@ -175,11 +199,9 @@ class EmbeddingService:
         """Generar y almacenar un embedding para un texto"""
         # Obtener modelo para el tipo de embedding
         model_info = self._get_model(embedding_type)
-        model = model_info["model"]
-        tokenizer = model_info["tokenizer"]
 
         # Generar embedding de forma asíncrona para no bloquear el bucle de eventos
-        vector = await self._generate_embedding(text, model, tokenizer)
+        vector = await self._generate_embedding(text, model_info)
         vector_list = vector.tolist()
 
         # Preparar metadatos
@@ -234,48 +256,101 @@ class EmbeddingService:
             metadata=meta
         )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((RuntimeError, ConnectionError, TimeoutError)),
+        retry_error_callback=lambda retry_state: logger.error(f"Failed embedding generation after {retry_state.attempt_number} attempts")
+    )
     async def _generate_embedding(self,
                                   text: str,
-                                  model: Any,
-                                  tokenizer: Any) -> torch.Tensor:
+                                  model_info: Dict[str, Any]) -> torch.Tensor:
         """
-        Genera embedding para un texto usando el modelo BGE/E5
+        Genera embedding para un texto usando el modelo correspondiente (HuggingFace o Nomic)
+        Con reintentos automáticos en caso de fallos transitorios.
 
         Args:
             text: Texto a convertir en embedding
-            model: Modelo cargado (AutoModel)
-            tokenizer: Tokenizador correspondiente
+            model_info: Información del modelo cargado
 
         Returns:
             Vector de embedding normalizado
         """
-        max_length = self.settings.models.max_length
+        model_type = model_info.get("model_type", "huggingface")
+        
+        # Generar embeddings con Nomic
+        if model_type == "nomic":
+            try:
+                from nomic import embed
+                
+                # Generar embeddings con la API de Nomic
+                def generate_nomic():
+                    try:
+                        embeddings = embed.text(
+                            texts=[text],
+                            model_name=model_info["model_name"]
+                        )
+                        # Convertir a tensor de PyTorch
+                        return torch.tensor(embeddings[0])
+                    except Exception as e:
+                        logger.error(f"Error en generate_nomic: {e}")
+                        raise
+                
+                # Ejecutar de forma asíncrona
+                result = await asyncio.to_thread(generate_nomic)
+                return result
+                
+            except Exception as e:
+                logger.error(f"Error generando embedding con Nomic: {e}")
+                raise
+        
+        # Generar embeddings con modelos HuggingFace (BGE/E5)
+        else:
+            max_length = self.settings.models.max_length
+            model = model_info["model"]
+            tokenizer = model_info["tokenizer"]
 
-        # Tokenizar texto
-        inputs = tokenizer(
-            text,
-            max_length=max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt"
-        )
+            # Tokenizar texto con manejo de errores
+            try:
+                inputs = tokenizer(
+                    text,
+                    max_length=max_length,
+                    padding="max_length",
+                    truncation=True,
+                    return_tensors="pt"
+                )
+            except Exception as e:
+                logger.error(f"Error al tokenizar texto: {e}")
+                # Crear un texto más pequeño y simple si la tokenización falla
+                fallback_text = text[:500] if len(text) > 500 else text
+                inputs = tokenizer(
+                    fallback_text,
+                    max_length=max_length // 2,
+                    padding="max_length",
+                    truncation=True,
+                    return_tensors="pt"
+                )
 
-        # Mover a GPU si está disponible
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            # Mover a GPU si está disponible
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        # Ejecutar en un thread separado para no bloquear el event loop
-        def generate():
-            with torch.no_grad():
-                outputs = model(**inputs)
-                # Para modelos BGE/E5, usamos el token [CLS] (primer token)
-                embeddings = outputs.last_hidden_state[:, 0]
-                # Normalizar para similaridad de coseno
-                normalized = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-                return normalized[0].cpu()  # Mover de vuelta a CPU para el resultado
+            # Ejecutar en un thread separado para no bloquear el event loop
+            def generate_huggingface():
+                try:
+                    with torch.no_grad():
+                        outputs = model(**inputs)
+                        # Para modelos BGE/E5, usamos el token [CLS] (primer token)
+                        embeddings = outputs.last_hidden_state[:, 0]
+                        # Normalizar para similaridad de coseno
+                        normalized = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+                        return normalized[0].cpu()  # Mover de vuelta a CPU para el resultado
+                except Exception as e:
+                    logger.error(f"Error en generate_huggingface: {e}")
+                    raise
 
-        # Ejecutar de forma asíncrona
-        result = await asyncio.to_thread(generate)
-        return result
+            # Ejecutar de forma asíncrona
+            result = await asyncio.to_thread(generate_huggingface)
+            return result
 
     async def create_embeddings_batch(self,
                                       texts: List[str],
@@ -297,40 +372,64 @@ class EmbeddingService:
 
         # Obtener modelo para el tipo de embedding
         model_info = self._get_model(embedding_type)
-        model = model_info["model"]
-        tokenizer = model_info["tokenizer"]
-
-        # Procesar embeddings en batches para optimizar GPU
-        batch_size = min(len(texts), self.settings.models.batch_size)
+        model_type = model_info.get("model_type", "huggingface")
+        
         vectors = []
+        
+        # Manejar diferentes tipos de modelos
+        if model_type == "nomic":
+            # Procesamiento por lotes con Nomic
+            try:
+                from nomic import embed
+                
+                # Nomic maneja eficientemente los batches internamente
+                def generate_nomic_batch():
+                    embeddings = embed.text(
+                        texts=texts,
+                        model_name=model_info["model_name"]
+                    )
+                    # Convertir a tensores de PyTorch
+                    return [torch.tensor(emb) for emb in embeddings]
+                
+                # Ejecutar de forma asíncrona
+                vectors = await asyncio.to_thread(generate_nomic_batch)
+                
+            except Exception as e:
+                logger.error(f"Error generando embeddings batch con Nomic: {e}")
+                raise
+        else:
+            # Procesar en batches con modelos HuggingFace para optimizar GPU
+            model = model_info["model"]
+            tokenizer = model_info["tokenizer"]
+            batch_size = min(len(texts), self.settings.models.batch_size)
+            
+            # Procesar por lotes para aprovechar el hardware
+            for i in range(0, len(texts), batch_size):
+                batch_texts = texts[i:i+batch_size]
 
-        # Procesar por lotes para aprovechar el hardware
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i:i+batch_size]
+                # Tokenizar en batch
+                inputs = tokenizer(
+                    batch_texts,
+                    max_length=self.settings.models.max_length,
+                    padding=True,
+                    truncation=True,
+                    return_tensors="pt"
+                )
 
-            # Tokenizar en batch
-            inputs = tokenizer(
-                batch_texts,
-                max_length=self.settings.models.max_length,
-                padding=True,
-                truncation=True,
-                return_tensors="pt"
-            )
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                # Generar embeddings (usando asyncio para no bloquear)
+                def generate_batch():
+                    with torch.no_grad():
+                        outputs = model(**inputs)
+                        # Para modelos BGE/E5, usamos el token [CLS] (primer token)
+                        embeddings = outputs.last_hidden_state[:, 0]
+                        # Normalizar para similaridad de coseno
+                        normalized = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+                        return normalized.cpu()  # Mover de vuelta a CPU
 
-            # Generar embeddings (usando asyncio para no bloquear)
-            def generate_batch():
-                with torch.no_grad():
-                    outputs = model(**inputs)
-                    # Para modelos BGE/E5, usamos el token [CLS] (primer token)
-                    embeddings = outputs.last_hidden_state[:, 0]
-                    # Normalizar para similaridad de coseno
-                    normalized = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-                    return normalized.cpu()  # Mover de vuelta a CPU
-
-            batch_vectors = await asyncio.to_thread(generate_batch)
-            vectors.extend(batch_vectors.unbind())
+                batch_vectors = await asyncio.to_thread(generate_batch)
+                vectors.extend(batch_vectors.unbind())
 
         # Convertir a listas de Python
         vector_lists = [vector.tolist() for vector in vectors]
@@ -632,11 +731,9 @@ class EmbeddingService:
         """Buscar textos similares a la consulta"""
         # Obtener modelo para el tipo de embedding
         model_info = self._get_model(embedding_type)
-        model = model_info["model"]
-        tokenizer = model_info["tokenizer"]
 
         # Generar embedding para la consulta
-        query_vector = await self._generate_embedding(query, model, tokenizer)
+        query_vector = await self._generate_embedding(query, model_info)
         query_vector_list = query_vector.tolist()
 
         # Realizar búsqueda en la base de datos vectorial

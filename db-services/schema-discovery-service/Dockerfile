@@ -2,13 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Instalar dependencias para clientes de base de datos y curl para healthcheck
+# Instalar dependencias para clientes de base de datos, curl para healthcheck y psutil
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gcc \
     python3-dev \
     libpq-dev \
     unixodbc-dev \
+    git \
+    procps \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

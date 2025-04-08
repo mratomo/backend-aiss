@@ -64,6 +64,7 @@ func main() {
 
 	// Schedule regular maintenance
 	maintenanceTicker := time.NewTicker(24 * time.Hour)
+	maintenanceStop := make(chan struct{})
 	go func() {
 		for {
 			select {
@@ -83,6 +84,9 @@ func main() {
 				} else {
 					log.Printf("Purged %d old commands", commandsDeleted)
 				}
+			case <-maintenanceStop:
+				log.Println("Stopping maintenance goroutine")
+				return
 			}
 		}
 	}()
@@ -94,6 +98,7 @@ func main() {
 	log.Println("Shutting down server...")
 
 	maintenanceTicker.Stop()
+	close(maintenanceStop)
 
 	// Create context with timeout for shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Server.GracefulTimeout)

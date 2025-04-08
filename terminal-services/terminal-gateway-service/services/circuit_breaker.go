@@ -79,26 +79,26 @@ func NewCircuitBreaker(name string, opts ...CircuitBreakerOption) *CircuitBreake
 
 // Execute executes the given function within the circuit breaker pattern
 func (cb *CircuitBreaker) Execute(fn func() (interface{}, error)) (interface{}, error) {
-	cb.mutex.RLock()
-	state := cb.state
-	cb.mutex.RUnlock()
-
-	// Check if circuit is open
-	if state == StateOpen {
-		// Check if timeout has elapsed
-		cb.mutex.RLock()
+	// Get state with lock and check timeout together to avoid race conditions
+	cb.mutex.Lock()
+	
+	// Check if circuit is open and if timeout has elapsed
+	currentState := cb.state
+	if currentState == StateOpen {
 		elapsed := time.Since(cb.lastFailureTime)
-		cb.mutex.RUnlock()
-
 		if elapsed > cb.timeout {
 			// Transition to half-open state
-			cb.mutex.Lock()
 			cb.state = StateHalfOpen
-			cb.mutex.Unlock()
-		} else {
-			// Circuit is still open
-			return nil, fmt.Errorf("circuit breaker '%s' is open", cb.name)
+			currentState = StateHalfOpen
 		}
+	}
+	
+	// Release lock after getting state and possibly updating it
+	cb.mutex.Unlock()
+	
+	// Handle open circuit
+	if currentState == StateOpen {
+		return nil, ErrCircuitOpen
 	}
 
 	// Execute the function

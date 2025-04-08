@@ -1,4 +1,5 @@
 # services/db_query_service.py
+import asyncio
 import logging
 import time
 import json
@@ -8,13 +9,21 @@ from typing import Dict, List, Optional, Any, Tuple
 import aiohttp
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+# Intentar usar structlog para logging estructurado si está disponible
+try:
+    import structlog
+    logger = structlog.get_logger("db_query_service")
+    structlog_available = True
+except ImportError:
+    logger = logging.getLogger("db_query_service")
+    structlog_available = False
 
 from config.settings import Settings
 from models.query import QueryResult
 from services.llm_service import LLMService
 from services.retrieval_service import RetrievalService
-
-logger = logging.getLogger(__name__)
 
 class DBQueryService:
     """Servicio para procesar consultas de base de datos con LLMs"""
@@ -35,11 +44,14 @@ class DBQueryService:
         self.llm_service = llm_service
         self.retrieval_service = retrieval_service
         self.settings = settings
-        self.http_client = aiohttp.ClientSession()
+        # No inicializar el HTTP client aquí para evitar problemas de cierre
+        # Se inicializará bajo demanda en los métodos que lo requieran
+        self.http_client = None
     
     async def close(self):
         """Cerrar recursos al finalizar"""
-        await self.http_client.close()
+        if self.http_client is not None:
+            await self.http_client.close()
     
     async def process_query(self, user_id: str, agent_id: str, query: str, 
                            connections: Optional[List[str]] = None,
@@ -203,6 +215,23 @@ class DBQueryService:
         
         return result
     
+    async def _get_http_client(self):
+        """
+        Obtener o crear cliente HTTP bajo demanda
+        
+        Returns:
+            Cliente HTTP inicializado
+        """
+        if self.http_client is None:
+            timeout = aiohttp.ClientTimeout(total=60)
+            self.http_client = aiohttp.ClientSession(timeout=timeout)
+        return self.http_client
+    
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
+    )
     async def _get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """
         Obtener información de un agente desde el servicio de conexiones
@@ -214,14 +243,23 @@ class DBQueryService:
             Información del agente o None si no existe
         """
         try:
-            async with self.http_client.get(f"{self.settings.db_connections_url}/agents/{agent_id}") as response:
+            http_client = await self._get_http_client()
+            async with http_client.get(f"{self.settings.db_connections_url}/agents/{agent_id}") as response:
                 if response.status == 200:
                     return await response.json()
                 return None
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"Error de conexión obteniendo agente {agent_id}: {e}")
+            raise  # Será capturado por retry
         except Exception as e:
             logger.error(f"Error obteniendo agente {agent_id}: {e}")
             return None
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
+    )
     async def _get_agent_connections(self, agent_id: str, requested_connections: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """
         Obtener conexiones asignadas a un agente
@@ -234,7 +272,11 @@ class DBQueryService:
             Lista de conexiones disponibles para el agente
         """
         try:
-            async with self.http_client.get(f"{self.settings.db_connections_url}/agents/{agent_id}/connections") as response:
+            http_client = await self._get_http_client()
+            async with http_client.get(
+                f"{self.settings.db_connections_url}/agents/{agent_id}/connections",
+                timeout=aiohttp.ClientTimeout(total=30)  # Timeout específico para esta operación
+            ) as response:
                 if response.status == 200:
                     connections = await response.json()
                     
@@ -247,6 +289,9 @@ class DBQueryService:
                     
                     return connections
                 return []
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"Error de conexión obteniendo conexiones para agente {agent_id}: {e}")
+            raise  # Será capturado por retry
         except Exception as e:
             logger.error(f"Error obteniendo conexiones para agente {agent_id}: {e}")
             return []
@@ -609,41 +654,76 @@ class DBQueryService:
         Returns:
             Esquema simplificado en formato texto
         """
-        result = []
-        
-        # Información general
-        result.append(f"Base de datos: {schema.get('name')} ({schema.get('type')})")
-        result.append("")
-        
-        # Tablas
-        tables = schema.get("tables", [])
-        result.append(f"Tablas ({len(tables)}):")
-        
-        for table in tables:
-            table_name = table.get("name")
-            schema_name = table.get("schema")
-            full_name = f"{schema_name}.{table_name}" if schema_name else table_name
+        try:
+            result = []
             
-            result.append(f"- {full_name}")
+            # Verificar que el esquema tiene la estructura esperada
+            if not isinstance(schema, dict):
+                return "Error: El esquema no tiene el formato esperado"
             
-            # Columnas
-            columns = table.get("columns", [])
-            for column in columns:
-                pk = "*" if column.get("primary_key") else " "
-                nullable = "NULL" if column.get("nullable") else "NOT NULL"
-                result.append(f"  {pk} {column.get('name')} ({column.get('data_type')}) {nullable}")
-            
-            # Foreign keys si existen
-            foreign_keys = table.get("foreign_keys", [])
-            if foreign_keys:
-                result.append("  Foreign keys:")
-                for fk in foreign_keys:
-                    result.append(f"  - {fk.get('column')} -> {fk.get('referenced_table')}.{fk.get('referenced_column')}")
-            
+            # Información general
+            db_name = schema.get('name', 'Desconocido')
+            db_type = schema.get('type', 'Desconocido')
+            result.append(f"Base de datos: {db_name} ({db_type})")
             result.append("")
-        
-        return "\n".join(result)
+            
+            # Tablas
+            tables = schema.get("tables", [])
+            if not isinstance(tables, list):
+                tables = []
+                
+            result.append(f"Tablas ({len(tables)}):")
+            
+            for table in tables:
+                if not isinstance(table, dict):
+                    continue
+                    
+                table_name = table.get("name", "unknown")
+                schema_name = table.get("schema")
+                full_name = f"{schema_name}.{table_name}" if schema_name else table_name
+                
+                result.append(f"- {full_name}")
+                
+                # Columnas
+                columns = table.get("columns", [])
+                if not isinstance(columns, list):
+                    columns = []
+                    
+                for column in columns:
+                    if not isinstance(column, dict):
+                        continue
+                        
+                    pk = "*" if column.get("primary_key") else " "
+                    nullable = "NULL" if column.get("nullable") else "NOT NULL"
+                    col_name = column.get("name", "unknown")
+                    data_type = column.get("data_type", "unknown")
+                    result.append(f"  {pk} {col_name} ({data_type}) {nullable}")
+                
+                # Foreign keys si existen
+                foreign_keys = table.get("foreign_keys", [])
+                if foreign_keys and isinstance(foreign_keys, list):
+                    result.append("  Foreign keys:")
+                    for fk in foreign_keys:
+                        if not isinstance(fk, dict):
+                            continue
+                            
+                        col = fk.get("column", "unknown")
+                        ref_table = fk.get("referenced_table", "unknown")
+                        ref_col = fk.get("referenced_column", "unknown")
+                        result.append(f"  - {col} -> {ref_table}.{ref_col}")
+                
+                result.append("")
+            
+            return "\n".join(result)
+        except Exception as e:
+            logger.error("Error simplificando esquema", error=str(e))
+            return f"Error procesando el esquema: {str(e)}"
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=15),
+        retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
+    )
     async def _execute_db_query(self, connection_id: str, query: str) -> Any:
         """
         Ejecutar consulta en una conexión
@@ -660,18 +740,29 @@ class DBQueryService:
         """
         try:
             # Llamar al servicio de conexiones para ejecutar la consulta
-            async with self.http_client.post(
+            http_client = await self._get_http_client()
+            
+            # Timeout más largo para consultas de BD (pueden tardar más)
+            timeout = aiohttp.ClientTimeout(total=90)
+            
+            async with http_client.post(
                 f"{self.settings.db_connections_url}/connections/{connection_id}/execute",
                 json={
                     "query": query,
                     "params": {}
-                }
+                },
+                timeout=timeout
             ) as response:
                 if response.status == 200:
                     return await response.json()
                 else:
                     error = await response.text()
-                    raise ValueError(f"Error ejecutando consulta: {error}")
+                    error_msg = f"Error ejecutando consulta (status {response.status}): {error}"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"Error de conexión ejecutando consulta en {connection_id}: {e}")
+            raise  # Será capturado por retry
         except Exception as e:
             logger.error(f"Error ejecutando consulta en conexión {connection_id}: {e}")
             raise

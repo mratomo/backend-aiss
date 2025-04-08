@@ -22,11 +22,13 @@ type Config struct {
 
 // ServiceEndpoints contiene las URLs de los servicios internos
 type ServiceEndpoints struct {
-	UserService      string
-	DocumentService  string
-	ContextService   string
-	EmbeddingService string
-	RagAgent         string
+	UserService            string
+	DocumentService        string
+	ContextService         string
+	EmbeddingService       string
+	RagAgent               string
+	TerminalGatewayService string
+	TerminalSessionService string
 }
 
 // LoadConfig carga la configuración desde archivo o variables de entorno
@@ -64,6 +66,8 @@ func LoadConfig() (*Config, error) {
 	viper.SetDefault("services.contextService", "http://context-service:8083")
 	viper.SetDefault("services.embeddingService", "http://embedding-service:8084")
 	viper.SetDefault("services.ragAgent", "http://rag-agent:8085")
+	viper.SetDefault("services.terminalGatewayService", "http://terminal-gateway-service:8086")
+	viper.SetDefault("services.terminalSessionService", "http://terminal-session-service:8087")
 
 	// Intentar leer el archivo
 	if err := viper.ReadInConfig(); err != nil {
@@ -128,11 +132,13 @@ func LoadConfig() (*Config, error) {
 		AuthSecret:         viper.GetString("authSecret"),
 		JWTExpirationHours: viper.GetInt("jwtExpirationHours"),
 		Services: ServiceEndpoints{
-			UserService:      viper.GetString("services.userService"),
-			DocumentService:  viper.GetString("services.documentService"),
-			ContextService:   viper.GetString("services.contextService"),
-			EmbeddingService: viper.GetString("services.embeddingService"),
-			RagAgent:         viper.GetString("services.ragAgent"),
+			UserService:            viper.GetString("services.userService"),
+			DocumentService:        viper.GetString("services.documentService"),
+			ContextService:         viper.GetString("services.contextService"),
+			EmbeddingService:       viper.GetString("services.embeddingService"),
+			RagAgent:               viper.GetString("services.ragAgent"),
+			TerminalGatewayService: viper.GetString("services.terminalGatewayService"),
+			TerminalSessionService: viper.GetString("services.terminalSessionService"),
 		},
 	}, nil
 }

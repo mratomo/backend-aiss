@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 
@@ -27,8 +27,25 @@ class Settings(BaseSettings):
     
     # Security
     API_KEY: Optional[str] = None
-    JWT_SECRET: str = "replace-in-production"
+    JWT_SECRET: str = os.environ.get("JWT_SECRET", "")
     JWT_ALGORITHM: str = "HS256"
+    
+    # CORS settings
+    ALLOWED_ORIGINS: List[str] = []
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Set ALLOWED_ORIGINS from environment variable or use defaults for development
+        origins_env = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+        if origins_env:
+            self.ALLOWED_ORIGINS = origins_env.split(",")
+        else:
+            # Default to secure development origins only
+            self.ALLOWED_ORIGINS = ["http://localhost:3000", "https://app.domain.com"]
+            
+        # Validate JWT_SECRET
+        if not self.JWT_SECRET:
+            raise ValueError("JWT_SECRET environment variable is required")
     
     class Config:
         env_file = ".env"

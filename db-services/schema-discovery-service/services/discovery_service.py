@@ -1,6 +1,13 @@
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Protocol
+
+# Soporte para múltiples clientes HTTP
+try:
+    import httpx
+    HTTPX_AVAILABLE = True
+except ImportError:
+    HTTPX_AVAILABLE = False
 
 import aiohttp
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -12,19 +19,27 @@ from models.models import (
 
 logger = logging.getLogger(__name__)
 
+# Protocolo para abstraer clientes HTTP
+class HTTPClient(Protocol):
+    async def get(self, url: str, **kwargs): ...
+    async def post(self, url: str, **kwargs): ...
+    async def put(self, url: str, **kwargs): ...
+    async def delete(self, url: str, **kwargs): ...
+
 class SchemaDiscoveryService:
     """Servicio para descubrimiento de esquemas de bases de datos"""
 
-    def __init__(self, http_client: aiohttp.ClientSession, settings: Settings):
+    def __init__(self, http_client: Any, settings: Settings):
         """
         Inicializar servicio de descubrimiento
         
         Args:
-            http_client: Cliente HTTP para comunicación con otros servicios
+            http_client: Cliente HTTP para comunicación con otros servicios (httpx.AsyncClient o aiohttp.ClientSession)
             settings: Configuración global
         """
         self.http_client = http_client
         self.settings = settings
+        self.use_httpx = HTTPX_AVAILABLE and isinstance(http_client, httpx.AsyncClient)
         
         # Inicializar cliente MongoDB
         self.mongo_client = AsyncIOMotorClient(settings.mongodb_uri)
@@ -169,17 +184,27 @@ class SchemaDiscoveryService:
         """
         try:
             # Construir URL para el endpoint de conexión
-            url = f"{self.settings.db_connection_service_url}/connections/{connection_id}"
+            url = f"{self.settings.db_connection_url}/connections/{connection_id}"
             
-            # Hacer solicitud HTTP
-            async with self.http_client.get(url) as response:
-                if response.status != 200:
-                    error_text = await response.text()
+            if self.use_httpx:
+                # Usar httpx
+                response = await self.http_client.get(url)
+                if response.status_code != 200:
+                    error_text = response.text
                     logger.error(f"Error getting connection details: {error_text}")
                     return {}
-                    
-                data = await response.json()
-                return data
+                
+                return response.json()
+            else:
+                # Usar aiohttp
+                async with self.http_client.get(url) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Error getting connection details: {error_text}")
+                        return {}
+                        
+                    data = await response.json()
+                    return data
                 
         except Exception as e:
             logger.error(f"Error communicating with connection service: {e}")

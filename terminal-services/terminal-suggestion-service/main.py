@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import time
+import jwt
 from typing import Dict, Any, Optional, List
 
 from fastapi import FastAPI, HTTPException, Depends, Security, status
@@ -33,10 +34,10 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Update for production
+    allow_origins=settings.ALLOWED_ORIGINS,  # Get from settings
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
 # Services
@@ -44,23 +45,43 @@ suggestion_service = SuggestionService()
 llm_service = LLMService()
 
 # Background tasks
+cleanup_task_obj = None
+
 @app.on_event("startup")
 async def startup_event():
     # Start cleanup task
-    asyncio.create_task(cleanup_task())
+    global cleanup_task_obj
+    cleanup_task_obj = asyncio.create_task(cleanup_task())
+    logger.info("Started suggestion cache cleanup background task")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    # Cancel cleanup task
+    global cleanup_task_obj
+    if cleanup_task_obj:
+        cleanup_task_obj.cancel()
+        try:
+            await cleanup_task_obj
+        except asyncio.CancelledError:
+            logger.info("Suggestion cache cleanup task cancelled")
+        logger.info("Background tasks stopped")
 
 async def cleanup_task():
     """Background task to periodically clean up suggestion cache"""
-    while True:
-        try:
-            count = await suggestion_service.cleanup_cache()
-            if count > 0:
-                logger.info(f"Cleaned up {count} expired cache entries")
-        except Exception as e:
-            logger.error(f"Error during cache cleanup: {str(e)}")
-        
-        # Run every 15 minutes
-        await asyncio.sleep(15 * 60)
+    try:
+        while True:
+            try:
+                count = await suggestion_service.cleanup_cache()
+                if count > 0:
+                    logger.info(f"Cleaned up {count} expired cache entries")
+            except Exception as e:
+                logger.error(f"Error during cache cleanup: {str(e)}")
+            
+            # Run every 15 minutes
+            await asyncio.sleep(15 * 60)
+    except asyncio.CancelledError:
+        logger.info("Cleanup task cancelled during shutdown")
+        raise
 
 # API Key validation
 async def verify_api_key(api_key: Optional[str] = Depends(api_key_header)):
@@ -75,14 +96,42 @@ async def verify_api_key(api_key: Optional[str] = Depends(api_key_header)):
 # Auth validation
 async def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     """Verify JWT token"""
-    # In a real implementation, you would verify the JWT token
-    # For now, we'll just check if it exists
     if not credentials or not credentials.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication credentials",
         )
-    return credentials.credentials
+    
+    token = credentials.credentials
+    
+    try:
+        # Decode the JWT token
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={"verify_signature": True, "verify_exp": True}
+        )
+        
+        # Add basic validation of payload
+        if not payload.get("user_id"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token payload: missing user_id claim",
+            )
+        
+        return token
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+        )
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid token: {str(e)}",
+        )
 
 # Health check endpoint
 @app.get("/health", status_code=status.HTTP_200_OK)

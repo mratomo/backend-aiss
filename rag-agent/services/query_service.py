@@ -23,14 +23,26 @@ class QueryService:
                  llm_service: LLMService,
                  retrieval_service: RetrievalService,
                  mcp_service: MCPService,
-                 settings: Settings):
-        """Inicializar servicio con dependencias y configuración"""
+                 settings: Settings,
+                 ollama_service=None):
+        """
+        Inicializar servicio con dependencias y configuración
+        
+        Args:
+            database: Base de datos MongoDB
+            llm_service: Servicio para LLMs
+            retrieval_service: Servicio para recuperación
+            mcp_service: Servicio MCP
+            settings: Configuración
+            ollama_service: Servicio opcional para Ollama MCP
+        """
         self.db = database
         self.history_collection = database.query_history
         self.llm_service = llm_service
         self.retrieval_service = retrieval_service
         self.mcp_service = mcp_service
         self.settings = settings
+        self.ollama_service = ollama_service
 
     async def process_query(self,
                             query: str,

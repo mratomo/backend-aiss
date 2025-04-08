@@ -1,12 +1,10 @@
 module api-gateway
 
-go 1.23.0
-
-toolchain go1.24.0
+go 1.22
 
 require (
-	github.com/gin-contrib/cors v1.7.4
-	github.com/gin-gonic/gin v1.10.0
+	github.com/gin-contrib/cors v1.5.0
+	github.com/gin-gonic/gin v1.9.1
 	github.com/golang-jwt/jwt/v4 v4.5.2
 	github.com/spf13/viper v1.20.1
 )

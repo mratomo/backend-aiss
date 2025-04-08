@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     
     # URL de servicio de conexiones a BD
     db_connection_url: str = Field(default="http://db-connection-service:8086")
+    db_connection_service_url: str = Field(default="http://db-connection-service:8086")  # Alias para compatibilidad
     
     # URL de servicio de embedding
     embedding_service_url: str = Field(default="http://embedding-service:8084")

@@ -1,12 +1,10 @@
 module document-service
 
-go 1.23.0
-
-toolchain go1.24.0
+go 1.22
 
 require (
-	github.com/gin-contrib/cors v1.7.4
-	github.com/gin-gonic/gin v1.10.0
+	github.com/gin-contrib/cors v1.5.0
+	github.com/gin-gonic/gin v1.9.1
 	github.com/minio/minio-go/v7 v7.0.63
 	github.com/spf13/viper v1.16.0
 	go.mongodb.org/mongo-driver v1.12.1
