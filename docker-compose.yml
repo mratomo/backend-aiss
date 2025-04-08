@@ -1,535 +1,15 @@
+# Archivo docker-compose.yml principal
+name: aiss
+
 services:
-
-  # API Gateway (Go) - No expuesto externamente, solo accesible desde la red Docker
-  api-gateway:
-    build:
-      context: ./api-gateway
-      dockerfile: Dockerfile
-    # Sin puertos expuestos al host (solo accesible dentro de la red Docker)
-    # Para desarrollo y debugging, descomentar:
-    # ports:
-    #   - "127.0.0.1:8080:8080"  # Solo accesible desde localhost
-    environment:
-      - PORT=8080
-      - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
-      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-https://app.domain.com,http://localhost:3000} # Restringir orígenes para mayor seguridad
-      - TERMINAL_GATEWAY_URL=http://terminal-gateway-service:8090
-      - APP_ENVIRONMENT=production # Para decisiones de seguridad
-    depends_on:
-      user-service:
-        condition: service_started
-      document-service:
-        condition: service_started
-      context-service:
-        condition: service_started
-      embedding-service:
-        condition: service_started
-      rag-agent:
-        condition: service_started
-      db-connection-service:
-        condition: service_started
-      schema-discovery-service:
-        condition: service_started
-      terminal-gateway-service:
-        condition: service_started
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 15s
-
-  # User Service (Go)
-  user-service:
-    build:
-      context: ./core-services/user-service
-      dockerfile: Dockerfile
-    ports:
-      - "8081:8081"
-    environment:
-      - PORT=8081
-      - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
-      - ADMIN_INITIAL_PASSWORD=${ADMIN_INITIAL_PASSWORD}
-      - MONGODB_URI=mongodb://mongodb:27017
-      - MONGODB_DATABASE=mcp_knowledge_system
-    depends_on:
-      mongodb:
-        condition: service_healthy
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  # Document Service (Go)
-  document-service:
-    build:
-      context: ./core-services/document-service
-      dockerfile: Dockerfile
-    ports:
-      - "8082:8082"
-    environment:
-      - PORT=8082
-      - ENVIRONMENT=production
-      - MONGODB_URI=mongodb://mongodb:27017
-      - MONGODB_DATABASE=mcp_knowledge_system
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
-      - MINIO_USE_SSL=${MINIO_USE_SSL:-false}
-      - MINIO_SHARED_BUCKET=shared-documents
-      - MINIO_PERSONAL_BUCKET=personal-documents
-      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
-    depends_on:
-      mongodb:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      minio-setup:
-        condition: service_completed_successfully
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  # Context Service (Python)
-  context-service:
-    build:
-      context: ./mcp-services/context-service
-      dockerfile: Dockerfile
-    ports:
-      - "8083:8083"
-    environment:
-      - PORT=8083
-      - ENVIRONMENT=production
-      - MONGODB_URI=mongodb://mongodb:27017
-      - MONGODB_DATABASE=mcp_knowledge_system
-      - MCP_API_URL=${MCP_API_URL:-http://rag-agent:8085/api/v1/mcp}
-      - MCP_API_KEY=${MCP_API_KEY:-}
-      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
-    depends_on:
-      mongodb:
-        condition: service_healthy
-      # Eliminamos la dependencia circular hacia embedding-service
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-  # Embedding Service (Python - GPU with CPU fallback)
-  embedding-service:
-    build:
-      context: ./mcp-services/embedding-service
-      dockerfile: Dockerfile
-    ports:
-      - "8084:8084"
-    environment:
-      - PORT=8084
-      - ENVIRONMENT=production
-      - MONGODB_URI=mongodb://mongodb:27017
-      - MONGODB_DATABASE=mcp_knowledge_system
-      - QDRANT_URL=http://qdrant:6333
-      - QDRANT_COLLECTION_GENERAL=general_knowledge
-      - QDRANT_COLLECTION_PERSONAL=personal_knowledge
-      - GENERAL_EMBEDDING_MODEL=${GENERAL_EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v1.5-fp16}
-      - PERSONAL_EMBEDDING_MODEL=${PERSONAL_EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v1.5-fp16}
-      - USE_GPU=${USE_GPU:-true}
-      # Eliminamos dependencia circular con context-service
-      # - MCP_SERVICE_URL=http://context-service:8083
-    entrypoint: >
-      /bin/sh -c "
-      if nvidia-smi > /dev/null 2>&1; then
-        echo 'GPU detected, proceeding with GPU-accelerated service.'
-        export USE_GPU=true
-      else
-        echo 'GPU not available, falling back to CPU mode.'
-        export USE_GPU=false
-      fi
-      python main.py
-      "
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-              options:
-                fail: false # No falla si no hay GPU
-    depends_on:
-      mongodb:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-      qdrant-setup:
-        condition: service_completed_successfully
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8084/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
-  # RAG Agent (Python)
-  rag-agent:
-    build:
-      context: ./rag-agent
-      dockerfile: Dockerfile
-    ports:
-      - "8085:8085"
-    environment:
-      - PORT=8085
-      - ENVIRONMENT=production
-      - MONGODB_URI=mongodb://mongodb:27017
-      - MONGODB_DATABASE=mcp_knowledge_system
-      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
-      - DOCUMENT_SERVICE_URL=http://document-service:8082
-      - CONTEXT_SERVICE_URL=http://context-service:8083
-      - OPENAI_DEFAULT_MODEL=${OPENAI_DEFAULT_MODEL:-gpt-4o}
-      - ANTHROPIC_DEFAULT_MODEL=${ANTHROPIC_DEFAULT_MODEL:-claude-3-opus-20240229}
-      - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-llama3}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://ollama:11434}
-      - OLLAMA_MCP_URL=${OLLAMA_MCP_URL:-http://ollama-mcp-server:8095}
-      - OLLAMA_IS_REMOTE=${OLLAMA_IS_REMOTE:-false}
-      - USE_MCP_TOOLS=${USE_MCP_TOOLS:-true}
-      - PREFER_DIRECT_MCP=${PREFER_DIRECT_MCP:-true}
-      - DB_CONNECTIONS_URL=http://db-connection-service:8086
-      - SCHEMA_DISCOVERY_URL=http://schema-discovery-service:8087
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USERNAME=neo4j
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-secretpassword}
-    depends_on:
-      mongodb:
-        condition: service_healthy
-      embedding-service:
-        condition: service_started
-      context-service:
-        condition: service_started
-      ollama:
-        condition: service_healthy
-      ollama-mcp-server:
-        condition: service_started
-      neo4j:
-        condition: service_healthy
-      neo4j-setup:
-        condition: service_completed_successfully
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
-  # Ollama MCP Server (Python)
-  ollama-mcp-server:
-    build:
-      context: ./rag-agent
-      dockerfile: Dockerfile
-    ports:
-      - "8095:8095"
-    environment:
-      - PORT=8095
-      - ENVIRONMENT=production
-      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://ollama:11434}
-      - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-llama3}
-      - RUN_STANDALONE_MCP_SERVER=true
-      - DISABLE_MAIN_APP=true
-    depends_on:
-      ollama:
-        condition: service_healthy
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8095/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-  # DB Connection Service (Python)
-  db-connection-service:
-    build:
-      context: ./db-services/db-connection-service
-      dockerfile: Dockerfile
-    ports:
-      - "8086:8086"
-    environment:
-      - PORT=8086
-      - ENVIRONMENT=production
-      - MONGODB_URI=mongodb://mongodb:27017
-      - MONGODB_DATABASE=mcp_knowledge_system
-      - DB_ENCRYPTION_KEY=${DB_ENCRYPTION_KEY:-XFn4TJvQNwP2BzLrAkRs9pC7SgH6Uy8m}
-      - HASH_SALT=${HASH_SALT:-gN7MP8jsLAFb5wHV3D2kYxRuTqE9zJcX}
-      - SCHEMA_DISCOVERY_URL=http://schema-discovery-service:8087
-      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
-    depends_on:
-      mongodb:
-        condition: service_healthy
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-      
-  # Schema Discovery Service (Python)
-  schema-discovery-service:
-    build:
-      context: ./db-services/schema-discovery-service
-      dockerfile: Dockerfile
-    ports:
-      - "8087:8087"
-    environment:
-      - PORT=8087
-      - ENVIRONMENT=production
-      - DB_CONNECTION_URL=http://db-connection-service:8086
-      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
-      - SCHEMA_DISCOVERY_TIMEOUT=120
-      - MAX_TABLES_FOR_SAMPLE=30
-      - MAX_ROWS_PER_TABLE=100
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USERNAME=neo4j
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-secretpassword}
-    # Removed circular dependency on db-connection-service
-    depends_on:
-      mongodb:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-      neo4j-setup:
-        condition: service_completed_successfully
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8087/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-  # Terminal Gateway Service (Go)
-  terminal-gateway-service:
-    build:
-      context: ./terminal-services/terminal-gateway-service
-      dockerfile: Dockerfile
-    ports:
-      - "8090:8090"
-    environment:
-      - PORT=8090
-      - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
-      - SESSION_SERVICE_URL=http://terminal-session-service:8091
-      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8092
-      - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8093
-      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://app.domain.com}
-      - SSH_KEY_DIR=/app/keys
-      - ATTACK_VULNERABILITY_SERVICE_URL=http://attack-vulnerability-service:8094
-    volumes:
-      - terminal-ssh-keys:/app/keys
-    depends_on:
-      terminal-session-service:
-        condition: service_started
-      attack-vulnerability-service:
-        condition: service_started
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  # Terminal Session Service (Go)
-  terminal-session-service:
-    build:
-      context: ./terminal-services/terminal-session-service
-      dockerfile: Dockerfile
-    ports:
-      - "8091:8091"
-    environment:
-      - PORT=8091
-      - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
-      - MONGODB_URI=mongodb://mongodb:27017
-      - MONGODB_DATABASE=terminal_sessions
-      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8092
-      - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8093
-      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://app.domain.com}
-    depends_on:
-      mongodb:
-        condition: service_healthy
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  # Terminal Context Aggregator (Python)
-  terminal-context-aggregator:
-    build:
-      context: ./terminal-services/terminal-context-aggregator
-      dockerfile: Dockerfile
-    ports:
-      - "8092:8092"
-    environment:
-      - PORT=8092
-      - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
-      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
-      - MCP_SERVICE_URL=http://context-service:8083
-      - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8093
-      - MONGODB_URI=mongodb://mongodb:27017
-      - MONGODB_DATABASE=terminal_sessions
-    depends_on:
-      mongodb:
-        condition: service_healthy
-      embedding-service:
-        condition: service_started
-      context-service:
-        condition: service_started
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8092/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-  # Terminal Suggestion Service (Python)
-  terminal-suggestion-service:
-    build:
-      context: ./terminal-services/terminal-suggestion-service
-      dockerfile: Dockerfile
-    ports:
-      - "8093:8093"
-    environment:
-      - PORT=8093
-      - ENVIRONMENT=production
-      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
-      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8092
-      - MCP_SERVICE_URL=http://context-service:8083
-      - LLM_SERVICE_URL=http://rag-agent:8085/api/v1/llm
-      - MONGODB_URI=mongodb://mongodb:27017
-      - MONGODB_DATABASE=terminal_sessions
-    depends_on:
-      mongodb:
-        condition: service_healthy
-      rag-agent:
-        condition: service_started
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8093/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-      
-  # Attack Vulnerability Service (Python)
-  attack-vulnerability-service:
-    build:
-      context: ./attack-vulnerability-service
-      dockerfile: Dockerfile
-    ports:
-      - "8094:8094"
-    environment:
-      - PORT=8094
-      - ENVIRONMENT=production
-      - DEBUG=false
-      - AUTH_ENABLED=true
-      - API_KEY=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
-      - ATTACK_CACHE_DIR=/app/cache
-      - ATTACK_CACHE_TTL_HOURS=24
-      - LOG_LEVEL=INFO
-      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://app.domain.com}
-    volumes:
-      - attack-cache:/app/cache
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8094/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-  # Ollama - Local LLM (CUDA/ROCM support)
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama-data:/root/.ollama
-    restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-              options:
-                fail: false
-    networks:
-      - mcp-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-
-  # MongoDB
+  # Database and Storage Services
   mongodb:
     image: mongo:6.0
     ports:
       - "27017:27017"
     volumes:
       - mongodb-data:/data/db
-      - ./db/mongodb/mongodb.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+      - ./backend-aiss/db/mongodb/mongodb.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
     environment:
       - MONGO_INITDB_DATABASE=mcp_knowledge_system
     networks:
@@ -542,51 +22,6 @@ services:
       retries: 5
       start_period: 30s
 
-  # Neo4j Graph Database for GraphRAG
-  neo4j:
-    image: neo4j:5.14.0-community
-    ports:
-      - "7474:7474"  # HTTP for Neo4j Browser
-      - "7687:7687"  # Bolt protocol
-    environment:
-      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-secretpassword}
-      - NEO4J_PLUGINS=["apoc", "graph-data-science"]
-      - NEO4J_dbms_security_procedures_allowlist=apoc.*,gds.*
-      - NEO4J_dbms_security_procedures_unrestricted=apoc.*,gds.*
-      - NEO4J_dbms_memory_heap_initial__size=512m
-      - NEO4J_dbms_memory_heap_max__size=2G
-    volumes:
-      - neo4j-data:/data
-      - neo4j-logs:/logs
-      - neo4j-plugins:/plugins
-      - ./db/neo4j/init_neo4j.sh:/docker-entrypoint-initdb.d/init-neo4j.sh
-    networks:
-      - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7474"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-  
-  # Neo4j initialization
-  neo4j-setup:
-    image: neo4j:5.14.0-community
-    depends_on:
-      neo4j:
-        condition: service_healthy
-    environment:
-      - NEO4J_HOST=neo4j
-      - NEO4J_PORT=7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-secretpassword}
-    volumes:
-      - ./db/neo4j/init_neo4j.sh:/init_neo4j.sh:ro
-    entrypoint: ["/bin/bash", "/init_neo4j.sh"]
-    networks:
-      - mcp-network
-
   # Qdrant Vector Database
   qdrant:
     image: qdrant/qdrant:v1.5.0
@@ -595,7 +30,7 @@ services:
       - "6334:6334"
     volumes:
       - qdrant-data:/qdrant/storage
-      - ./db/qdrant/qdrant.yaml:/qdrant/config/production.yaml:ro
+      - ./backend-aiss/db/qdrant/qdrant.yaml:/qdrant/config/production.yaml:ro
     networks:
       - mcp-network
     restart: unless-stopped
@@ -610,7 +45,7 @@ services:
   qdrant-setup:
     image: alpine:3.18
     volumes:
-      - ./db/qdrant/init_collections.sh:/init_collections.sh:ro
+      - ./backend-aiss/db/qdrant/init_collections.sh:/init_collections.sh:ro
     environment:
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_COLLECTION_GENERAL=general_knowledge
@@ -669,6 +104,480 @@ services:
     networks:
       - mcp-network
 
+  # API Gateway (Go)
+  api-gateway:
+    build:
+      context: ./backend-aiss/api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - ENVIRONMENT=production
+      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://app.domain.com}
+      - TERMINAL_GATEWAY_URL=http://terminal-gateway-service:8090
+      - APP_ENVIRONMENT=production # Para decisiones de seguridad
+    depends_on:
+      user-service:
+        condition: service_healthy
+      document-service:
+        condition: service_healthy
+      context-service:
+        condition: service_healthy
+      embedding-service:
+        condition: service_healthy
+      rag-agent:
+        condition: service_healthy
+      db-connection-service:
+        condition: service_healthy
+      schema-discovery-service:
+        condition: service_healthy
+      terminal-gateway-service:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+  # User Service (Go)
+  user-service:
+    build:
+      context: ./backend-aiss/core-services/user-service
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+      - ENVIRONMENT=production
+      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
+      - ADMIN_INITIAL_PASSWORD=${ADMIN_INITIAL_PASSWORD:-admin123}
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_knowledge_system
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Document Service (Go)
+  document-service:
+    build:
+      context: ./backend-aiss/core-services/document-service
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+      - ENVIRONMENT=production
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_knowledge_system
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_USE_SSL=${MINIO_USE_SSL:-false}
+      - MINIO_SHARED_BUCKET=shared-documents
+      - MINIO_PERSONAL_BUCKET=personal-documents
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Context Service (Python)
+  context-service:
+    build:
+      context: ./backend-aiss/mcp-services/context-service
+      dockerfile: Dockerfile
+    ports:
+      - "8083:8083"
+    environment:
+      - PORT=8083
+      - ENVIRONMENT=production
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_knowledge_system
+      - MCP_API_URL=${MCP_API_URL:-http://rag-agent:8085/api/v1/mcp}
+      - MCP_API_KEY=${MCP_API_KEY:-}
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      embedding-service:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Embedding Service (Python - GPU with CPU fallback)
+  embedding-service:
+    build:
+      context: ./backend-aiss/mcp-services/embedding-service
+      dockerfile: Dockerfile
+    ports:
+      - "8084:8084"
+    environment:
+      - PORT=8084
+      - ENVIRONMENT=production
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_knowledge_system
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION_GENERAL=general_knowledge
+      - QDRANT_COLLECTION_PERSONAL=personal_knowledge
+      - GENERAL_EMBEDDING_MODEL=${GENERAL_EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v1.5-fp16}
+      - PERSONAL_EMBEDDING_MODEL=${PERSONAL_EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v1.5-fp16}
+      - USE_GPU=${USE_GPU:-false}
+      # Esta variable estará inicialmente sin especificar, se configurará después
+      # cuando context-service esté disponible mediante actualización de configuración
+      # en lugar de una dependencia directa
+    entrypoint: >
+      /bin/sh -c "
+      if nvidia-smi > /dev/null 2>&1; then
+        echo 'GPU detected, proceeding with GPU-accelerated service.'
+        export USE_GPU=true
+      else
+        echo 'GPU not available, falling back to CPU mode.'
+        export USE_GPU=false
+      fi
+      python main.py
+      "
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+              options:
+                fail: false # No falla si no hay GPU
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      qdrant-setup:
+        condition: service_completed_successfully
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8084/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # RAG Agent (Python)
+  rag-agent:
+    build:
+      context: ./backend-aiss/rag-agent
+      dockerfile: Dockerfile
+    ports:
+      - "8085:8085"
+    environment:
+      - PORT=8085
+      - ENVIRONMENT=production
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_knowledge_system
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+      - DOCUMENT_SERVICE_URL=http://document-service:8082
+      - CONTEXT_SERVICE_URL=http://context-service:8083
+      - OPENAI_DEFAULT_MODEL=${OPENAI_DEFAULT_MODEL:-gpt-4o}
+      - ANTHROPIC_DEFAULT_MODEL=${ANTHROPIC_DEFAULT_MODEL:-claude-3-opus-20240229}
+      - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-llama3}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://ollama:11434}
+      - USE_MCP_TOOLS=${USE_MCP_TOOLS:-true}
+      - PREFER_DIRECT_MCP=${PREFER_DIRECT_MCP:-true}
+      - DB_CONNECTIONS_URL=http://db-connection-service:8086
+      - SCHEMA_DISCOVERY_URL=http://schema-discovery-service:8087
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      embedding-service:
+        condition: service_healthy
+      context-service:
+        condition: service_healthy
+      document-service:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # DB Connection Service (Python)
+  db-connection-service:
+    build:
+      context: ./backend-aiss/db-services/db-connection-service
+      dockerfile: Dockerfile
+    ports:
+      - "8086:8086"
+    environment:
+      - PORT=8086
+      - ENVIRONMENT=production
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_knowledge_system
+      - DB_ENCRYPTION_KEY=${DB_ENCRYPTION_KEY:-XFn4TJvQNwP2BzLrAkRs9pC7SgH6Uy8m}
+      - HASH_SALT=${HASH_SALT:-gN7MP8jsLAFb5wHV3D2kYxRuTqE9zJcX}
+      - SCHEMA_DISCOVERY_URL=http://schema-discovery-service:8087
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      embedding-service:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+      
+  # Schema Discovery Service (Python)
+  schema-discovery-service:
+    build:
+      context: ./backend-aiss/db-services/schema-discovery-service
+      dockerfile: Dockerfile
+    ports:
+      - "8087:8087"
+    environment:
+      - PORT=8087
+      - ENVIRONMENT=production
+      - DB_CONNECTION_URL=http://db-connection-service:8086
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+      - SCHEMA_DISCOVERY_TIMEOUT=120
+      - MAX_TABLES_FOR_SAMPLE=30
+      - MAX_ROWS_PER_TABLE=100
+    # Nota: schema-discovery espera a db-connection para un inicio seguro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      embedding-service:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8087/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Terminal Gateway Service (Go)
+  terminal-gateway-service:
+    build:
+      context: ./backend-aiss/terminal-services/terminal-gateway-service
+      dockerfile: Dockerfile
+    ports:
+      - "8090:8090"
+    environment:
+      - PORT=8090
+      - ENVIRONMENT=production
+      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
+      - SESSION_SERVICE_URL=http://terminal-session-service:8091
+      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8092
+      - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8093
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://app.domain.com}
+      - SSH_KEY_DIR=/app/keys
+    volumes:
+      - terminal-ssh-keys:/app/keys
+    depends_on:
+      terminal-session-service:
+        condition: service_healthy
+      terminal-context-aggregator:
+        condition: service_healthy
+      terminal-suggestion-service:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Terminal Session Service (Go)
+  terminal-session-service:
+    build:
+      context: ./backend-aiss/terminal-services/terminal-session-service
+      dockerfile: Dockerfile
+    ports:
+      - "8091:8091"
+    environment:
+      - PORT=8091
+      - ENVIRONMENT=production
+      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=terminal_sessions
+      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8092
+      - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8093
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,https://app.domain.com}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Terminal Context Aggregator (Python)
+  terminal-context-aggregator:
+    build:
+      context: ./backend-aiss/terminal-services/terminal-context-aggregator
+      dockerfile: Dockerfile
+    ports:
+      - "8092:8092"
+    environment:
+      - PORT=8092
+      - ENVIRONMENT=production
+      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+      - MCP_SERVICE_URL=http://context-service:8083
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=terminal_sessions
+      # Eliminada dependencia circular con suggestion-service
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      embedding-service:
+        condition: service_healthy
+      context-service:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Terminal Suggestion Service (Python)
+  terminal-suggestion-service:
+    build:
+      context: ./backend-aiss/terminal-services/terminal-suggestion-service
+      dockerfile: Dockerfile
+    ports:
+      - "8093:8093"
+    environment:
+      - PORT=8093
+      - ENVIRONMENT=production
+      - AUTH_SECRET=${AUTH_SECRET:-VgmG8KVj6QFvG7XbHwK3J5RzB2LmNpCq}
+      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8092
+      - MCP_SERVICE_URL=http://context-service:8083
+      - LLM_SERVICE_URL=http://rag-agent:8085/api/v1/llm
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DATABASE=terminal_sessions
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      rag-agent:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8093/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Ollama - Local LLM (CUDA/ROCM support)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+              options:
+                fail: false
+    networks:
+      - mcp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Frontend (using NGINX)
+  frontend:
+    build:
+      context: ./frontend-aiss
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+      - "443:443"  # Si se usa HTTPS
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
 networks:
   mcp-network:
     driver: bridge
@@ -679,7 +588,3 @@ volumes:
   minio-data:
   ollama-data:
   terminal-ssh-keys:
-  attack-cache:
-  neo4j-data:
-  neo4j-logs:
-  neo4j-plugins:
