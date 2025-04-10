@@ -23,9 +23,12 @@ ENV PATH="/venv/bin:$PATH"
 
 # Actualizar pip e instalar dependencias
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir git+https://github.com/anthropics/mcp-python.git@main && \
-    pip install --no-cache-dir git+https://github.com/anthropics/fastmcp.git@main
+    pip install --no-cache-dir -r requirements.txt
+    
+# Las dependencias git+https ya están incluidas en requirements.txt
+# Se han quitado las siguientes líneas que causaban errores:
+# pip install --no-cache-dir git+https://github.com/anthropics/mcp-python.git@main
+# pip install --no-cache-dir git+https://github.com/anthropics/fastmcp.git@main
 
 FROM base
 

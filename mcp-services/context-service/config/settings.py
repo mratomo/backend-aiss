@@ -1,9 +1,11 @@
 # config/settings.py
 import os
-from typing import List, Optional
+import json
+from typing import List, Optional, Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
+from pydantic.fields import FieldInfo
 
 
 class MCPSettings(BaseSettings):
@@ -35,6 +37,18 @@ class Settings(BaseSettings):
     # Configuración de MongoDB
     mongodb_uri: str = Field(default="mongodb://localhost:27017")
     mongodb_database: str = Field(default="mcp_knowledge_system")
+    
+    @field_validator("cors_allowed_origins", mode="before")
+    @classmethod
+    def validate_cors_origins(cls, v):
+        """Preprocesar el campo cors_allowed_origins para asegurar una lista de strings"""
+        if isinstance(v, str):
+            if v == "*":
+                return ["*"]
+            if "," in v:
+                return v.split(",")
+            return [v]
+        return v
 
     # Configuración de MCP
     mcp: MCPSettings = Field(default_factory=MCPSettings)
@@ -43,6 +57,11 @@ class Settings(BaseSettings):
 
     # Configuración para integración con otros servicios
     embedding_service_url: str = Field(default="http://embedding-service:8084")
+    embedding_service_timeout: float = Field(default=30.0)
+    allow_degraded_mode: bool = Field(default=True)
+    
+    # Configuración de modelo embedding común con Embedding Service
+    embedding_model: str = Field(default="nomic-ai/nomic-embed-text-v1.5-fp16")
 
     model_config = {
         "env_file": ".env",
@@ -55,12 +74,18 @@ class Settings(BaseSettings):
         # Procesamos primero la configuración de CORS para evitar errores de parsing JSON
         cors_origins = os.getenv("CORS_ALLOWED_ORIGINS")
         if cors_origins:
-            # Usamos split en lugar de intentar parsear JSON
-            if "," in cors_origins:
-                kwargs["cors_allowed_origins"] = cors_origins.split(",")
-            else:
-                kwargs["cors_allowed_origins"] = [cors_origins]
+            try:
+                # Intentar parsear como JSON primero
+                origins_list = json.loads(cors_origins)
+                kwargs["cors_allowed_origins"] = origins_list
+            except json.JSONDecodeError:
+                # Si no es JSON, dividir por comas
+                if "," in cors_origins:
+                    kwargs["cors_allowed_origins"] = cors_origins.split(",")
+                else:
+                    kwargs["cors_allowed_origins"] = [cors_origins]
         
+        # Inicializar con los valores procesados
         super().__init__(**kwargs)
 
         # Priorizar variables de entorno sobre valores por defecto

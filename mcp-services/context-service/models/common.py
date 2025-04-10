@@ -8,6 +8,37 @@ class PyObjectId(str):
     """
     
     @classmethod
+    def __get_pydantic_core_schema__(cls, _source_type, _handler):
+        """
+        Método necesario para validación de tipos en Pydantic v2.
+        """
+        from pydantic_core import PydanticCustomError, core_schema
+        
+        def validate_from_str(value: str) -> str:
+            if not ObjectId.is_valid(value):
+                raise PydanticCustomError("invalid_objectid", "Invalid ObjectId format")
+            return value
+            
+        def validate_from_objectid(value: ObjectId) -> str:
+            return str(value)
+            
+        schema = core_schema.union_schema([
+            # Validación desde str
+            core_schema.chain_schema([
+                core_schema.str_schema(),
+                core_schema.no_info_plain_validator_function(validate_from_str),
+            ]),
+            # Validación desde ObjectId
+            core_schema.chain_schema([
+                core_schema.is_instance_schema(ObjectId),
+                core_schema.no_info_plain_validator_function(validate_from_objectid),
+            ]),
+        ])
+        
+        return schema
+        
+    # Mantener métodos antiguos para retrocompatibilidad    
+    @classmethod
     def __get_validators__(cls):
         yield cls.validate
         

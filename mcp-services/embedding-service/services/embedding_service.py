@@ -53,41 +53,103 @@ class EmbeddingService:
 
     async def initialize_models(self):
         """Inicializar modelos de embeddings optimizados para GPU"""
-        # Comprobar disponibilidad de GPU
-        self.gpu_available = torch.cuda.is_available() and self.settings.models.use_gpu
-
-        if self.gpu_available:
-            device_count = torch.cuda.device_count()
-            device_name = torch.cuda.get_device_name(0) if device_count > 0 else "Desconocida"
-            memory_info = torch.cuda.get_device_properties(0).total_memory / (1024**3) if device_count > 0 else 0
-            self.gpu_info = f"{device_count} dispositivo(s), {device_name} ({memory_info:.1f} GB)"
-            self.device = "cuda:0"
+        try:
+            # Comprobar disponibilidad de GPU
+            use_gpu = self.settings.models.use_gpu
+            gpu_detected = torch.cuda.is_available()
+            fallback_to_cpu = self.settings.models.fallback_to_cpu
             
-            # Información detallada sobre la GPU
-            logger.info(f"Usando GPU: {self.gpu_info}")
-            logger.info(f"CUDA version: {torch.version.cuda}")
-            logger.info(f"PyTorch CUDA configurado: {torch.cuda.is_available()}")
+            # Primera verificación: ¿Se quiere usar GPU y está disponible?
+            self.gpu_available = gpu_detected and use_gpu
             
-            # Verificar que Nomic también detecta GPU
-            try:
-                from nomic import embed
-                import nomic
-                # Comprobar versión de Nomic de manera segura, ya que algunas versiones no tienen __version__
+            if use_gpu and not gpu_detected:
+                if fallback_to_cpu:
+                    logger.warning("GPU solicitada pero no detectada. Fallback a CPU activado.")
+                    self.device = "cpu"
+                    self.gpu_info = "GPU no disponible, usando CPU"
+                    self.gpu_available = False
+                else:
+                    error_msg = "GPU solicitada pero no detectada y fallback a CPU desactivado"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+            elif self.gpu_available:
                 try:
-                    version = getattr(nomic, "__version__", "desconocida")
-                    logger.info(f"Nomic versión: {version}")
-                except AttributeError:
-                    logger.info("Nomic instalado, pero no se pudo determinar la versión")
-                # Nomic automáticamente usa la GPU si está disponible
-                logger.info("Nomic configurado para usar GPU disponible")
-            except ImportError:
-                logger.warning("No se pudo importar Nomic para verificar soporte de GPU")
-        else:
-            self.device = "cpu"
-            logger.info("Usando CPU para generación de embeddings")
-
-        # Asegurarse de que las colecciones existen en la base de datos vectorial
-        await self.vectordb_service.ensure_collections_exist()
+                    # Intentar inicializar y obtener información detallada de GPU
+                    device_count = torch.cuda.device_count()
+                    device_name = torch.cuda.get_device_name(0) if device_count > 0 else "Desconocida"
+                    memory_info = torch.cuda.get_device_properties(0).total_memory / (1024**3) if device_count > 0 else 0
+                    self.gpu_info = f"{device_count} dispositivo(s), {device_name} ({memory_info:.1f} GB)"
+                    self.device = "cuda:0"
+                    
+                    # Información detallada sobre la GPU
+                    logger.info(f"Usando GPU: {self.gpu_info}")
+                    logger.info(f"CUDA version: {torch.version.cuda}")
+                    logger.info(f"PyTorch CUDA configurado: {torch.cuda.is_available()}")
+                    
+                    # Intento de reservar una pequeña cantidad de memoria para verificar que la GPU funciona
+                    try:
+                        test_tensor = torch.zeros((10, 10), device=self.device)
+                        del test_tensor  # Liberar inmediatamente
+                        logger.info("GPU verificada correctamente")
+                    except Exception as e:
+                        # Error al reservar memoria de GPU
+                        logger.error(f"Error al probar GPU: {e}")
+                        if fallback_to_cpu:
+                            logger.warning("Fallback a CPU debido a error en prueba de GPU")
+                            self.device = "cpu"
+                            self.gpu_info = f"Error en GPU: {str(e)}, usando CPU"
+                            self.gpu_available = False
+                        else:
+                            raise ValueError(f"Error al inicializar GPU: {e}")
+                    
+                    # Verificar que Nomic también detecta GPU
+                    if self.gpu_available:
+                        try:
+                            from nomic import embed
+                            import nomic
+                            # Comprobar versión de Nomic de manera segura
+                            try:
+                                version = getattr(nomic, "__version__", "desconocida")
+                                logger.info(f"Nomic versión: {version}")
+                            except AttributeError:
+                                logger.info("Nomic instalado, pero no se pudo determinar la versión")
+                            # Nomic automáticamente usa la GPU si está disponible
+                            logger.info("Nomic configurado para usar GPU disponible")
+                        except ImportError:
+                            logger.warning("No se pudo importar Nomic para verificar soporte de GPU")
+                except Exception as e:
+                    # Error general al configurar GPU
+                    logger.error(f"Error configurando GPU: {e}")
+                    if fallback_to_cpu:
+                        logger.warning("Fallback a CPU debido a error en configuración de GPU")
+                        self.device = "cpu"
+                        self.gpu_info = f"Error: {str(e)}, usando CPU"
+                        self.gpu_available = False
+                    else:
+                        raise ValueError(f"Error crítico al configurar GPU y fallback a CPU desactivado: {e}")
+            else:
+                # Usar CPU por elección (use_gpu = False)
+                self.device = "cpu"
+                self.gpu_info = "CPU seleccionada por configuración"
+                logger.info("Usando CPU para generación de embeddings por configuración")
+            
+            # Si llegamos aquí sin GPU disponible y sin errores, es porque estamos usando CPU
+            if not self.gpu_available:
+                logger.info("Usando CPU para generación de embeddings")
+            
+            # Asegurarse de que las colecciones existen en la base de datos vectorial
+            await self.vectordb_service.ensure_collections_exist()
+            
+        except Exception as e:
+            logger.error(f"Error crítico inicializando hardware para modelos: {e}")
+            if fallback_to_cpu:
+                logger.warning("Fallback a CPU debido a error crítico")
+                self.device = "cpu"
+                self.gpu_info = f"Error crítico: {str(e)}, usando CPU"
+                self.gpu_available = False
+                # Intentar continuar
+            else:
+                raise ValueError(f"Error crítico inicializando hardware para modelos y fallback a CPU desactivado: {e}")
 
         # Cargar modelo para embeddings generales
         logger.info(f"Cargando modelo de embedding general: {self.settings.models.general_model}")
@@ -113,59 +175,61 @@ class EmbeddingService:
             # Verificar si es un modelo de Nomic
             if "nomic" in model_name.lower():
                 try:
-                    # Importar de manera segura
+                    # Importar SentenceTransformer en lugar de Nomic API
                     try:
-                        import nomic
-                        from nomic import embed
+                        from sentence_transformers import SentenceTransformer
+                        import importlib.metadata
+                        
+                        # Verificar versión de sentence-transformers
+                        st_version = importlib.metadata.version("sentence-transformers")
+                        logger.info(f"SentenceTransformer versión detectada: {st_version}")
+                        
                     except ImportError:
-                        logger.error("Biblioteca Nomic no está instalada. Instálala con 'pip install nomic'")
+                        logger.error("Biblioteca SentenceTransformer no está instalada. Instálala con 'pip install sentence-transformers'")
                         raise
                     
-                    # Verificar que la API de embedding esté disponible
-                    if not hasattr(embed, 'text'):
-                        logger.error("La función embed.text no está disponible en la versión instalada de Nomic")
-                        raise ImportError("Versión de Nomic incompatible, se requiere 'embed.text'")
+                    # Crear directorio para caché si no existe
+                    import os
+                    cache_dir = "./modelos"
+                    os.makedirs(cache_dir, exist_ok=True)
                     
-                    # Verificar versión de manera segura
-                    try:
-                        # Intentamos primero acceder a __version__ si existe
-                        if hasattr(nomic, "__version__"):
-                            version = nomic.__version__
-                            logger.info(f"Nomic versión detectada: {version}")
-                        else:
-                            # Si no existe, buscamos en otras ubicaciones comunes
-                            if hasattr(nomic, "version"):
-                                version = nomic.version
-                            else:
-                                # En último caso, reportamos como desconocida
-                                version = "desconocida"
-                                logger.info("No se pudo determinar la versión exacta de Nomic")
-                    except Exception:
-                        version = "desconocida"
-                        logger.warning("Error al detectar versión de Nomic")
+                    # Precargar el modelo para verificar que funciona
+                    # No es necesario mantenerlo en memoria, solo verificar que puede cargarse
+                    logger.info(f"Verificando carga del modelo {model_name}...")
+                    
+                    # Ejecutar en un thread separado para no bloquear
+                    def verify_model_loading():
+                        device = "cuda:0" if self.gpu_available else "cpu"
+                        # Verificar carga del modelo
+                        _ = SentenceTransformer(model_name, cache_folder=cache_dir, 
+                                              device=device, trust_remote_code=True)
+                        return True
+                    
+                    # Verificar de forma asíncrona
+                    await asyncio.to_thread(verify_model_loading)
                     
                     # Los modelos Nomic tienen una dimensión fija de 1024
                     vector_dim = 1024
                     
-                    logger.info(f"Modelo Nomic inicializado: {model_name} (versión: {version})")
+                    logger.info(f"Modelo Nomic inicializado para uso con SentenceTransformer: {model_name}")
                     
-                    # Configuración adicional de Nomic
                     if self.gpu_available:
-                        logger.info("Nomic utilizará GPU automáticamente")
+                        logger.info(f"Nomic utilizará GPU en dispositivo: {self.device}")
                     
-                    # Nomic client es diferente a los modelos de HuggingFace
+                    # Guardar la información del modelo para uso posterior
                     return {
                         "model_type": "nomic",
                         "model_name": model_name,
                         "vector_dim": vector_dim,
-                        "tokenizer": None,  # Nomic maneja su propio tokenizado
-                        "version": version  # Guardamos la versión para referencia
+                        "tokenizer": None,  # Manejado por SentenceTransformer
+                        "version": st_version,  # Versión de SentenceTransformer
+                        "cache_dir": cache_dir  # Directorio de caché para modelos
                     }
                 except ImportError as e:
-                    logger.error(f"Error importando Nomic: {e}")
+                    logger.error(f"Error importando SentenceTransformer: {e}")
                     raise
                 except Exception as e:
-                    logger.error(f"Error inicializando modelo Nomic: {e}")
+                    logger.error(f"Error inicializando modelo Nomic con SentenceTransformer: {e}")
                     raise
             else:
                 # Cargar tokenizer de HuggingFace
@@ -341,49 +405,65 @@ class EmbeddingService:
         """
         model_type = model_info.get("model_type", "huggingface")
         
-        # Generar embeddings con Nomic
+        # Generar embeddings con SentenceTransformer (en lugar de la API de Nomic)
         if model_type == "nomic":
             try:
                 # Importar de manera segura
                 try:
-                    from nomic import embed
+                    from sentence_transformers import SentenceTransformer
                 except ImportError:
-                    logger.error("No se pudo importar 'embed' desde nomic, asegúrate de tener la versión correcta")
+                    logger.error("No se pudo importar SentenceTransformer, asegúrate de tener la versión correcta instalada")
                     raise
                 
-                # Generar embeddings con la API de Nomic
-                def generate_nomic():
+                # Generar embeddings usando SentenceTransformer con modelo de Nomic localmente
+                def generate_nomic_local():
                     try:
-                        # La función embed.text espera una lista de textos y devuelve una lista de embeddings
-                        embeddings = embed.text(
-                            texts=[text],
-                            model_name=model_info["model_name"],
-                            # No configuramos device explícitamente, dejamos que Nomic lo detecte
-                        )
+                        # Crear directorio para caché si no existe
+                        import os
+                        cache_dir = "./modelos"
+                        os.makedirs(cache_dir, exist_ok=True)
+                        
+                        # Cargar modelo con SentenceTransformer y forzar uso de GPU
+                        model_name = "nomic-ai/nomic-embed-text-v1.5"
+                        
+                        # Configuramos explícitamente para usar GPU
+                        if not self.gpu_available:
+                            raise ValueError("GPU requerida para generar embeddings. No se encontró GPU disponible.")
+                        
+                        # Cargar modelo en GPU explícitamente con trust_remote_code=True para modelos de Nomic
+                        sentence_model = SentenceTransformer(model_name, cache_folder=cache_dir, 
+                                                            device=self.device, trust_remote_code=True)
+                        
+                        # Añadir prefijo de instrucción según recomendación de Nomic
+                        # 'search_document:' para textos que serán buscados, 'search_query:' para consultas
+                        prefixed_text = f"search_document: {text}"
+                        
+                        # Generar embedding desde el texto con prefijo
+                        embedding = sentence_model.encode(prefixed_text, convert_to_tensor=True)
                         
                         # Verificar que se haya generado correctamente
-                        if not embeddings or len(embeddings) == 0:
-                            raise ValueError("Nomic no generó embeddings válidos")
-                            
-                        # Convertir a tensor de PyTorch
-                        tensor_embedding = torch.tensor(embeddings[0])
+                        if embedding.dim() == 0 or embedding.numel() == 0:
+                            raise ValueError(f"Embedding generado inválido: {embedding.shape}")
                         
-                        # Verificar dimensiones
-                        if tensor_embedding.dim() == 0 or tensor_embedding.numel() == 0:
-                            raise ValueError(f"Embedding generado inválido: {tensor_embedding.shape}")
-                            
-                        logger.info(f"Embedding generado con Nomic correctamente - forma: {tensor_embedding.shape}")
-                        return tensor_embedding
+                        # Los embeddings de Nomic ya vienen normalizados por el modelo
+                        # pero aseguramos la normalización para consistencia
+                        normalized = torch.nn.functional.normalize(embedding, p=2, dim=0)
+                        
+                        # Revisar el resultado y su formato
+                        logger.info(f"Embedding generado con SentenceTransformer correctamente - forma: {normalized.shape}")
+                        logger.info(f"Dispositivo usado: {sentence_model.device}")
+                        
+                        return normalized
                     except Exception as e:
-                        logger.error(f"Error en generate_nomic: {e}")
+                        logger.error(f"Error en generate_nomic_local: {e}")
                         raise
                 
                 # Ejecutar de forma asíncrona
-                result = await asyncio.to_thread(generate_nomic)
+                result = await asyncio.to_thread(generate_nomic_local)
                 return result
                 
             except Exception as e:
-                logger.error(f"Error generando embedding con Nomic: {e}")
+                logger.error(f"Error generando embedding con SentenceTransformer: {e}")
                 raise
         
         # Generar embeddings con modelos HuggingFace (BGE/E5)
@@ -460,59 +540,67 @@ class EmbeddingService:
         
         # Manejar diferentes tipos de modelos
         if model_type == "nomic":
-            # Procesamiento por lotes con Nomic
+            # Procesamiento por lotes con SentenceTransformer para modelo Nomic
             try:
                 # Importación segura
                 try:
-                    from nomic import embed
+                    from sentence_transformers import SentenceTransformer
                 except ImportError:
-                    logger.error("No se pudo importar 'embed' desde nomic para procesamiento por lotes")
+                    logger.error("No se pudo importar SentenceTransformer para procesamiento por lotes")
                     raise
                 
-                # Nomic maneja eficientemente los batches internamente
-                def generate_nomic_batch():
+                # Usar SentenceTransformer en modo batch para procesamiento eficiente
+                def generate_nomic_local_batch():
                     try:
-                        # Dividir en lotes más pequeños si es necesario (por si el batch es muy grande)
-                        max_batch_size = 100  # Podemos ajustar esto según el rendimiento
-                        all_embeddings = []
+                        # Crear directorio para caché si no existe
+                        import os
+                        cache_dir = "./modelos"
+                        os.makedirs(cache_dir, exist_ok=True)
                         
-                        for i in range(0, len(texts), max_batch_size):
-                            batch_texts = texts[i:i+max_batch_size]
-                            logger.info(f"Procesando lote de embeddings con Nomic: {len(batch_texts)} textos")
-                            
-                            batch_embeddings = embed.text(
-                                texts=batch_texts,
-                                model_name=model_info["model_name"]
-                            )
-                            
-                            # Verificar que los embeddings se generaron correctamente
-                            if not batch_embeddings or len(batch_embeddings) != len(batch_texts):
-                                logger.warning(f"Nomic generó {len(batch_embeddings) if batch_embeddings else 0} embeddings para {len(batch_texts)} textos")
-                            
-                            all_embeddings.extend(batch_embeddings)
+                        # Configuramos explícitamente para usar GPU
+                        if not self.gpu_available:
+                            raise ValueError("GPU requerida para generar embeddings batch. No se encontró GPU disponible.")
                         
-                        # Convertir a tensores de PyTorch
-                        tensors = []
-                        for emb in all_embeddings:
-                            tensor = torch.tensor(emb)
-                            # Verificar dimensiones
-                            if tensor.dim() == 0 or tensor.numel() == 0:
-                                logger.warning(f"Embedding inválido detectado: {tensor.shape}")
-                                # Crear un tensor de ceros como fallback
-                                tensor = torch.zeros(model_info["vector_dim"])
-                            tensors.append(tensor)
+                        # Cargar modelo con SentenceTransformer y forzar uso de GPU
+                        model_name = "nomic-ai/nomic-embed-text-v1.5"
+                        sentence_model = SentenceTransformer(model_name, cache_folder=cache_dir, 
+                                                           device=self.device, trust_remote_code=True)
                         
-                        logger.info(f"Embeddings batch generados con Nomic: {len(tensors)} vectores")
+                        # Añadir prefijo de instrucción a todos los textos
+                        prefixed_texts = [f"search_document: {t}" for t in texts]
+                        
+                        # Dividir en lotes más pequeños si es necesario
+                        max_batch_size = 64  # Optimizado para GPU
+                        
+                        logger.info(f"Procesando embeddings batch con SentenceTransformer (total: {len(texts)} textos)")
+                        
+                        # Generar embeddings en lote directamente
+                        embeddings = sentence_model.encode(
+                            prefixed_texts,
+                            convert_to_tensor=True,
+                            batch_size=max_batch_size,
+                            show_progress_bar=False
+                        )
+                        
+                        # Normalizar para similaridad de coseno
+                        normalized_embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+                        
+                        # Convertir a lista de tensores individuales
+                        tensors = [emb for emb in normalized_embeddings]
+                        
+                        logger.info(f"Embeddings batch generados con SentenceTransformer: {len(tensors)} vectores")
+                        logger.info(f"Forma del primer embedding: {tensors[0].shape}")
+                        logger.info(f"Dispositivo usado: {sentence_model.device}")
                         return tensors
                     except Exception as e:
-                        logger.error(f"Error en generate_nomic_batch: {e}")
+                        logger.error(f"Error en generate_nomic_local_batch: {e}")
                         raise
                 
                 # Ejecutar de forma asíncrona
-                vectors = await asyncio.to_thread(generate_nomic_batch)
+                vectors = await asyncio.to_thread(generate_nomic_local_batch)
                 
             except Exception as e:
-                logger.error(f"Error generando embeddings batch con Nomic: {e}")
+                logger.error(f"Error generando embeddings batch con SentenceTransformer: {e}")
                 raise
         else:
             # Procesar en batches con modelos HuggingFace para optimizar GPU
@@ -873,54 +961,191 @@ class EmbeddingService:
             for result in results
         ]
 
+    async def check_context_service_health(self) -> Tuple[bool, dict]:
+        """Verificar la disponibilidad del servicio de contexto MCP"""
+        url = f"{self.settings.mcp_service_url}/health"
+        try:
+            if self.settings.use_httpx:
+                import httpx
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(url)
+                    if response.status_code == 200:
+                        data = response.json()
+                        logger.info("Context service health check successful")
+                        return True, data
+                    else:
+                        logger.error(f"Context service health check failed with status {response.status_code}")
+                        return False, {"status": "error", "code": response.status_code, "message": "MCP service health check failed"}
+            else:
+                import aiohttp
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10.0)) as session:
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            logger.info("Context service health check successful")
+                            return True, data
+                        else:
+                            logger.error(f"Context service health check failed with status {response.status}")
+                            return False, {"status": "error", "code": response.status, "message": "MCP service health check failed"}
+        except Exception as e:
+            logger.error(f"Critical error: Context service not available: {e}")
+            return False, {"status": "error", "error": str(e), "message": "MCP service unavailable"}
+
     async def list_contexts(self) -> List[Dict[str, Any]]:
         """Listar contextos MCP disponibles"""
+        # Verificar la disponibilidad del servicio de contexto
+        service_available, error_info = await self.check_context_service_health()
+        
+        if not service_available:
+            error_message = error_info.get("message", "Unknown error")
+            logger.error(f"Critical dependency error: Context service not available - {error_message}")
+            raise HTTPException(
+                status_code=503, 
+                detail={
+                    "error": "MCP Context Service unavailable",
+                    "details": error_info,
+                    "message": "The MCP Context Service is required for proper operation of the embedding service"
+                }
+            )
+        
         # Conexión con el servicio de contexto MCP
         try:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{self.settings.mcp_service_url}/contexts") as response:
-                    if response.status == 200:
-                        return await response.json()
+            if self.settings.use_httpx:
+                import httpx
+                async with httpx.AsyncClient(timeout=self.settings.mcp_service_timeout) as client:
+                    response = await client.get(f"{self.settings.mcp_service_url}/contexts")
+                    if response.status_code == 200:
+                        return response.json()
                     else:
-                        logger.error(f"Error al listar contextos: {response.status}")
-                        return []
+                        logger.error(f"Error al listar contextos: {response.status_code}")
+                        raise HTTPException(
+                            status_code=response.status_code, 
+                            detail=f"Error listing contexts from MCP service: {response.text}"
+                        )
+            else:
+                import aiohttp
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.settings.mcp_service_timeout)) as session:
+                    async with session.get(f"{self.settings.mcp_service_url}/contexts") as response:
+                        if response.status == 200:
+                            return await response.json()
+                        else:
+                            error_text = await response.text()
+                            logger.error(f"Error al listar contextos: {response.status} - {error_text}")
+                            raise HTTPException(
+                                status_code=response.status, 
+                                detail=f"Error listing contexts from MCP service: {error_text}"
+                            )
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error conectando con el servicio de contexto: {e}")
-            return []
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Error connecting to MCP Context Service: {str(e)}"
+            )
 
     async def activate_context(self, context_id: str) -> Dict[str, Any]:
         """Activar un contexto MCP"""
+        # Verificar la disponibilidad del servicio de contexto
+        service_available, error_info = await self.check_context_service_health()
+        
+        if not service_available:
+            error_message = error_info.get("message", "Unknown error")
+            logger.error(f"Critical dependency error: Context service not available - {error_message}")
+            raise HTTPException(
+                status_code=503, 
+                detail={
+                    "error": "MCP Context Service unavailable",
+                    "details": error_info,
+                    "message": f"Unable to activate context {context_id}: MCP service is required for this operation"
+                }
+            )
+        
         try:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{self.settings.mcp_service_url}/contexts/{context_id}/activate") as response:
-                    if response.status == 200:
-                        return await response.json()
+            if self.settings.use_httpx:
+                import httpx
+                async with httpx.AsyncClient(timeout=self.settings.mcp_service_timeout) as client:
+                    response = await client.post(f"{self.settings.mcp_service_url}/contexts/{context_id}/activate")
+                    if response.status_code == 200:
+                        return response.json()
                     else:
-                        error_text = await response.text()
-                        logger.error(f"Error al activar contexto: {response.status} - {error_text}")
-                        raise HTTPException(status_code=response.status, detail=f"Error activando contexto: {error_text}")
+                        error_text = response.text
+                        logger.error(f"Error al activar contexto: {response.status_code} - {error_text}")
+                        raise HTTPException(
+                            status_code=response.status_code, 
+                            detail=f"Error activating context {context_id}: {error_text}"
+                        )
+            else:
+                import aiohttp
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.settings.mcp_service_timeout)) as session:
+                    async with session.post(f"{self.settings.mcp_service_url}/contexts/{context_id}/activate") as response:
+                        if response.status == 200:
+                            return await response.json()
+                        else:
+                            error_text = await response.text()
+                            logger.error(f"Error al activar contexto: {response.status} - {error_text}")
+                            raise HTTPException(
+                                status_code=response.status, 
+                                detail=f"Error activating context {context_id}: {error_text}"
+                            )
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error conectando con el servicio de contexto: {e}")
-            raise HTTPException(status_code=500, detail=f"Error conectando con el servicio de contexto: {str(e)}")
+            logger.error(f"Error connecting to context service when activating context {context_id}: {e}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Error activating context {context_id}: Unable to connect to MCP Context Service: {str(e)}"
+            )
 
     async def deactivate_context(self, context_id: str) -> Dict[str, Any]:
         """Desactivar un contexto MCP"""
+        # Verificar la disponibilidad del servicio de contexto
+        service_available, error_info = await self.check_context_service_health()
+        
+        if not service_available:
+            error_message = error_info.get("message", "Unknown error")
+            logger.error(f"Critical dependency error: Context service not available - {error_message}")
+            raise HTTPException(
+                status_code=503, 
+                detail={
+                    "error": "MCP Context Service unavailable",
+                    "details": error_info,
+                    "message": f"Unable to deactivate context {context_id}: MCP service is required for this operation"
+                }
+            )
+        
         try:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{self.settings.mcp_service_url}/contexts/{context_id}/deactivate") as response:
-                    if response.status == 200:
-                        return await response.json()
+            if self.settings.use_httpx:
+                import httpx
+                async with httpx.AsyncClient(timeout=self.settings.mcp_service_timeout) as client:
+                    response = await client.post(f"{self.settings.mcp_service_url}/contexts/{context_id}/deactivate")
+                    if response.status_code == 200:
+                        return response.json()
                     else:
-                        error_text = await response.text()
-                        logger.error(f"Error al desactivar contexto: {response.status} - {error_text}")
-                        raise HTTPException(status_code=response.status, detail=f"Error desactivando contexto: {error_text}")
+                        error_text = response.text
+                        logger.error(f"Error al desactivar contexto: {response.status_code} - {error_text}")
+                        raise HTTPException(
+                            status_code=response.status_code, 
+                            detail=f"Error deactivating context {context_id}: {error_text}"
+                        )
+            else:
+                import aiohttp
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.settings.mcp_service_timeout)) as session:
+                    async with session.post(f"{self.settings.mcp_service_url}/contexts/{context_id}/deactivate") as response:
+                        if response.status == 200:
+                            return await response.json()
+                        else:
+                            error_text = await response.text()
+                            logger.error(f"Error al desactivar contexto: {response.status} - {error_text}")
+                            raise HTTPException(
+                                status_code=response.status, 
+                                detail=f"Error deactivating context {context_id}: {error_text}"
+                            )
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error conectando con el servicio de contexto: {e}")
-            raise HTTPException(status_code=500, detail=f"Error conectando con el servicio de contexto: {str(e)}")
+            logger.error(f"Error connecting to context service when deactivating context {context_id}: {e}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Error deactivating context {context_id}: Unable to connect to MCP Context Service: {str(e)}"
+            )

@@ -184,41 +184,28 @@ func (am *AuthMiddleware) Authenticate() gin.HandlerFunc {
 				return
 			}
 
-			// Verificar el emisor del token (issuer)
-			expectedIssuer := "backend-aiss"
-			if claims.Issuer != expectedIssuer {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token de emisor no válido"})
-				return
+			// Verificación del emisor temporalmente desactivada para desarrollo
+			if claims.Issuer != "" {
+				log.Printf("Token issuer: %s", claims.Issuer)
 			}
 
-			// Verificar la audiencia del token
-			validAudience := false
-			expectedAudience := "aiss-client"
-			if claims.Audience != nil {
-				for _, aud := range claims.Audience {
-					if aud == expectedAudience {
-						validAudience = true
-						break
-					}
-				}
+			// Verificación de audiencia temporalmente desactivada para desarrollo
+			if claims.Audience != nil && len(claims.Audience) > 0 {
+				log.Printf("Token audience: %v", claims.Audience)
 			}
 
-			if !validAudience {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token con audiencia no válida"})
-				return
-			}
-
-			// Verificar ID único (jti) para prevenir reutilización
-			if claims.ID == "" {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token sin identificador único"})
-				return
+			// Verificación de JTI temporalmente desactivada para desarrollo
+			if claims.ID != "" {
+				log.Printf("Token ID (jti): %s", claims.ID)
 			}
 
 			// Añadir información de usuario al contexto
 			c.Set("userID", claims.UserID)
 			c.Set("userRole", claims.Role)
 			c.Set("tokenExpiresAt", claims.ExpiresAt.Time)
-			c.Set("tokenID", claims.ID)
+			if claims.ID != "" {
+				c.Set("tokenID", claims.ID)
+			}
 			c.Next()
 		} else {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token inválido"})

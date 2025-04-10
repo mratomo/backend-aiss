@@ -7,6 +7,7 @@ toolchain go1.24.0
 require (
 	github.com/gin-gonic/gin v1.10.0
 	github.com/golang-jwt/jwt/v4 v4.5.2
+	github.com/google/uuid v1.5.0
 	github.com/spf13/viper v1.20.1
 	go.mongodb.org/mongo-driver v1.17.3
 	golang.org/x/crypto v0.37.0

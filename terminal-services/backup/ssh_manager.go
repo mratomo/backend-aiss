@@ -193,7 +193,7 @@ func (m *SSHManager) CreateSession(userID string, params models.SessionCreateReq
 			// Try to use known_hosts file
 			knownHostsFile := fmt.Sprintf("%s/known_hosts", m.keyDir)
 			if hostKeyCallback, err = knownhostsCallback(knownHostsFile); err \!= nil {
-				log.Printf("Warning: Could not load known_hosts file: %v", err)
+				log.Printf("Warning: Could not load known_hosts file: %v", err),
 				
 				// Instead of InsecureIgnoreHostKey, use a custom handler that at least logs the key
 				hostKeyCallback = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
@@ -266,7 +266,7 @@ func (m *SSHManager) CreateSession(userID string, params models.SessionCreateReq
 			// Update target info
 			info, err := m.detectOSInfo(conn)
 			if err \!= nil {
-				log.Printf("Failed to detect OS info: %v", err)
+				log.Printf("Failed to detect OS info: %v", err),
 			} else {
 				m.updateSessionTargetInfo(session.ID, info)
 				
@@ -903,7 +903,7 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 					// Get the suggestion
 					suggestion, err := m.sessionClient.GetSuggestion(execute.SuggestionID)
 					if err \!= nil {
-						log.Printf("Failed to get suggestion: %v", err)
+						log.Printf("Failed to get suggestion: %v", err),
 						ws.WriteJSON(models.WebSocketMessage{
 							Type: "session_status",
 							Data: models.SessionStatusUpdate{
@@ -945,7 +945,7 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 						// Pass the suggestion ID as metadata for tracking
 						result, err := m.executeSuggestionCommand(sessionID, suggestionInfo)
 					if err \!= nil {
-						log.Printf("Failed to execute suggested command: %v", err)
+						log.Printf("Failed to execute suggested command: %v", err),
 						ws.WriteJSON(models.WebSocketMessage{
 							Type: "suggestion_status",
 							Data: map[string]interface{}{
@@ -953,7 +953,7 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 								"status":        "error",
 								"message":       fmt.Sprintf("Failed to execute command: %v", err),
 							},
-						})
+						}),
 					} else {
 						// Notify client of successful execution
 						ws.WriteJSON(models.WebSocketMessage{
@@ -1060,7 +1060,7 @@ func (m *SSHManager) HandleWebSocket(c *gin.Context, sessionID string) {
 						conn.Lock.Unlock()
 			}
 		}
-	}()
+	}
 
 		// Read from SSH stdout/stderr and write to WebSocket
 		go func() {

@@ -34,6 +34,7 @@ class ModelSettings(BaseSettings):
     batch_size: int = Field(default=32)
     use_gpu: bool = Field(default=True)
     device: Optional[str] = Field(default=None)  # Auto-detection if None
+    fallback_to_cpu: bool = Field(default=True)  # Si GPU no disponible, usar CPU
 
     # Opciones de optimización
     use_8bit: bool = Field(default=False)  # Cuantización 8-bit para ahorrar memoria
@@ -67,6 +68,9 @@ class Settings(BaseSettings):
 
     # Configuración de MCP
     mcp_service_url: str = Field(default="http://context-service:8083")
+    mcp_service_timeout: float = Field(default=30.0)
+    allow_degraded_mode: bool = Field(default=True)
+    use_httpx: bool = Field(default=True)  # Usar httpx en lugar de aiohttp
 
     # Procesamiento de documentos
     chunk_size: int = Field(default=1000)  # Tamaño de los fragmentos para documentos grandes
@@ -114,6 +118,9 @@ class Settings(BaseSettings):
 
         # Configuración de MCP
         self.mcp_service_url = os.getenv("MCP_SERVICE_URL", self.mcp_service_url)
+        self.mcp_service_timeout = float(os.getenv("MCP_SERVICE_TIMEOUT", str(self.mcp_service_timeout)))
+        self.allow_degraded_mode = os.getenv("ALLOW_DEGRADED_MODE", str(self.allow_degraded_mode)).lower() in ("true", "1", "yes")
+        self.use_httpx = os.getenv("USE_HTTPX", str(self.use_httpx)).lower() in ("true", "1", "yes")
 
         # Configuración de procesamiento
         self.chunk_size = int(os.getenv("CHUNK_SIZE", str(self.chunk_size)))

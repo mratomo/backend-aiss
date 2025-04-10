@@ -10,6 +10,7 @@ import (
 	"user-service/repositories"
 
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -151,7 +152,7 @@ func (s *UserService) RefreshToken(ctx context.Context, refreshTokenStr string) 
 			// Registrar información para facilitar depuración
 			actualType := fmt.Sprintf("%T", claims["user_id"])
 			actualValue := fmt.Sprintf("%v", claims["user_id"])
-			log.Printf("Error en token refresh: campo user_id con tipo incorrecto, tipo: %s, valor: %s", 
+			log.Printf("Error en token refresh: campo user_id con tipo incorrecto, tipo: %s, valor: %s",
 				actualType, actualValue)
 			return nil, errors.New("token inválido: formato de user_id incorrecto")
 		}
@@ -177,7 +178,7 @@ func (s *UserService) RefreshToken(ctx context.Context, refreshTokenStr string) 
 
 		// Verificar versión del token
 		if ok && int(tokenVersion) != user.TokenVersionNumber {
-			log.Printf("Intento de uso de token revocado para usuario %s, versión del token: %d, versión actual: %d", 
+			log.Printf("Intento de uso de token revocado para usuario %s, versión del token: %d, versión actual: %d",
 				userID, int(tokenVersion), user.TokenVersionNumber)
 			return nil, errors.New("token revocado")
 		}
@@ -238,7 +239,7 @@ func (s *UserService) UpdateUser(ctx context.Context, id string, update *models.
 		// Si se está desactivando un usuario que estaba activo, invalidar sus tokens
 		if user.Active && !(*update.Active) {
 			user.TokenVersionNumber++
-			log.Printf("Usuario %s desactivado, incrementada versión de token a %d", 
+			log.Printf("Usuario %s desactivado, incrementada versión de token a %d",
 				user.ID.Hex(), user.TokenVersionNumber)
 		}
 		user.Active = *update.Active
@@ -275,23 +276,23 @@ func (s *UserService) SetAdminPassword(ctx context.Context, password string) err
 	if err != nil {
 		return fmt.Errorf("error al buscar usuario admin: %w", err)
 	}
-	
+
 	// Generar hash de la contraseña
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("error al generar hash de contraseña: %w", err)
 	}
-	
+
 	// Actualizar contraseña
 	user.PasswordHash = string(hashedPassword)
-	
+
 	// Incrementar la versión del token (si había una contraseña anterior)
 	if user.PasswordHash != "" {
 		user.TokenVersionNumber++
-		log.Printf("Contraseña de admin actualizada, incrementada versión de token a %d", 
+		log.Printf("Contraseña de admin actualizada, incrementada versión de token a %d",
 			user.TokenVersionNumber)
 	}
-	
+
 	return s.repo.UpdateUser(ctx, user)
 }
 
@@ -322,12 +323,12 @@ func (s *UserService) ChangePassword(ctx context.Context, userID string, current
 
 	// Actualizar contraseña
 	user.PasswordHash = string(hashedPassword)
-	
+
 	// Incrementar la versión del token para invalidar todos los tokens existentes
 	user.TokenVersionNumber++
-	
+
 	// Registrar el cambio de contraseña
-	log.Printf("Cambio de contraseña para usuario %s, incrementada versión de token a %d", 
+	log.Printf("Cambio de contraseña para usuario %s, incrementada versión de token a %d",
 		user.ID.Hex(), user.TokenVersionNumber)
 
 	return s.repo.UpdateUser(ctx, user)
@@ -338,15 +339,24 @@ func (s *UserService) generateTokens(user *models.User) (*models.TokenResponse, 
 	// Calcular tiempo de expiración
 	expirationTime := time.Now().Add(time.Duration(s.expirationHours) * time.Hour)
 
+	// ID único para el token
+	tokenID := uuid.New().String()
+	issuedAt := time.Now()
+
 	// Crear claims para access token
 	accessClaims := jwt.MapClaims{
-		"user_id":        user.ID.Hex(),
-		"username":       user.Username,
-		"email":          user.Email,
-		"role":           user.Role,
-		"type":           "access",
-		"token_version":  user.TokenVersionNumber,
-		"exp":            expirationTime.Unix(),
+		"user_id":       user.ID.Hex(),
+		"username":      user.Username,
+		"email":         user.Email,
+		"role":          user.Role,
+		"type":          "access",
+		"token_version": user.TokenVersionNumber,
+		"exp":           expirationTime.Unix(),
+		"iat":           issuedAt.Unix(),
+		"nbf":           issuedAt.Unix(),
+		"jti":           tokenID,
+		"iss":           "backend-aiss",          // Emisor del token
+		"aud":           []string{"aiss-client"}, // Audiencia del token
 	}
 
 	// Crear token de acceso
@@ -358,13 +368,19 @@ func (s *UserService) generateTokens(user *models.User) (*models.TokenResponse, 
 
 	// Calcular tiempo de expiración para refresh token (más largo)
 	refreshExpirationTime := time.Now().Add(time.Duration(s.expirationHours*24) * time.Hour) // 24 veces más largo
+	refreshTokenID := uuid.New().String()
 
 	// Crear claims para refresh token
 	refreshClaims := jwt.MapClaims{
-		"user_id":        user.ID.Hex(),
-		"type":           "refresh",
-		"token_version":  user.TokenVersionNumber,
-		"exp":            refreshExpirationTime.Unix(),
+		"user_id":       user.ID.Hex(),
+		"type":          "refresh",
+		"token_version": user.TokenVersionNumber,
+		"exp":           refreshExpirationTime.Unix(),
+		"iat":           issuedAt.Unix(),
+		"nbf":           issuedAt.Unix(),
+		"jti":           refreshTokenID,
+		"iss":           "backend-aiss",          // Emisor del token
+		"aud":           []string{"aiss-client"}, // Audiencia del token
 	}
 
 	// Crear refresh token

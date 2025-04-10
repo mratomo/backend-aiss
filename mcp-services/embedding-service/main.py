@@ -216,8 +216,15 @@ embedding_service = EmbeddingService(db, vectordb_service, settings)
 @app.on_event("startup")
 async def startup_event():
     """Inicializar servicios al iniciar la aplicación"""
+    startup_status = {
+        "mongodb": {"status": "pending"},
+        "vectordb": {"status": "pending"},
+        "embedding_models": {"status": "pending"},
+        "mcp_service": {"status": "pending"}
+    }
+    
     logger.info("Starting Embedding Service",
-               version="1.1.0",
+               version="1.2.0",
                python_version=platform.python_version(),
                uvloop_enabled=uvloop_available,
                structlog_enabled=structlog_available,
@@ -228,13 +235,14 @@ async def startup_event():
         asyncio.create_task(update_metrics())
         logger.info("Metrics monitoring started")
 
-    # Verificar conexión a MongoDB
+    # Verificar conexión a MongoDB (crítica - sin ella no podemos proceder)
     logger.info("Connecting to MongoDB...")
     try:
         for attempt in range(1, 6):
             try:
                 await motor_client.admin.command("ping")
                 logger.info("Successfully connected to MongoDB")
+                startup_status["mongodb"] = {"status": "ok"}
                 if prometheus_available:
                     DB_OPERATIONS.labels(operation="connect", status="success").inc()
                 break
@@ -244,49 +252,95 @@ async def startup_event():
                     logger.warning(f"MongoDB connection attempt {attempt} failed. Retrying in {wait_time}s...", error=str(e))
                     await asyncio.sleep(wait_time)
                 else:
-                    logger.error(f"Failed to connect to MongoDB after 5 attempts", error=str(e))
+                    error_msg = f"Failed to connect to MongoDB after 5 attempts: {str(e)}"
+                    logger.error(error_msg)
+                    startup_status["mongodb"] = {"status": "error", "message": error_msg}
                     if prometheus_available:
                         DB_OPERATIONS.labels(operation="connect", status="error").inc()
-                    raise
+                    raise ValueError(error_msg)
     except Exception as e:
-        logger.error("Error connecting to MongoDB", error=str(e))
-        raise
+        error_msg = f"Critical error connecting to MongoDB: {str(e)}"
+        logger.error(error_msg)
+        startup_status["mongodb"] = {"status": "error", "message": error_msg}
+        raise ValueError(error_msg)
 
-    # Verificar conexión a la base de datos vectorial
+    # Verificar conexión a la base de datos vectorial (crítica para búsqueda de embeddings)
     logger.info(f"Connecting to Vector DB ({settings.vector_db})...")
     try:
         status = await vectordb_service.get_status()
         logger.info(f"Successfully connected to {settings.vector_db}", status=status)
+        startup_status["vectordb"] = {"status": "ok", "type": settings.vector_db}
     except Exception as e:
-        logger.error(f"Error connecting to {settings.vector_db}", error=str(e))
-        logger.warning("Continuing startup despite Vector DB connection failure")
-        # No propagamos la excepción para permitir que la aplicación continúe funcionando
+        error_msg = f"Error connecting to {settings.vector_db}: {str(e)}"
+        logger.error(error_msg)
+        startup_status["vectordb"] = {"status": "error", "message": error_msg}
+        # Este error es crítico para la búsqueda vectorial
+        raise ValueError(error_msg)
 
-    # Inicializar modelos de embeddings
+    # Inicializar modelos de embeddings (crítico para operación)
     try:
         await embedding_service.initialize_models()
         logger.info("Embedding models initialized successfully")
+        startup_status["embedding_models"] = {"status": "ok"}
 
         # Verificar disponibilidad de GPU
         if embedding_service.gpu_available:
             logger.info("GPU detected and will be used", gpu_info=embedding_service.gpu_info)
+            startup_status["embedding_models"]["gpu"] = "available"
+            startup_status["embedding_models"]["gpu_info"] = embedding_service.gpu_info
             
             # Información detallada de GPU
             import torch
             if torch.cuda.is_available():
                 device_count = torch.cuda.device_count()
+                gpu_devices = []
                 for i in range(device_count):
                     device_props = torch.cuda.get_device_properties(i)
+                    gpu_info = {
+                        "id": i,
+                        "name": device_props.name,
+                        "memory_gb": f"{device_props.total_memory / (1024**3):.2f}",
+                        "compute_capability": f"{device_props.major}.{device_props.minor}"
+                    }
+                    gpu_devices.append(gpu_info)
                     logger.info(f"GPU device {i} info",
                                name=device_props.name,
-                               memory_gb=f"{device_props.total_memory / (1024**3):.2f}",
-                               compute_capability=f"{device_props.major}.{device_props.minor}",
+                               memory_gb=gpu_info["memory_gb"],
+                               compute_capability=gpu_info["compute_capability"],
                                cuda_version=torch.version.cuda)
+                startup_status["embedding_models"]["gpu_devices"] = gpu_devices
         else:
             logger.warning("No GPU detected, using CPU for embeddings")
+            startup_status["embedding_models"]["gpu"] = "unavailable"
+            startup_status["embedding_models"]["device"] = "cpu"
     except Exception as e:
-        logger.error("Error initializing embedding models", error=str(e))
-        raise
+        error_msg = f"Error initializing embedding models: {str(e)}"
+        logger.error(error_msg)
+        startup_status["embedding_models"] = {"status": "error", "message": error_msg}
+        raise ValueError(error_msg)
+    
+    # Verificar conexión con el servicio MCP Context (crítico para operación completa)
+    logger.info("Checking MCP Context Service connectivity...")
+    try:
+        service_available, health_info = await embedding_service.check_context_service_health()
+        if service_available:
+            logger.info("Successfully connected to MCP Context Service")
+            startup_status["mcp_service"] = {"status": "ok", "details": health_info}
+        else:
+            error_msg = f"MCP Context Service unavailable: {health_info.get('message', 'unknown error')}"
+            logger.error(error_msg)
+            startup_status["mcp_service"] = {"status": "error", "message": error_msg}
+            # Este es un error crítico para el funcionamiento completo
+            raise ValueError(error_msg)
+    except Exception as e:
+        error_msg = f"Error connecting to MCP Context Service: {str(e)}"
+        logger.error(error_msg)
+        startup_status["mcp_service"] = {"status": "error", "message": error_msg}
+        raise ValueError(error_msg)
+    
+    # Guardar estado de inicio para el endpoint de health
+    app.state.startup_status = startup_status
+    logger.info("Embedding Service started successfully", startup_status=startup_status)
 
 
 @app.on_event("shutdown")
@@ -324,19 +378,24 @@ async def health_check():
     health_status = {
         "status": "ok",
         "service": "embedding-service",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "timestamp": datetime.utcnow().isoformat(),
         "uptime": os.getenv("UPTIME", "unknown")
     }
     
+    # Incluir información del startup si está disponible
+    if hasattr(app.state, "startup_status"):
+        health_status["startup_status"] = app.state.startup_status
+    
     # Verificar MongoDB
     try:
         await motor_client.admin.command("ping")
-        health_status["mongodb"] = "ok"
+        health_status["mongodb"] = {"status": "ok"}
         if prometheus_available:
             DB_OPERATIONS.labels(operation="ping", status="success").inc()
     except Exception as e:
-        health_status["mongodb"] = f"error: {str(e)}"
+        error_msg = str(e)
+        health_status["mongodb"] = {"status": "error", "message": error_msg}
         health_status["status"] = "degraded"
         if prometheus_available:
             DB_OPERATIONS.labels(operation="ping", status="error").inc()
@@ -346,19 +405,52 @@ async def health_check():
         vectordb_status = await vectordb_service.get_status()
         health_status["vectordb"] = {
             "type": settings.vector_db,
-            "status": vectordb_status
+            "status": "ok",
+            "details": vectordb_status
         }
     except Exception as e:
+        error_msg = str(e)
         health_status["vectordb"] = {
             "type": settings.vector_db,
-            "status": f"error: {str(e)}"
+            "status": "error",
+            "message": error_msg
+        }
+        health_status["status"] = "degraded"
+    
+    # Verificar servicio MCP Context
+    try:
+        mcp_available, mcp_info = await embedding_service.check_context_service_health()
+        if mcp_available:
+            health_status["mcp_service"] = {
+                "status": "ok",
+                "details": mcp_info
+            }
+        else:
+            health_status["mcp_service"] = {
+                "status": "error",
+                "message": "MCP Context Service unavailable",
+                "details": mcp_info
+            }
+            health_status["status"] = "degraded"
+    except Exception as e:
+        error_msg = str(e)
+        health_status["mcp_service"] = {
+            "status": "error",
+            "message": error_msg
         }
         health_status["status"] = "degraded"
     
     # Verificar GPU
     health_status["gpu"] = {
         "available": embedding_service.gpu_available,
-        "info": embedding_service.gpu_info
+        "info": embedding_service.gpu_info,
+        "device": embedding_service.device
+    }
+    
+    # Verificar modelos
+    health_status["models"] = {
+        "loaded": len(embedding_service.models) > 0,
+        "types": list(embedding_service.models.keys())
     }
     
     # Añadir información de memoria si está disponible
@@ -366,18 +458,41 @@ async def health_check():
         try:
             process = psutil.Process(os.getpid())
             memory_info = process.memory_info()
-            health_status["memory_usage"] = {
-                "rss_bytes": memory_info.rss,
-                "rss_mb": round(memory_info.rss / (1024 * 1024), 2)
+            health_status["resources"] = {
+                "memory": {
+                    "rss_bytes": memory_info.rss,
+                    "rss_mb": round(memory_info.rss / (1024 * 1024), 2)
+                }
             }
             
             # Añadir uso de CPU
             cpu_percent = process.cpu_percent(interval=0.1)
-            health_status["cpu_usage"] = {
+            health_status["resources"]["cpu"] = {
                 "percent": cpu_percent
             }
+            
+            # Si hay GPU disponible, añadir información de memoria GPU
+            if embedding_service.gpu_available:
+                try:
+                    import torch
+                    gpu_memory_allocated = torch.cuda.memory_allocated(0)
+                    gpu_memory_reserved = torch.cuda.memory_reserved(0)
+                    health_status["resources"]["gpu"] = {
+                        "memory_allocated_mb": round(gpu_memory_allocated / (1024 * 1024), 2),
+                        "memory_reserved_mb": round(gpu_memory_reserved / (1024 * 1024), 2)
+                    }
+                except Exception as e:
+                    health_status["resources"]["gpu"] = {"error": str(e)}
         except Exception as e:
-            health_status["resource_monitor"] = {"error": str(e)}
+            health_status["resources"] = {"error": str(e)}
+    
+    # Determinar el estado general
+    if "degraded" in health_status["status"]:
+        # Ya está marcado como degradado por alguno de los componentes
+        pass
+    elif not mcp_available:
+        # MCP es esencial, si no está disponible, el servicio está degradado
+        health_status["status"] = "degraded"
     
     # Añadir tiempo de respuesta
     duration = time.time() - start_time
