@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -112,11 +113,36 @@ type UserHandler struct {
 	serviceURL string
 }
 
+// Instancia global de UserHandler
+var (
+	userHandlerInstance *UserHandler
+	userHandlerOnce     sync.Once
+)
+
 // NewUserHandler crea un nuevo manejador de usuarios
 func NewUserHandler(serviceURL string) *UserHandler {
-	return &UserHandler{
-		serviceURL: serviceURL,
+	userHandlerOnce.Do(func() {
+		userHandlerInstance = &UserHandler{
+			serviceURL: serviceURL,
+		}
+	})
+	return userHandlerInstance
+}
+
+// GetUserHandler obtiene la instancia global del UserHandler
+func GetUserHandler() *UserHandler {
+	if userHandlerInstance == nil {
+		panic("UserHandler no inicializado. Llame a NewUserHandler primero.")
 	}
+	return userHandlerInstance
+}
+
+// GetConfigHandlerInstance obtiene la instancia global del ConfigHandler
+func GetConfigHandlerInstance() *ConfigHandler {
+	if ConfigHandlerInstance == nil {
+		panic("ConfigHandler no inicializado. Llame a NewConfigHandler primero.")
+	}
+	return ConfigHandlerInstance
 }
 
 // Register maneja registro de nuevos usuarios

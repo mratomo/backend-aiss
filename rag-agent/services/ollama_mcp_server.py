@@ -4,7 +4,42 @@ import logging
 from typing import Dict, List, Optional, Any, Union
 
 import httpx
+
+# Importamos correctamente FastMCP
 from fastmcp import FastMCP
+            
+# Función para crear el servidor MCP
+def create_ollama_mcp_server(settings):
+    """
+    Crea y configura un servidor MCP para Ollama
+    
+    Args:
+        settings: Configuración global de la aplicación
+        
+    Returns:
+        FastAPI app con el servidor MCP configurado
+    """
+    from fastapi import FastAPI
+    app = FastAPI(title="Ollama MCP Server")
+    
+    # Crear instancia de OllamaMCPServer
+    server = OllamaMCPServer(api_url=settings.ollama_api_base)
+    
+    # Configurar FastMCP con FastAPI
+    mcp_server = FastMCP.create_fastapi_app(
+        name="ollama_mcp",
+        description="Ollama MCP Server for LLM operations",
+        server=server.mcp
+    )
+    
+    # Incluir la aplicación MCP en la app principal
+    app.mount("/mcp", mcp_server)
+    
+    @app.get("/")
+    async def root():
+        return {"message": "Ollama MCP Server is running", "endpoints": ["/mcp"]}
+    
+    return app
 
 try:
     import structlog

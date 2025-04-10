@@ -76,7 +76,7 @@ class AgentService:
             ValueError: Si hay errores de validación
         """
         # Preparar documento
-        agent_dict = agent.dict(exclude={"id"})
+        agent_dict = agent.model_dump(exclude={"id"})
         agent_dict["created_at"] = datetime.utcnow()
         agent_dict["updated_at"] = datetime.utcnow()
         
@@ -123,7 +123,7 @@ class AgentService:
             return None
         
         # Preparar actualización
-        update_dict = update.dict(exclude_none=True)
+        update_dict = update.model_dump(exclude_none=True)
         
         # Añadir timestamp de actualización
         update_dict["updated_at"] = datetime.utcnow()
@@ -207,7 +207,7 @@ class AgentService:
             return None
         
         # Preparar actualización
-        prompts_dict = prompts.dict(exclude_none=True)
+        prompts_dict = prompts.model_dump(exclude_none=True)
         
         # Actualizar en MongoDB
         await self.agents_collection.update_one(
@@ -296,7 +296,7 @@ class AgentService:
             assignment_id = str(existing["_id"])
         else:
             # Crear nueva asignación
-            assignment_dict = assignment.dict(exclude={"id"})
+            assignment_dict = assignment.model_dump(exclude={"id"})
             assignment_dict["assigned_at"] = datetime.utcnow()
             
             result = await self.connections_collection.insert_one(assignment_dict)

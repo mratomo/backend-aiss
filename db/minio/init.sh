@@ -1,77 +1,94 @@
-#!/bin/bash
-# db/minio/init.sh
-# Script para inicializar MinIO SOLO PARA REFERENCIA, SE CONFIGURA EN DOCKER COMPOSE
+#!/bin/sh
+# Enhanced MinIO init script with robust error handling
 
-set -e
+echo "Starting MinIO initialization..."
 
-# Variables de entorno con valores por defecto
-MINIO_SERVER=${MINIO_SERVER:-minio:9000}
-MINIO_USER=${MINIO_ROOT_USER:-minioadmin}
-MINIO_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
-SHARED_BUCKET=${MINIO_SHARED_BUCKET:-shared-documents}
-PERSONAL_BUCKET=${MINIO_PERSONAL_BUCKET:-personal-documents}
+# Variables
+MAX_RETRIES=30
+RETRY_INTERVAL=5
+MINIO_SERVER="http://minio:9000"
+MINIO_USER="minioadmin"
+MINIO_PASSWORD="minioadmin"
 
-# Función para verificar disponibilidad de MinIO
-check_minio_available() {
-  echo "Verificando disponibilidad de MinIO en $MINIO_SERVER..."
-  local max_attempts=30
-  local attempt=0
-
-  while [ $attempt -lt $max_attempts ]; do
-    if mc admin info myminio &>/dev/null; then
-      echo "MinIO está disponible"
-      return 0
+# Wait for MinIO to be available with proper checking
+echo "Waiting for MinIO to be available at $MINIO_SERVER..."
+for i in $(seq 1 $MAX_RETRIES); do
+    if mc alias set local $MINIO_SERVER $MINIO_USER $MINIO_PASSWORD &>/dev/null; then
+        echo "✓ Successfully connected to MinIO on attempt $i"
+        break
     fi
+    
+    if [ $i -eq $MAX_RETRIES ]; then
+        echo "✗ Failed to connect to MinIO after $MAX_RETRIES attempts"
+        exit 1
+    fi
+    
+    echo "- Attempt $i/$MAX_RETRIES: MinIO not yet available, waiting $RETRY_INTERVAL seconds..."
+    sleep $RETRY_INTERVAL
+done
 
-    attempt=$((attempt + 1))
-    echo "Esperando a que MinIO esté disponible (intento $attempt/$max_attempts)..."
-    sleep 2
-  done
-
-  echo "Error: MinIO no está disponible después de $max_attempts intentos"
-  return 1
-}
-
-# Configurar el cliente MinIO
-echo "Configurando cliente MinIO..."
-mc config host add myminio http://$MINIO_SERVER $MINIO_USER $MINIO_PASSWORD
-
-# Verificar disponibilidad
-check_minio_available || exit 1
-
-# Crear buckets
-echo "Creando buckets..."
-mc mb --ignore-existing myminio/$SHARED_BUCKET
-echo "Bucket $SHARED_BUCKET creado o ya existente"
-
-mc mb --ignore-existing myminio/$PERSONAL_BUCKET
-echo "Bucket $PERSONAL_BUCKET creado o ya existente"
-
-# Configurar políticas de acceso
-echo "Configurando políticas de acceso..."
-mc anonymous set download myminio/$SHARED_BUCKET
-echo "Permisos de descarga anónima establecidos para $SHARED_BUCKET"
-
-# Verificar que los buckets se crearon correctamente
-echo "Verificando buckets..."
-if mc ls myminio | grep -q $SHARED_BUCKET; then
-  echo "✓ Bucket $SHARED_BUCKET verificado"
+# Verify connection is working by testing a basic command
+echo "Verifying MinIO connection..."
+if ! mc ls local &>/dev/null; then
+    echo "✗ Failed to list buckets - connection appears broken"
+    
+    # Try to reconnect
+    echo "Attempting to reconnect..."
+    mc alias set local $MINIO_SERVER $MINIO_USER $MINIO_PASSWORD
+    
+    # Verify again
+    if ! mc ls local &>/dev/null; then
+        echo "✗ Reconnection failed - aborting"
+        exit 1
+    fi
 else
-  echo "✗ Error: Bucket $SHARED_BUCKET no encontrado"
-  exit 1
+    echo "✓ Connection verified successfully"
 fi
 
-if mc ls myminio | grep -q $PERSONAL_BUCKET; then
-  echo "✓ Bucket $PERSONAL_BUCKET verificado"
-else
-  echo "✗ Error: Bucket $PERSONAL_BUCKET no encontrado"
-  exit 1
-fi
+# Create required buckets
+echo "Creating required buckets..."
+BUCKETS=("documents" "uploads" "temp" "personal-documents" "shared-documents")
 
-# Crear una pequeña estructura de directorios de ejemplo
-echo "Creando estructura de directorios inicial..."
-mc mb --ignore-existing myminio/$SHARED_BUCKET/public
-mc mb --ignore-existing myminio/$SHARED_BUCKET/templates
-mc mb --ignore-existing myminio/$PERSONAL_BUCKET/samples
+for bucket in "${BUCKETS[@]}"; do
+    echo "- Creating bucket: local/$bucket"
+    if mc mb --ignore-existing local/$bucket; then
+        echo "  ✓ Bucket local/$bucket created or already exists"
+    else
+        echo "  ✗ Failed to create bucket local/$bucket"
+    fi
+done
 
-echo "Inicialización de MinIO completada exitosamente"
+# Wait a moment for bucket creation to stabilize
+sleep 2
+
+# Set access policies
+echo "Setting access policies..."
+POLICIES=(
+    "download:documents"
+    "upload:uploads"
+    "public:temp"
+    "download:personal-documents"
+    "download:shared-documents"
+)
+
+for policy_pair in "${POLICIES[@]}"; do
+    policy="${policy_pair%%:*}"
+    bucket="${policy_pair#*:}"
+    
+    echo "- Setting $policy policy on local/$bucket"
+    if mc anonymous set $policy local/$bucket; then
+        echo "  ✓ Policy set successfully"
+    else
+        echo "  ✗ Failed to set policy, retrying once..."
+        # Retry once
+        sleep 2
+        mc anonymous set $policy local/$bucket || echo "  ✗ Policy setting failed on retry"
+    fi
+done
+
+# Verify buckets exist
+echo "Verifying buckets..."
+mc ls local
+
+echo "MinIO initialization complete!"
+exit 0

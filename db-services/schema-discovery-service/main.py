@@ -125,37 +125,15 @@ active_jobs_lock = asyncio.Lock()  # Lock para proteger acceso concurrente a act
 # Caché para resultados frecuentes
 schema_cache = TTLCache(maxsize=100, ttl=300)  # Caché de 5 minutos
 
-# Inicializar servicios con cliente HTTP mejorado
+# Inicializamos referencias a cliente HTTP y servicios para evitar errores al crear el cliente
+# de HTTP fuera de un evento async
 http_client = None
-try:
-    # Intentar usar httpx con fallback a aiohttp
-    if HTTPX_AVAILABLE:
-        http_client = httpx.AsyncClient(
-            timeout=30.0,
-            limits=httpx.Limits(max_keepalive_connections=50, max_connections=100),
-            http2=True
-        )
-        logger.info("Using httpx client for HTTP requests")
-    else:
-        # Fallback a aiohttp
-        http_client = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30)
-        )
-        logger.info("Falling back to aiohttp client")
-except Exception as e:
-    logger.error(f"Error initializing HTTP client: {e}, falling back to aiohttp")
-    http_client = aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=30)
-    )
+discovery_service = None 
+vectorization_service = None
+analysis_service = None
+graph_extraction_service = None
 
-# Inicializar servicios
-discovery_service = SchemaDiscoveryService(http_client, settings)
-vectorization_service = SchemaVectorizationService(http_client, settings)
-analysis_service = SchemaAnalysisService(settings)
-
-# Inicializar servicio de extracción de grafos
-from services.graph_extraction_service import GraphExtractionService
-graph_extraction_service = GraphExtractionService(settings)
+# Los servicios se inicializarán en el evento startup cuando estemos en un contexto async
 
 # Función para actualizar métricas periódicamente
 async def update_metrics():
@@ -179,14 +157,92 @@ async def update_metrics():
 @app.on_event("startup")
 async def startup_event():
     """Inicializar servicios al iniciar la aplicación"""
+    global http_client, discovery_service, vectorization_service, analysis_service, graph_extraction_service
+    
+    # Registrar variables de entorno y versión
     logger.info("Starting Schema Discovery Service",
                 version="1.1.0",
                 python_version=platform.python_version(),
                 uvloop_enabled=uvloop_available,
                 structlog_enabled=structlog_available)
     
+    # Registrar variables de configuración críticas
+    logger.info(f"Configuration settings:",
+                db_connection_url=settings.db_connection_url,
+                embedding_service_url=settings.embedding_service_url,
+                neo4j_uri=settings.neo4j_uri)
+    
+    # Almacenar timestamp de inicio para el uptime
+    os.environ["UPTIME"] = datetime.utcnow().isoformat()
+    
+    # Inicializar cliente HTTP con mejor manejo de errores y configuración
+    try:
+        if HTTPX_AVAILABLE:
+            import httpx
+            # Inicializar sin HTTP/2 para evitar errores con configuración mejorada
+            http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout=30.0, connect=10.0, read=30.0, write=10.0),
+                limits=httpx.Limits(max_keepalive_connections=50, max_connections=100),
+                http2=False,
+                follow_redirects=True
+            )
+            logger.info("Initialized httpx client for HTTP requests with improved settings")
+        else:
+            # Fallback a aiohttp con configuración mejorada
+            conn = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300, force_close=False)
+            http_client = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_connect=10, sock_read=30),
+                connector=conn,
+                raise_for_status=True
+            )
+            logger.info("Initialized aiohttp client with improved connection settings")
+    except Exception as e:
+        logger.error(f"Error initializing HTTP client: {e}, using basic aiohttp as fallback")
+        # Fallback básico como último recurso
+        http_client = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30)
+        )
+        logger.warning("Using basic aiohttp client with default settings - performance may be impacted")
+    
+    # Inicializar servicios con el cliente HTTP con manejo de errores específicos
+    # para cada servicio para facilitar diagnóstico
+    try:
+        # Inicializar servicio de descubrimiento
+        discovery_service = SchemaDiscoveryService(http_client, settings)
+        logger.info("Schema Discovery Service initialized successfully")
+        
+        # Inicializar servicio de vectorización
+        vectorization_service = SchemaVectorizationService(http_client, settings)
+        logger.info("Schema Vectorization Service initialized successfully")
+        
+        # Inicializar servicio de análisis
+        analysis_service = SchemaAnalysisService(settings)
+        logger.info("Schema Analysis Service initialized successfully")
+        
+        # Inicializar servicio de extracción de grafos
+        from services.graph_extraction_service import GraphExtractionService
+        graph_extraction_service = GraphExtractionService(settings)
+        logger.info("Graph Extraction Service initialized successfully")
+        
+        logger.info("All services initialized successfully and ready to handle requests")
+    except Exception as e:
+        logger.error(f"Error initializing services: {e}")
+        # Mostrar un log específico según el servicio que falló
+        if discovery_service is None:
+            logger.error("Failed to initialize SchemaDiscoveryService - service will not function correctly")
+        elif vectorization_service is None:
+            logger.error("Failed to initialize SchemaVectorizationService - vectorization features will not work")
+        elif analysis_service is None:
+            logger.error("Failed to initialize SchemaAnalysisService - analysis features will not work")
+        elif graph_extraction_service is None:
+            logger.error("Failed to initialize GraphExtractionService - graph features will not work")
+        
+        # Lanzar excepción para reiniciar el servicio
+        raise
+    
     # Iniciar tarea de actualización de métricas
     asyncio.create_task(update_metrics())
+    logger.info("Metrics monitoring started successfully")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -216,10 +272,10 @@ async def shutdown_event():
 async def metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-# Endpoint de health check optimizado
+# Endpoint de health check optimizado y ampliado
 @app.get("/health", tags=["Health"])
 async def health_check():
-    """Verificar salud del servicio"""
+    """Verificar salud del servicio y sus componentes"""
     start_time = time.time()
     
     # Preparar respuesta base
@@ -230,6 +286,21 @@ async def health_check():
         "timestamp": datetime.utcnow().isoformat(),
         "uptime": os.getenv("UPTIME", "unknown"),
     }
+    
+    # Verificar que todos los servicios estén inicializados
+    required_services = {
+        "discovery_service": discovery_service,
+        "vectorization_service": vectorization_service, 
+        "analysis_service": analysis_service,
+        "graph_extraction_service": graph_extraction_service,
+        "http_client": http_client
+    }
+    
+    missing_services = [name for name, service in required_services.items() if service is None]
+    if missing_services:
+        health_status["status"] = "critical"
+        health_status["missing_services"] = missing_services
+        health_status["service_error"] = "Critical services not initialized"
     
     # Verificar estado de memoria y eliminar jobs antiguos si es necesario
     try:
@@ -267,15 +338,58 @@ async def health_check():
             "rss_mb": round(memory_info.rss / (1024 * 1024), 2),
             "active_jobs_count": len(active_jobs),
         }
+        
+        # Verificar umbral crítico de uso de memoria (>90% del sistema disponible)
+        system_memory = psutil.virtual_memory()
+        if memory_info.rss > system_memory.total * 0.9:
+            health_status["status"] = "critical"
+            health_status["memory_warning"] = "Service is using more than 90% of system memory"
+            logger.warning("Memory usage critical", rss_mb=round(memory_info.rss / (1024 * 1024), 2))
     except Exception as e:
         logger.error("Error getting memory info", error=str(e))
         health_status["memory_usage"] = {"error": str(e)}
+    
+    # Verificar conexión con servicios dependientes
+    dependencies_status = {}
+    try:
+        # Verificar conexión con DB Connection Service
+        if http_client:
+            try:
+                async with http_client.request(
+                    "GET", 
+                    f"{settings.db_connection_url}/health", 
+                    timeout=2
+                ) as resp:
+                    if hasattr(resp, 'status_code'):  # httpx
+                        dependencies_status["db_connection"] = "ok" if resp.status_code < 400 else "error"
+                    else:  # aiohttp
+                        dependencies_status["db_connection"] = "ok" if resp.status < 400 else "error"
+            except Exception as e:
+                dependencies_status["db_connection"] = {"status": "error", "message": str(e)}
+                # Degradar estado pero no marcar como crítico, ya que puede funcionar sin esta dependencia
+                if health_status["status"] == "ok":
+                    health_status["status"] = "degraded"
+    except Exception as e:
+        dependencies_status["error"] = str(e)
+    
+    health_status["dependencies"] = dependencies_status
     
     # Añadir información de rendimiento
     duration = time.time() - start_time
     health_status["response_time_ms"] = round(duration * 1000, 2)
     
-    return health_status
+    # Determinar código de status HTTP basado en el estado del servicio
+    status_code = 200
+    if health_status["status"] == "critical":
+        status_code = 503  # Service Unavailable
+    elif health_status["status"] == "degraded":
+        status_code = 207  # Multi-Status
+        
+    return Response(
+        content=json.dumps(health_status),
+        media_type="application/json",
+        status_code=status_code
+    )
 
 @app.get("/schema/{connection_id}", response_model=DatabaseSchema, tags=["Schema Discovery"])
 async def get_schema(connection_id: str):

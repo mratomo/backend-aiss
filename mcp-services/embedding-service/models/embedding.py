@@ -2,10 +2,15 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 class EmbeddingType(str, Enum):
-    """Tipos de embeddings soportados"""
+    """
+    Tipos de embeddings soportados.
+    El sistema solo utiliza estos dos tipos, cada uno almacenado en su propia clase en Weaviate:
+    - GENERAL: embeddings para conocimiento general (áreas) -> clase GeneralKnowledge
+    - PERSONAL: embeddings para conocimiento personal (usuario) -> clase PersonalKnowledge
+    """
     GENERAL = "general"    # Conocimiento general (áreas)
     PERSONAL = "personal"  # Conocimiento personal (usuario)
 

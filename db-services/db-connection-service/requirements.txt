@@ -1,29 +1,39 @@
-fastapi==0.103.1
-uvicorn==0.23.2
-motor==3.3.1
-pymongo==4.5.0
-pydantic==2.3.0
-python-dotenv==1.0.0
-aiohttp==3.8.5
-tenacity==8.2.3
-cryptography==41.0.4
+# Numpy con versión específica para evitar problemas
+numpy<2.0.0
+
+# FastAPI y dependencias principales con versiones específicas
+fastapi==0.115.12
+starlette>=0.40.0,<0.47.0  # Versión compatible con fastapi 0.115.12
+uvicorn==0.27.0
+motor==3.7.0
+pymongo==4.9.0
+pydantic>=2.7.2,<3.0.0      # Actualizado para ser compatible con MCP 1.6.0
+pydantic-settings==2.0.3
+python-dotenv>=1.0.0,<1.1.0
+aiohttp>=3.8.5,<3.10.0
+tenacity>=8.2.3,<8.3.0
+cryptography>=41.0.4,<42.0.0
+
+# Dependencias MCP para integración con Model Context Protocol
+mcp==1.6.0                  # Biblioteca oficial MCP
+fastmcp==0.4.1              # Integración de MCP con FastAPI
 
 # Mejoras de rendimiento y robustez
-orjson==3.9.15         # Serialización JSON más rápida para FastAPI
-ujson==5.9.0           # Procesamiento JSON más rápido
-uvloop==0.19.0         # Mejora de rendimiento para asyncio (solo para Unix)
-httpx==0.25.2          # Cliente HTTP más moderno que aiohttp
-backoff==2.2.1         # Para reintentos exponenciales
-psutil==5.9.8          # Monitoreo de recursos del sistema
+orjson>=3.9.15,<4.0.0         # Serialización JSON más rápida para FastAPI
+ujson>=5.9.0,<6.0.0           # Procesamiento JSON más rápido
+uvloop>=0.19.0,<0.20.0; sys_platform != "win32"         # Mejora de rendimiento para asyncio (solo para Unix)
+httpx>=0.26.0,<0.30.0         # Cliente HTTP más moderno que aiohttp (actualizado para MCP)
+backoff>=2.2.1,<2.3.0         # Para reintentos exponenciales
+psutil>=5.9.8,<6.0.0          # Monitoreo de recursos del sistema
 
 # Monitoreo y logging
-structlog==23.2.0      # Logging estructurado
-prometheus-client==0.18.0  # Métricas y monitoreo
+structlog>=23.2.0,<24.0.0      # Logging estructurado
+prometheus-client>=0.18.0,<0.19.0  # Métricas y monitoreo
 
 # Clientes de bases de datos
-asyncpg==0.28.0       # PostgreSQL
-aiomysql==0.2.0       # MySQL
-motor==3.3.1          # MongoDB (ya incluido)
-pyodbc==5.0.1         # SQL Server
-elasticsearch==8.10.0  # Elasticsearch
-aioinflux==0.9.0      # InfluxDB
+asyncpg>=0.28.0,<0.29.0       # PostgreSQL
+aiomysql>=0.2.0,<0.3.0       # MySQL
+motor>=3.7.0          # MongoDB (ya incluido)
+pyodbc>=5.0.1,<5.1.0         # SQL Server
+elasticsearch>=8.10.0,<8.11.0  # Elasticsearch
+aioinflux>=0.9.0,<0.10.0      # InfluxDB

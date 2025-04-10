@@ -2,13 +2,14 @@
 import os
 from typing import List, Optional
 
-from pydantic import BaseSettings, Field
+from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
 class MCPSettings(BaseSettings):
     """Configuración específica para MCP"""
     server_name: str = Field(default="MCP Knowledge Server")
-    server_version: str = Field(default="1.0.0")
+    server_version: str = Field(default="1.6.0")  # Actualizado a la versión compatible más reciente
     api_route: str = Field(default="/mcp")
     sse_route: str = Field(default="/mcp/sse")
     default_system_prompt: str = Field(
@@ -17,6 +18,10 @@ class MCPSettings(BaseSettings):
                 "para responder. Si la información no está en el contexto, indica que no tienes "
                 "esa información. Proporciona respuestas detalladas y bien estructuradas."
     )
+    
+    model_config = {
+        "extra": "ignore"
+    }
 
 
 class Settings(BaseSettings):
@@ -39,23 +44,28 @@ class Settings(BaseSettings):
     # Configuración para integración con otros servicios
     embedding_service_url: str = Field(default="http://embedding-service:8084")
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "case_sensitive": False
+    }
 
     def __init__(self, **kwargs):
         """Inicializar configuraciones con valores de variables de entorno"""
+        # Procesamos primero la configuración de CORS para evitar errores de parsing JSON
+        cors_origins = os.getenv("CORS_ALLOWED_ORIGINS")
+        if cors_origins:
+            # Usamos split en lugar de intentar parsear JSON
+            if "," in cors_origins:
+                kwargs["cors_allowed_origins"] = cors_origins.split(",")
+            else:
+                kwargs["cors_allowed_origins"] = [cors_origins]
+        
         super().__init__(**kwargs)
 
         # Priorizar variables de entorno sobre valores por defecto
         self.environment = os.getenv("ENVIRONMENT", self.environment)
         self.port = int(os.getenv("PORT", str(self.port)))
-
-        # Configuración de CORS
-        cors_origins = os.getenv("CORS_ALLOWED_ORIGINS")
-        if cors_origins:
-            self.cors_allowed_origins = cors_origins.split(",")
 
         # Configuración de MongoDB
         self.mongodb_uri = os.getenv("MONGODB_URI", self.mongodb_uri)

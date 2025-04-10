@@ -45,8 +45,9 @@ class Settings(BaseSettings):
     # Suggestion promptbook paths
     PROMPT_TEMPLATES_DIR: str = "prompts"
     
-    class Config:
-        env_file = ".env"
+    model_config = {
+        "env_file": ".env"
+    }
 
 # Create global settings object
 settings = Settings()

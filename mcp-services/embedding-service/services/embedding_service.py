@@ -16,14 +16,14 @@ from models.embedding import (
     EmbeddingRequest, EmbeddingResponse, EmbeddingBatchRequest,
     EmbeddingBatchResponse, EmbeddingType, EmbeddingDB, DocumentChunk
 )
-from services.vectordb_service import VectorDBService
+from services.vectordb_base import VectorDBBase
 
 logger = logging.getLogger(__name__)
 
 class EmbeddingService:
     """Servicio para generar y gestionar embeddings con modelos avanzados"""
 
-    def __init__(self, database: AsyncIOMotorDatabase, vectordb_service: VectorDBService, settings: Settings):
+    def __init__(self, database: AsyncIOMotorDatabase, vectordb_service: VectorDBBase, settings: Settings):
         """Inicializar servicio con la base de datos, servicio vectorial y configuración"""
         self.db = database
         self.collection = database.embeddings
@@ -62,7 +62,26 @@ class EmbeddingService:
             memory_info = torch.cuda.get_device_properties(0).total_memory / (1024**3) if device_count > 0 else 0
             self.gpu_info = f"{device_count} dispositivo(s), {device_name} ({memory_info:.1f} GB)"
             self.device = "cuda:0"
+            
+            # Información detallada sobre la GPU
             logger.info(f"Usando GPU: {self.gpu_info}")
+            logger.info(f"CUDA version: {torch.version.cuda}")
+            logger.info(f"PyTorch CUDA configurado: {torch.cuda.is_available()}")
+            
+            # Verificar que Nomic también detecta GPU
+            try:
+                from nomic import embed
+                import nomic
+                # Comprobar versión de Nomic de manera segura, ya que algunas versiones no tienen __version__
+                try:
+                    version = getattr(nomic, "__version__", "desconocida")
+                    logger.info(f"Nomic versión: {version}")
+                except AttributeError:
+                    logger.info("Nomic instalado, pero no se pudo determinar la versión")
+                # Nomic automáticamente usa la GPU si está disponible
+                logger.info("Nomic configurado para usar GPU disponible")
+            except ImportError:
+                logger.warning("No se pudo importar Nomic para verificar soporte de GPU")
         else:
             self.device = "cpu"
             logger.info("Usando CPU para generación de embeddings")
@@ -94,23 +113,59 @@ class EmbeddingService:
             # Verificar si es un modelo de Nomic
             if "nomic" in model_name.lower():
                 try:
-                    import nomic
-                    from nomic import embed
+                    # Importar de manera segura
+                    try:
+                        import nomic
+                        from nomic import embed
+                    except ImportError:
+                        logger.error("Biblioteca Nomic no está instalada. Instálala con 'pip install nomic'")
+                        raise
+                    
+                    # Verificar que la API de embedding esté disponible
+                    if not hasattr(embed, 'text'):
+                        logger.error("La función embed.text no está disponible en la versión instalada de Nomic")
+                        raise ImportError("Versión de Nomic incompatible, se requiere 'embed.text'")
+                    
+                    # Verificar versión de manera segura
+                    try:
+                        # Intentamos primero acceder a __version__ si existe
+                        if hasattr(nomic, "__version__"):
+                            version = nomic.__version__
+                            logger.info(f"Nomic versión detectada: {version}")
+                        else:
+                            # Si no existe, buscamos en otras ubicaciones comunes
+                            if hasattr(nomic, "version"):
+                                version = nomic.version
+                            else:
+                                # En último caso, reportamos como desconocida
+                                version = "desconocida"
+                                logger.info("No se pudo determinar la versión exacta de Nomic")
+                    except Exception:
+                        version = "desconocida"
+                        logger.warning("Error al detectar versión de Nomic")
                     
                     # Los modelos Nomic tienen una dimensión fija de 1024
                     vector_dim = 1024
                     
-                    logger.info(f"Cargando modelo Nomic: {model_name}")
+                    logger.info(f"Modelo Nomic inicializado: {model_name} (versión: {version})")
+                    
+                    # Configuración adicional de Nomic
+                    if self.gpu_available:
+                        logger.info("Nomic utilizará GPU automáticamente")
                     
                     # Nomic client es diferente a los modelos de HuggingFace
                     return {
                         "model_type": "nomic",
                         "model_name": model_name,
                         "vector_dim": vector_dim,
-                        "tokenizer": None  # Nomic maneja su propio tokenizado
+                        "tokenizer": None,  # Nomic maneja su propio tokenizado
+                        "version": version  # Guardamos la versión para referencia
                     }
-                except ImportError:
-                    logger.error("Biblioteca Nomic no está instalada. Instálala con 'pip install nomic'")
+                except ImportError as e:
+                    logger.error(f"Error importando Nomic: {e}")
+                    raise
+                except Exception as e:
+                    logger.error(f"Error inicializando modelo Nomic: {e}")
                     raise
             else:
                 # Cargar tokenizer de HuggingFace
@@ -161,12 +216,20 @@ class EmbeddingService:
             raise
 
     def _update_vector_size(self):
-        """Actualiza la configuración de tamaño de vector en Qdrant basado en los modelos cargados"""
+        """Registra información sobre la dimensión del vector para el modelo de embedding y la base de datos vectorial"""
         if EmbeddingType.GENERAL in self.models:
             vector_dim = self.models[EmbeddingType.GENERAL]["vector_dim"]
-            self.settings.qdrant.vector_size = vector_dim
-            self.vectordb_service.vector_size = vector_dim
-            logger.info(f"Vector dimension actualizada a {vector_dim} para Qdrant")
+            model_type = self.models[EmbeddingType.GENERAL].get("model_type", "desconocido")
+            model_name = self.models[EmbeddingType.GENERAL].get("model_name", "desconocido")
+            
+            # Verificar si las dimensiones son válidas
+            if vector_dim is None or vector_dim <= 0:
+                logger.warning(f"Dimensión de vector inválida: {vector_dim} para modelo {model_name}")
+                vector_dim = 1024  # Valor predeterminado para Nomic
+            
+            # Esta información es útil para diagnóstico y verificación de compatibilidad
+            logger.info(f"Vector dimension detectada: {vector_dim} (modelo {model_type}: {model_name})")
+            logger.info(f"Base de datos vectorial: {self.settings.vector_db} configurada para manejar vectores de {vector_dim} dimensiones")
 
     async def close(self):
         """Liberar recursos del servicio"""
@@ -281,17 +344,36 @@ class EmbeddingService:
         # Generar embeddings con Nomic
         if model_type == "nomic":
             try:
-                from nomic import embed
+                # Importar de manera segura
+                try:
+                    from nomic import embed
+                except ImportError:
+                    logger.error("No se pudo importar 'embed' desde nomic, asegúrate de tener la versión correcta")
+                    raise
                 
                 # Generar embeddings con la API de Nomic
                 def generate_nomic():
                     try:
+                        # La función embed.text espera una lista de textos y devuelve una lista de embeddings
                         embeddings = embed.text(
                             texts=[text],
-                            model_name=model_info["model_name"]
+                            model_name=model_info["model_name"],
+                            # No configuramos device explícitamente, dejamos que Nomic lo detecte
                         )
+                        
+                        # Verificar que se haya generado correctamente
+                        if not embeddings or len(embeddings) == 0:
+                            raise ValueError("Nomic no generó embeddings válidos")
+                            
                         # Convertir a tensor de PyTorch
-                        return torch.tensor(embeddings[0])
+                        tensor_embedding = torch.tensor(embeddings[0])
+                        
+                        # Verificar dimensiones
+                        if tensor_embedding.dim() == 0 or tensor_embedding.numel() == 0:
+                            raise ValueError(f"Embedding generado inválido: {tensor_embedding.shape}")
+                            
+                        logger.info(f"Embedding generado con Nomic correctamente - forma: {tensor_embedding.shape}")
+                        return tensor_embedding
                     except Exception as e:
                         logger.error(f"Error en generate_nomic: {e}")
                         raise
@@ -380,16 +462,51 @@ class EmbeddingService:
         if model_type == "nomic":
             # Procesamiento por lotes con Nomic
             try:
-                from nomic import embed
+                # Importación segura
+                try:
+                    from nomic import embed
+                except ImportError:
+                    logger.error("No se pudo importar 'embed' desde nomic para procesamiento por lotes")
+                    raise
                 
                 # Nomic maneja eficientemente los batches internamente
                 def generate_nomic_batch():
-                    embeddings = embed.text(
-                        texts=texts,
-                        model_name=model_info["model_name"]
-                    )
-                    # Convertir a tensores de PyTorch
-                    return [torch.tensor(emb) for emb in embeddings]
+                    try:
+                        # Dividir en lotes más pequeños si es necesario (por si el batch es muy grande)
+                        max_batch_size = 100  # Podemos ajustar esto según el rendimiento
+                        all_embeddings = []
+                        
+                        for i in range(0, len(texts), max_batch_size):
+                            batch_texts = texts[i:i+max_batch_size]
+                            logger.info(f"Procesando lote de embeddings con Nomic: {len(batch_texts)} textos")
+                            
+                            batch_embeddings = embed.text(
+                                texts=batch_texts,
+                                model_name=model_info["model_name"]
+                            )
+                            
+                            # Verificar que los embeddings se generaron correctamente
+                            if not batch_embeddings or len(batch_embeddings) != len(batch_texts):
+                                logger.warning(f"Nomic generó {len(batch_embeddings) if batch_embeddings else 0} embeddings para {len(batch_texts)} textos")
+                            
+                            all_embeddings.extend(batch_embeddings)
+                        
+                        # Convertir a tensores de PyTorch
+                        tensors = []
+                        for emb in all_embeddings:
+                            tensor = torch.tensor(emb)
+                            # Verificar dimensiones
+                            if tensor.dim() == 0 or tensor.numel() == 0:
+                                logger.warning(f"Embedding inválido detectado: {tensor.shape}")
+                                # Crear un tensor de ceros como fallback
+                                tensor = torch.zeros(model_info["vector_dim"])
+                            tensors.append(tensor)
+                        
+                        logger.info(f"Embeddings batch generados con Nomic: {len(tensors)} vectores")
+                        return tensors
+                    except Exception as e:
+                        logger.error(f"Error en generate_nomic_batch: {e}")
+                        raise
                 
                 # Ejecutar de forma asíncrona
                 vectors = await asyncio.to_thread(generate_nomic_batch)

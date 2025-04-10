@@ -4,20 +4,24 @@ from typing import Dict, Type
 from models.models import DBType
 from .base_client import BaseDBClient
 from .postgresql_client import PostgreSQLClient
-from .mysql_client import MySQLClient
-from .mongodb_client import MongoDBClient
-from .sqlserver_client import SQLServerClient
-from .elasticsearch_client import ElasticsearchClient
-from .influxdb_client import InfluxDBClient
+from .weaviate_client import WeaviateClient
+# Importamos solo los clientes disponibles
+# from .mysql_client import MySQLClient
+# from .mongodb_client import MongoDBClient
+# from .sqlserver_client import SQLServerClient
+# from .elasticsearch_client import ElasticsearchClient
+# from .influxdb_client import InfluxDBClient
 
 # Registro de clientes por tipo de BD
 _DB_CLIENTS: Dict[DBType, Type[BaseDBClient]] = {
     DBType.POSTGRESQL: PostgreSQLClient,
-    DBType.MYSQL: MySQLClient,
-    DBType.MONGODB: MongoDBClient,
-    DBType.SQLSERVER: SQLServerClient,
-    DBType.ELASTICSEARCH: ElasticsearchClient,
-    DBType.INFLUXDB: InfluxDBClient,
+    DBType.WEAVIATE: WeaviateClient,
+    # Solo habilitamos los clientes disponibles
+    # DBType.MYSQL: MySQLClient,
+    # DBType.MONGODB: MongoDBClient,
+    # DBType.SQLSERVER: SQLServerClient,
+    # DBType.ELASTICSEARCH: ElasticsearchClient,
+    # DBType.INFLUXDB: InfluxDBClient,
 }
 
 def get_db_client(db_type: DBType) -> BaseDBClient:

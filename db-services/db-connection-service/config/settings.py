@@ -1,7 +1,8 @@
 # config/settings.py
 import os
 from typing import Dict, List, Optional, Union, Any
-from pydantic import BaseSettings, Field
+from pydantic_settings import BaseSettings
+from pydantic import Field
 
 class DatabaseConnectionSettings(BaseSettings):
     """Configuración de conexiones a bases de datos"""
@@ -52,6 +53,15 @@ class SecuritySettings(BaseSettings):
     # Hash salt para valores sensibles
     hash_salt: str = Field(default="")
 
+class MCPSettings(BaseSettings):
+    """Configuración para integración con Model Context Protocol"""
+    # URL del servicio MCP
+    service_url: str = Field(default="http://context-service:8083")
+    
+    # Configuraciones MCP
+    create_connection_contexts: bool = Field(default=True)  # Crear contextos MCP para conexiones
+    store_connections: bool = Field(default=True)           # Almacenar conexiones en MCP
+
 class Settings(BaseSettings):
     """Configuraciones para el servicio de conexión a bases de datos"""
     # Configuración del servidor
@@ -68,14 +78,19 @@ class Settings(BaseSettings):
     # Configuración de conexiones
     db_connections: DatabaseConnectionSettings = Field(default_factory=DatabaseConnectionSettings)
     
+    # Configuración de MCP (Model Context Protocol)
+    mcp: MCPSettings = Field(default_factory=MCPSettings)
+    mcp_service_url: str = Field(default="http://context-service:8083")  # Para compatibilidad
+    
     # Comunicación con otros servicios
     schema_discovery_url: str = Field(default="http://schema-discovery-service:8087")
     embedding_service_url: str = Field(default="http://embedding-service:8084")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "case_sensitive": False
+    }
     
     def __init__(self, **kwargs):
         """Inicializar configuraciones con valores de variables de entorno"""
@@ -86,9 +101,17 @@ class Settings(BaseSettings):
         self.port = int(os.getenv("PORT", str(self.port)))
         
         # Configuración de CORS
-        cors_origins = os.getenv("CORS_ALLOWED_ORIGINS")
+        cors_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
         if cors_origins:
-            self.cors_allowed_origins = cors_origins.split(",")
+            # Manejar tanto formato JSON como separado por comas
+            if cors_origins.startswith("["):
+                try:
+                    import json
+                    self.cors_allowed_origins = json.loads(cors_origins)
+                except:
+                    self.cors_allowed_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
+            else:
+                self.cors_allowed_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
         
         # MongoDB
         self.mongodb.uri = os.getenv("MONGODB_URI", self.mongodb.uri)
@@ -97,6 +120,20 @@ class Settings(BaseSettings):
         # Seguridad
         self.db_connections.encryption_key = os.getenv("DB_ENCRYPTION_KEY", self.db_connections.encryption_key)
         self.security.hash_salt = os.getenv("HASH_SALT", self.security.hash_salt)
+        
+        # Configuración MCP
+        mcp_service_url = os.getenv("MCP_SERVICE_URL")
+        if mcp_service_url:
+            self.mcp_service_url = mcp_service_url
+            self.mcp.service_url = mcp_service_url
+        
+        create_connection_contexts = os.getenv("MCP_CREATE_CONNECTION_CONTEXTS")
+        if create_connection_contexts:
+            self.mcp.create_connection_contexts = create_connection_contexts.lower() in ("true", "1", "yes")
+            
+        store_connections = os.getenv("MCP_STORE_CONNECTIONS")
+        if store_connections:
+            self.mcp.store_connections = store_connections.lower() in ("true", "1", "yes")
         
         # URLs de servicios
         self.schema_discovery_url = os.getenv("SCHEMA_DISCOVERY_URL", self.schema_discovery_url)

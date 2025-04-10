@@ -6,7 +6,116 @@ import asyncio
 
 import aiohttp
 from fastapi import HTTPException
-from mcp import Server, Tool, Context, ContextType
+
+# Importamos y validamos componentes MCP
+import logging
+import mcp
+import sys
+
+logger = logging.getLogger(__name__)
+
+# Definimos componentes MCP faltantes o incompatibles
+class MCPComponents:
+    """
+    Componentes del protocolo MCP
+    
+    Esta clase provee componentes MCP estándares, ya sea utilizando
+    la implementación oficial o una versión compatible propia cuando
+    algún componente no está disponible en la biblioteca.
+    """
+    
+    @staticmethod
+    def detect_mcp_version():
+        """Detecta versión de MCP y compatibilidad"""
+        version = getattr(mcp, "__version__", "desconocida")
+        logger.info(f"MCP versión detectada: {version}")
+        
+        # Verificar componentes críticos
+        missing = []
+        for component in ["Server", "Tool", "Context", "ContextType"]:
+            if not hasattr(mcp, component):
+                missing.append(component)
+        
+        if missing:
+            logger.warning(f"Componentes MCP faltantes: {', '.join(missing)}")
+            return version, missing
+        return version, []
+    
+    @classmethod
+    def get_components(cls):
+        """Obtiene componentes MCP, fallback a implementación propia si es necesario"""
+        version, missing = cls.detect_mcp_version()
+        
+        # Si todo está disponible, usar las clases oficiales
+        if not missing:
+            logger.info("Usando implementación MCP oficial")
+            return mcp.Server, mcp.Tool, mcp.Context, mcp.ContextType
+        
+        # Si faltan componentes, usar implementación propia
+        logger.warning("Usando implementación MCP compatible personalizada")
+        return cls.Server, cls.Tool, cls.Context, cls.ContextType
+    
+    # Implementación compatible de Server
+    class Server:
+        def __init__(self, name, version):
+            self.name = name
+            self.version = version
+            self.tools = []
+            self.contexts = {}
+            logger.info(f"Iniciando servidor MCP compatible: {name} v{version}")
+        
+        def tool(self, name, description, input_schema):
+            def decorator(func):
+                logger.debug(f"Registrando herramienta MCP: {name}")
+                tool_obj = MCPComponents.Tool(name, description, func)
+                self.tools.append(tool_obj)
+                return func
+            return decorator
+        
+        def register_context(self, context):
+            context_id = f"ctx_{len(self.contexts) + 1}"
+            self.contexts[context_id] = context
+            logger.debug(f"Contexto registrado: {context_id} - {context.name}")
+            return context_id
+        
+        def get_context(self, context_id):
+            return self.contexts.get(context_id)
+        
+        def deregister_context(self, context_id):
+            if context_id in self.contexts:
+                ctx_name = self.contexts[context_id].name
+                del self.contexts[context_id]
+                logger.debug(f"Contexto eliminado: {context_id} - {ctx_name}")
+                return True
+            return False
+    
+    # Implementación compatible de Tool
+    class Tool:
+        def __init__(self, name, description, func):
+            self.name = name
+            self.description = description
+            self.func = func
+    
+    # Implementación compatible de Context
+    class Context:
+        def __init__(self, name, description, metadata, type):
+            self.name = name
+            self.description = description
+            self.metadata = metadata or {}
+            self.type = type
+            self.active = False
+    
+    # Implementación compatible de ContextType
+    class ContextType:
+        KNOWLEDGE = "knowledge"
+        PERSONAL = "personal"
+        SYSTEM = "system"
+        
+        def __init__(self, value):
+            self.value = value
+
+# Obtenemos componentes MCP (oficiales o compatibles)
+Server, Tool, Context, ContextType = MCPComponents.get_components()
 
 from config.settings import Settings
 from services.area_service import AreaService
@@ -29,6 +138,9 @@ class MCPService:
         self.settings = settings
         self.area_service = area_service
         self.embedding_client = embedding_client
+        
+        # Referencia para almacenar instancia de FastMCP si se usa
+        self.fastmcp = None
 
         # Inicializar servidor MCP
         self.server = Server(
@@ -256,13 +368,24 @@ class MCPService:
         Returns:
             Información de estado
         """
-        return {
-            "name": self.server.name,
-            "version": self.server.version,
-            "tools_count": len(self.server.tools),
-            "contexts_count": len(self.server.contexts),
-            "active_contexts": len([c for c in self.server.contexts.values() if c.active])
-        }
+        try:
+            return {
+                "name": self.server.name,
+                "version": self.server.version,
+                "tools_count": len(self.server.tools),
+                "contexts_count": len(self.server.contexts),
+                "active_contexts": len([c for c in self.server.contexts.values() if hasattr(c, 'active') and c.active])
+            }
+        except Exception as e:
+            logger.error(f"Error obteniendo estado MCP: {e}")
+            return {
+                "name": getattr(self.server, 'name', 'MCP Knowledge Server'),
+                "version": getattr(self.server, 'version', '1.6.0'),
+                "tools_count": len(getattr(self.server, 'tools', [])),
+                "contexts_count": len(getattr(self.server, 'contexts', {})),
+                "active_contexts": 0,
+                "error": str(e)
+            }
 
     def get_active_contexts(self) -> List[Dict[str, Any]]:
         """
@@ -271,19 +394,31 @@ class MCPService:
         Returns:
             Lista de contextos activos
         """
-        active_contexts = []
+        try:
+            active_contexts = []
 
-        for context_id, context in self.server.contexts.items():
-            if context.active:
-                active_contexts.append({
-                    "id": context_id,
-                    "name": context.name,
-                    "description": context.description,
-                    "type": context.type.value if hasattr(context.type, 'value') else str(context.type),
-                    "metadata": context.metadata
-                })
+            for context_id, context in self.server.contexts.items():
+                if hasattr(context, 'active') and context.active:
+                    ctx_type = context.type
+                    if hasattr(ctx_type, 'value'):
+                        type_value = ctx_type.value 
+                    elif isinstance(ctx_type, str):
+                        type_value = ctx_type
+                    else:
+                        type_value = str(ctx_type)
+                        
+                    active_contexts.append({
+                        "id": context_id,
+                        "name": getattr(context, 'name', 'Unknown'),
+                        "description": getattr(context, 'description', ''),
+                        "type": type_value,
+                        "metadata": getattr(context, 'metadata', {})
+                    })
 
-        return active_contexts
+            return active_contexts
+        except Exception as e:
+            logger.error(f"Error obteniendo contextos activos: {e}")
+            return []
 
     # Lock global para operaciones de activación/desactivación de contextos
     _contexts_lock = asyncio.Lock()

@@ -1,7 +1,8 @@
 # config/settings.py
 import os
 from typing import Dict, List, Optional, Union, Any
-from pydantic import BaseSettings, Field
+from pydantic_settings import BaseSettings
+from pydantic import Field
 
 class SchemaSettings(BaseSettings):
     """Configuración para descubrimiento de esquemas"""
@@ -26,6 +27,15 @@ class SchemaSettings(BaseSettings):
         "include_foreign_keys": True
     })
 
+class MCPSettings(BaseSettings):
+    """Configuración para integración con Model Context Protocol"""
+    # URL del servicio MCP
+    service_url: str = Field(default="http://context-service:8083")
+    
+    # Configuraciones MCP
+    create_db_contexts: bool = Field(default=True)  # Crear contextos MCP para bases de datos
+    store_schemas: bool = Field(default=True)       # Almacenar esquemas descubiertos en MCP
+    
 class Settings(BaseSettings):
     """Configuraciones para el servicio de descubrimiento de esquemas"""
     # Configuración del servidor
@@ -40,13 +50,23 @@ class Settings(BaseSettings):
     # URL de servicio de embedding
     embedding_service_url: str = Field(default="http://embedding-service:8084")
     
+    # Configuración de MCP (Model Context Protocol)
+    mcp: MCPSettings = Field(default_factory=MCPSettings)
+    mcp_service_url: str = Field(default="http://context-service:8083")  # Para compatibilidad
+    
+    # Configuración de Weaviate
+    weaviate_url: str = Field(default="http://weaviate:8080")
+    weaviate_api_key: Optional[str] = Field(default=None)
+    vector_db: str = Field(default="weaviate")  # Tipo de base de datos vectorial a usar
+    
     # Configuración de descubrimiento de esquemas
     schema: SchemaSettings = Field(default_factory=SchemaSettings)
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "case_sensitive": False
+    }
     
     # Configuración de Neo4j para GraphRAG
     neo4j_uri: str = Field(default="bolt://neo4j:7687")
@@ -64,11 +84,38 @@ class Settings(BaseSettings):
         # Configuración de CORS
         cors_origins = os.getenv("CORS_ALLOWED_ORIGINS")
         if cors_origins:
-            self.cors_allowed_origins = cors_origins.split(",")
+            # Manejar tanto formato JSON como separado por comas
+            if cors_origins.startswith("["):
+                try:
+                    import json
+                    self.cors_allowed_origins = json.loads(cors_origins)
+                except:
+                    self.cors_allowed_origins = cors_origins.split(",")
+            else:
+                self.cors_allowed_origins = cors_origins.split(",")
         
         # URLs de servicios
         self.db_connection_url = os.getenv("DB_CONNECTION_URL", self.db_connection_url)
         self.embedding_service_url = os.getenv("EMBEDDING_SERVICE_URL", self.embedding_service_url)
+        
+        # Configuración MCP
+        mcp_service_url = os.getenv("MCP_SERVICE_URL")
+        if mcp_service_url:
+            self.mcp_service_url = mcp_service_url
+            self.mcp.service_url = mcp_service_url
+        
+        create_db_contexts = os.getenv("MCP_CREATE_DB_CONTEXTS")
+        if create_db_contexts:
+            self.mcp.create_db_contexts = create_db_contexts.lower() in ("true", "1", "yes")
+            
+        store_schemas = os.getenv("MCP_STORE_SCHEMAS")
+        if store_schemas:
+            self.mcp.store_schemas = store_schemas.lower() in ("true", "1", "yes")
+        
+        # Configuración de Weaviate
+        self.weaviate_url = os.getenv("WEAVIATE_URL", self.weaviate_url)
+        self.weaviate_api_key = os.getenv("WEAVIATE_API_KEY", self.weaviate_api_key)
+        self.vector_db = os.getenv("VECTOR_DB", self.vector_db)
         
         # Configuración de Neo4j
         self.neo4j_uri = os.getenv("NEO4J_URI", self.neo4j_uri)

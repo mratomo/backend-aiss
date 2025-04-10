@@ -16,6 +16,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from config.settings import Settings
 from models.models import DatabaseSchema, TableSchema, ColumnSchema
+from services.vectordb_factory import VectorDBFactory
+from services.vectordb_base import VectorDBBase
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,16 @@ class SchemaVectorizationService:
         self.http_client = http_client
         self.settings = settings
         self.use_httpx = HTTPX_AVAILABLE and isinstance(http_client, httpx.AsyncClient)
+        
+        # Inicializar cliente vectorial si está especificado en configuración
+        self.vector_db: Optional[VectorDBBase] = None
+        try:
+            if self.settings.vector_db:
+                self.vector_db = VectorDBFactory.create(settings)
+                logger.info(f"Inicializado cliente vectorial {self.settings.vector_db}")
+        except Exception as e:
+            logger.error(f"Error inicializando cliente vectorial: {str(e)}")
+            self.vector_db = None
 
     async def vectorize_schema(self, schema: DatabaseSchema, session: Optional[Any] = None) -> str:
         """
@@ -63,16 +75,52 @@ class SchemaVectorizationService:
             schema_hash = hashlib.md5(schema_text.encode()).hexdigest()
             vector_id = f"schema_{schema.connection_id}_{schema_hash}"
             
+            # Preparar metadata común
+            metadata = {
+                "connection_id": schema.connection_id,
+                "db_type": schema.type,
+                "name": schema.name,
+                "schema_hash": schema_hash,
+                "tables_count": len(schema.tables) if schema.tables else 0
+            }
+            
+            # Si tenemos acceso directo a la base de datos vectorial, la usamos
+            # De lo contrario, usamos el servicio de embeddings
+            if self.vector_db:
+                try:
+                    # Asegurar que existe la colección
+                    await self.vector_db.ensure_collections_exist(["database_schemas"])
+                    
+                    # Generar el vector y almacenarlo directamente
+                    embedding_response = await self._generate_embedding(schema_text, session)
+                    if embedding_response and "vector" in embedding_response:
+                        vector = embedding_response["vector"]
+                        
+                        # Almacenar vector en la base de datos vectorial
+                        await self.vector_db.store_vector(
+                            vector=vector,
+                            collection="database_schemas",
+                            entity_id=schema.connection_id,
+                            text=schema_text,
+                            metadata=metadata
+                        )
+                        
+                        logger.info(f"Vector almacenado directamente en {self.settings.vector_db} para schema {schema.connection_id}")
+                        return vector_id
+                    else:
+                        logger.error("No se pudo generar el embedding para el esquema")
+                        raise ValueError("No se pudo generar el embedding para el esquema")
+                        
+                except Exception as e:
+                    logger.error(f"Error utilizando cliente vectorial directo: {str(e)}")
+                    logger.info("Intentando con el servicio de embeddings...")
+                    # Continuamos con el servicio de embeddings
+            
+            # Método tradicional: usar el servicio de embeddings
             # Preparar payload para el servicio de embeddings
             payload = {
                 "text": schema_text,
-                "metadata": {
-                    "connection_id": schema.connection_id,
-                    "db_type": schema.type,
-                    "name": schema.name,
-                    "schema_hash": schema_hash,
-                    "tables_count": len(schema.tables) if schema.tables else 0
-                },
+                "metadata": metadata,
                 "vector_id": vector_id,
                 "collection_name": "database_schemas"
             }
@@ -121,6 +169,56 @@ class SchemaVectorizationService:
         except Exception as e:
             logger.error(f"Error vectorizing schema for {schema.connection_id}: {e}")
             raise ValueError(f"Failed to vectorize schema: {str(e)}")
+            
+    async def _generate_embedding(self, text: str, session: Optional[Any] = None) -> Dict[str, Any]:
+        """
+        Generar embedding para un texto usando el servicio de embeddings
+        
+        Args:
+            text: Texto para generar embedding
+            session: Sesión HTTP opcional
+            
+        Returns:
+            Diccionario con el vector generado
+        """
+        url = f"{self.settings.embedding_service_url}/generate_embedding"
+        payload = {"text": text}
+        
+        # Determinar qué cliente HTTP usar
+        use_provided_session = session is not None
+        http_client = session if use_provided_session else self.http_client
+        
+        # Verificar tipo de cliente HTTP
+        client_is_httpx = False
+        if HTTPX_AVAILABLE:
+            if isinstance(http_client, httpx.AsyncClient):
+                client_is_httpx = True
+            elif use_provided_session and hasattr(http_client, "request"):
+                client_is_httpx = True
+        
+        try:
+            if client_is_httpx:
+                # Usar cliente httpx
+                response = await http_client.post(url, json=payload, timeout=30.0)
+                if response.status_code != 200:
+                    error_text = response.text
+                    logger.error(f"Error generating embedding: {error_text}")
+                    return {}
+                
+                return response.json()
+            else:
+                # Usar cliente aiohttp
+                async with http_client.post(url, json=payload, timeout=30) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Error generating embedding: {error_text}")
+                        return {}
+                    
+                    return await response.json()
+                    
+        except Exception as e:
+            logger.error(f"Error generating embedding: {str(e)}")
+            return {}
 
     def _generate_schema_description(self, schema: DatabaseSchema) -> str:
         """

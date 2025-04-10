@@ -34,8 +34,25 @@ func main() {
 	router := gin.Default()
 
 	// Inicializar el manejador de configuración (para CORS dinámico)
-	configHandler := handlers.NewConfigHandler(&cfg.CorsAllowedOrigins, cfg.Environment, "config/config.yaml")
+	handlers.NewConfigHandler(&cfg.CorsAllowedOrigins, cfg.Environment, "config/config.yaml")
 	log.Printf("Configuración CORS inicial: %v", cfg.CorsAllowedOrigins)
+
+	// Inicializar los manejadores de servicios
+	handlers.NewUserHandler(cfg.User.ServiceURL)
+	log.Printf("User service URL: %s", cfg.User.ServiceURL)
+
+	// Inicializar manejador de base de datos
+	handlers.NewDBHandler(
+		cfg.Services.DBConnectionService,
+		cfg.Services.SchemaDiscoveryService,
+		cfg.Services.RagAgent,
+	)
+	log.Printf("DB Connection service URL: %s", cfg.Services.DBConnectionService)
+	log.Printf("Schema Discovery service URL: %s", cfg.Services.SchemaDiscoveryService)
+
+	// Inicializar manejador de Ollama
+	handlers.NewOllamaHandler(cfg.Services.RagAgent)
+	log.Printf("RAG Agent URL: %s", cfg.Services.RagAgent)
 
 	// Configurar CORS - versión restrictiva para configuración más segura
 	corsConfig := cors.DefaultConfig()

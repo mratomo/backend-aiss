@@ -34,9 +34,9 @@ class EmbeddingServiceClient:
         self.use_httpx = HTTPX_AVAILABLE
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((ConnectionError, TimeoutError, aiohttp.ClientError)),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=1, max=20),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError, aiohttp.ClientError, httpx.HTTPError)),
         retry_error_callback=lambda retry_state: logger.error(f"Failed embedding request after {retry_state.attempt_number} attempts")
     )
     async def create_embedding(self,
@@ -106,9 +106,9 @@ class EmbeddingServiceClient:
                 raise HTTPException(status_code=502, detail=f"Error de conexión con servicio de embeddings: {str(e)}")
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((ConnectionError, TimeoutError, aiohttp.ClientError)),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=1, max=20),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError, aiohttp.ClientError, httpx.HTTPError)),
         retry_error_callback=lambda retry_state: logger.error(f"Failed embedding search after {retry_state.attempt_number} attempts")
     )
     async def search(self,

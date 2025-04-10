@@ -4,20 +4,36 @@ from typing import List, Optional
 from bson import ObjectId
 from pydantic import BaseModel, Field
 
-class PyObjectId(ObjectId):
+class PyObjectId(str):
+    """
+    Una clase personalizada para convertir ObjectIds de MongoDB a/desde strings.
+    Esta implementación es compatible con Pydantic v2.
+    """
+    
     @classmethod
     def __get_validators__(cls):
         yield cls.validate
-
+        
     @classmethod
     def validate(cls, v):
-        if not ObjectId.is_valid(v):
-            raise ValueError("Invalid ObjectId")
-        return ObjectId(v)
-
+        if not isinstance(v, (str, ObjectId)):
+            raise TypeError("ObjectId required")
+        
+        if isinstance(v, str):
+            if not ObjectId.is_valid(v):
+                raise ValueError("Invalid ObjectId format")
+            return str(v)
+            
+        return str(v)
+    
     @classmethod
     def __modify_schema__(cls, field_schema):
         field_schema.update(type="string")
+    
+    @classmethod
+    def __get_pydantic_json_schema__(cls, field_schema, **kwargs):
+        field_schema.update(type="string")
+        return field_schema
 
 class GlobalSystemPromptUpdate(BaseModel):
     """Modelo para actualizar el prompt de sistema global"""
@@ -42,10 +58,11 @@ class LLMSettingsDB(BaseModel):
     last_updated: datetime = Field(default_factory=datetime.utcnow)
     updated_by: Optional[str] = Field(None, description="ID del usuario que realizó la última actualización")
 
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str}
+    }
 
 class LLMSettingsResponse(BaseModel):
     """Respuesta con configuraciones de LLM"""

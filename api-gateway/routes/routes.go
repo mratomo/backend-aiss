@@ -10,83 +10,50 @@ import (
 
 // SetupRoutes configura todas las rutas de la aplicación
 func SetupRoutes(router *gin.Engine, cfg *config.Config) {
+	// Inicializar middlewares
+	authMiddleware := middleware.NewAuthMiddleware(cfg.Auth.Secret)
+	adminMiddleware := middleware.NewAdminMiddleware(cfg.User.ServiceURL)
+
 	// Middleware global
-	router.Use(middleware.Logger())
-	router.Use(middleware.CORS())
+	router.Use(middleware.RequestLogger())
 
 	// Ruta de health check
 	router.GET("/health", handlers.HealthCheck)
+	router.GET("/api/health", handlers.HealthCheck)
 
 	// Rutas públicas
 	public := router.Group("/api/v1")
 	{
-		public.POST("/auth/login", handlers.Login)
-		public.POST("/auth/refresh", handlers.RefreshToken)
+		public.POST("/auth/login", handlers.GetUserHandler().Login)
+		public.POST("/auth/refresh", handlers.GetUserHandler().RefreshToken)
 	}
 
 	// Rutas protegidas
 	api := router.Group("/api/v1")
-	api.Use(middleware.AuthRequired())
+	api.Use(authMiddleware.Authenticate())
 	{
 		// Usuarios
 		users := api.Group("/users")
 		{
-			users.GET("", handlers.GetUsers)
-			users.GET("/:id", handlers.GetUser)
-			users.POST("", middleware.AdminRequired(), handlers.CreateUser)
-			users.PUT("/:id", handlers.UpdateUser)
-			users.DELETE("/:id", middleware.AdminRequired(), handlers.DeleteUser)
+			users.GET("", adminMiddleware.AdminOnly(), handlers.GetUserHandler().GetAllUsers)
+			users.GET("/:id", handlers.GetUserHandler().GetUserByID)
+			users.POST("", adminMiddleware.AdminOnly(), handlers.GetUserHandler().Register)
+			users.PUT("/:id", handlers.GetUserHandler().UpdateUser)
+			users.DELETE("/:id", adminMiddleware.AdminOnly(), handlers.GetUserHandler().DeleteUser)
+			users.PUT("/:id/password", handlers.GetUserHandler().ChangePassword)
 		}
 
-		// Documentos
-		documents := api.Group("/documents")
+		// Configuración del sistema
+		systemConfig := api.Group("/system/config")
 		{
-			documents.GET("", handlers.GetDocuments)
-			documents.GET("/:id", handlers.GetDocument)
-			documents.POST("", handlers.UploadDocument)
-			documents.PUT("/:id", handlers.UpdateDocument)
-			documents.DELETE("/:id", handlers.DeleteDocument)
-			documents.GET("/:id/content", handlers.GetDocumentContent)
-			documents.GET("/search", handlers.SearchDocuments)
+			// CORS - Especialmente útil para entornos locales
+			systemConfig.GET("/cors", handlers.GetConfigHandlerInstance().GetCorsConfig)
+			systemConfig.PUT("/cors", handlers.GetConfigHandlerInstance().UpdateCorsConfig)
 		}
 
-		// Áreas de conocimiento
-		areas := api.Group("/areas")
-		{
-			areas.GET("", handlers.GetAreas)
-			areas.GET("/:id", handlers.GetArea)
-			areas.POST("", middleware.AdminRequired(), handlers.CreateArea)
-			areas.PUT("/:id", middleware.AdminRequired(), handlers.UpdateArea)
-			areas.DELETE("/:id", middleware.AdminRequired(), handlers.DeleteArea)
-			areas.GET("/:id/primary-llm", handlers.GetAreaPrimaryLLM)
-			areas.PUT("/:id/primary-llm", middleware.AdminRequired(), handlers.UpdateAreaPrimaryLLM)
-		}
-
-		// RAG
-		rag := api.Group("/rag")
-		{
-			rag.POST("/query", handlers.ProcessQuery)
-			rag.GET("/history", handlers.GetQueryHistory)
-			rag.GET("/history/:id", handlers.GetQueryDetail)
-		}
-
-		// Configuración de LLM
-		llm := api.Group("/llm")
-		{
-			llm.GET("/providers", handlers.GetLLMProviders)
-			llm.GET("/providers/:id", handlers.GetLLMProvider)
-			llm.POST("/providers", middleware.AdminRequired(), handlers.CreateLLMProvider)
-			llm.PUT("/providers/:id", middleware.AdminRequired(), handlers.UpdateLLMProvider)
-			llm.DELETE("/providers/:id", middleware.AdminRequired(), handlers.DeleteLLMProvider)
-			llm.POST("/providers/:id/test", middleware.AdminRequired(), handlers.TestLLMProvider)
-
-			llm.GET("/settings", handlers.GetLLMSettings)
-			llm.PUT("/settings", middleware.AdminRequired(), handlers.UpdateLLMSettings)
-		}
-
-		// Nuevas rutas para conexiones de BD
+		// DB Connections
 		dbConnections := api.Group("/db-connections")
-		dbConnections.Use(middleware.AdminRequired()) // Solo administradores pueden gestionar conexiones
+		dbConnections.Use(adminMiddleware.AdminOnly()) // Solo administradores pueden gestionar conexiones
 		{
 			dbConnections.GET("", handlers.GetDBConnections)
 			dbConnections.GET("/:id", handlers.GetDBConnection)
@@ -97,26 +64,23 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 			dbConnections.GET("/:id/schema", handlers.GetDBConnectionSchema)
 		}
 
-		// Rutas para configuración de agentes DB
+		// DB Agents
 		dbAgents := api.Group("/db-agents")
+		dbAgents.Use(adminMiddleware.AdminOnly()) // Solo administradores pueden gestionar agentes
 		{
 			dbAgents.GET("", handlers.GetDBAgents)
 			dbAgents.GET("/:id", handlers.GetDBAgent)
-			dbAgents.POST("", middleware.AdminRequired(), handlers.CreateDBAgent)
-			dbAgents.PUT("/:id", middleware.AdminRequired(), handlers.UpdateDBAgent)
-			dbAgents.DELETE("/:id", middleware.AdminRequired(), handlers.DeleteDBAgent)
-
-			// Configuración de prompts para agentes
+			dbAgents.POST("", handlers.CreateDBAgent)
+			dbAgents.PUT("/:id", handlers.UpdateDBAgent)
+			dbAgents.DELETE("/:id", handlers.DeleteDBAgent)
 			dbAgents.GET("/:id/prompts", handlers.GetDBAgentPrompts)
-			dbAgents.PUT("/:id/prompts", middleware.AdminRequired(), handlers.UpdateDBAgentPrompts)
-
-			// Asignación de conexiones a agentes
+			dbAgents.PUT("/:id/prompts", handlers.UpdateDBAgentPrompts)
 			dbAgents.GET("/:id/connections", handlers.GetDBAgentConnections)
-			dbAgents.POST("/:id/connections", middleware.AdminRequired(), handlers.AssignDBConnectionToAgent)
-			dbAgents.DELETE("/:id/connections/:connectionId", middleware.AdminRequired(), handlers.RemoveDBConnectionFromAgent)
+			dbAgents.POST("/:id/connections", handlers.AssignDBConnectionToAgent)
+			dbAgents.DELETE("/:id/connections/:connectionId", handlers.RemoveDBConnectionFromAgent)
 		}
 
-		// Consultas a BD a través de agentes
+		// DB Queries
 		dbQueries := api.Group("/db-queries")
 		{
 			dbQueries.POST("", handlers.ProcessDBQuery)
@@ -124,31 +88,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config) {
 			dbQueries.GET("/history/:id", handlers.GetDBQueryDetail)
 		}
 
-		// Configuración de Ollama
+		// Ollama Models
 		ollama := api.Group("/ollama")
-		ollama.Use(middleware.AdminRequired())
+		ollama.Use(adminMiddleware.AdminOnly()) // Solo administradores pueden gestionar modelos
 		{
 			ollama.GET("/models", handlers.GetOllamaModels)
 			ollama.POST("/models/pull", handlers.PullOllamaModel)
 			ollama.DELETE("/models/:name", handlers.DeleteOllamaModel)
 			ollama.GET("/settings", handlers.GetOllamaSettings)
 			ollama.PUT("/settings", handlers.UpdateOllamaSettings)
-		}
-	}
-
-	// Admin panel
-	admin := router.Group("/admin")
-	admin.Use(middleware.AuthRequired(), middleware.AdminRequired())
-	{
-		admin.GET("/system/status", handlers.GetSystemStatus)
-		admin.GET("/system/logs", handlers.GetSystemLogs)
-
-		// Configuración del sistema
-		systemConfig := admin.Group("/system/config")
-		{
-			// CORS - Especialmente útil para entornos locales
-			systemConfig.GET("/cors", handlers.ConfigHandlerInstance.GetCorsConfig)
-			systemConfig.PUT("/cors", handlers.ConfigHandlerInstance.UpdateCorsConfig)
 		}
 	}
 }

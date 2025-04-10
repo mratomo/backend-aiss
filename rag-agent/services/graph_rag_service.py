@@ -21,7 +21,20 @@ from models.embedding import EmbeddingType
 from models.query import Source, QueryResponse
 from services.llm_service import LLMService
 from services.retrieval_service import RetrievalService, DocumentInfo
-from services.mcp_service import MCPService
+try:
+    from services.mcp_service import MCPService
+except ImportError:
+    # Fallback si hay problemas al importar MCPService
+    logger = logging.getLogger(__name__)
+    logger.error("Error importando MCPService, creando clase stub")
+    
+    class MCPService:
+        """Stub para MCPService en caso de error de importación"""
+        def __init__(self, *args, **kwargs):
+            pass
+        
+        async def query(self, *args, **kwargs):
+            return {"error": "MCPService no disponible"}
 
 logger = logging.getLogger(__name__)
 

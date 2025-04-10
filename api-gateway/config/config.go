@@ -16,19 +16,33 @@ type Config struct {
 	Environment        string
 	CorsAllowedOrigins []string
 	Services           ServiceEndpoints
-	AuthSecret         string
-	JWTExpirationHours int
+	Auth               AuthConfig
+	User               UserConfig
 }
 
 // ServiceEndpoints contiene las URLs de los servicios internos
 type ServiceEndpoints struct {
-	UserService            string
-	DocumentService        string
-	ContextService         string
-	EmbeddingService       string
-	RagAgent               string
-	TerminalGatewayService string
-	TerminalSessionService string
+	UserService                string
+	DocumentService            string
+	ContextService             string
+	EmbeddingService           string
+	RagAgent                   string
+	TerminalGatewayService     string
+	TerminalSessionService     string
+	DBConnectionService        string
+	SchemaDiscoveryService     string
+	AttackVulnerabilityService string
+}
+
+// AuthConfig configuración para autenticación
+type AuthConfig struct {
+	Secret          string
+	ExpirationHours int
+}
+
+// UserConfig configuración para el servicio de usuarios
+type UserConfig struct {
+	ServiceURL string
 }
 
 // LoadConfig carga la configuración desde archivo o variables de entorno
@@ -66,8 +80,11 @@ func LoadConfig() (*Config, error) {
 	viper.SetDefault("services.contextService", "http://context-service:8083")
 	viper.SetDefault("services.embeddingService", "http://embedding-service:8084")
 	viper.SetDefault("services.ragAgent", "http://rag-agent:8085")
-	viper.SetDefault("services.terminalGatewayService", "http://terminal-gateway-service:8086")
-	viper.SetDefault("services.terminalSessionService", "http://terminal-session-service:8087")
+	viper.SetDefault("services.terminalGatewayService", "http://terminal-gateway-service:8090")
+	viper.SetDefault("services.terminalSessionService", "http://terminal-session-service:8091")
+	viper.SetDefault("services.dbConnectionService", "http://db-connection-service:8086")
+	viper.SetDefault("services.schemaDiscoveryService", "http://schema-discovery-service:8087")
+	viper.SetDefault("services.attackVulnerabilityService", "http://attack-vulnerability-service:8092")
 
 	// Intentar leer el archivo
 	if err := viper.ReadInConfig(); err != nil {
@@ -129,16 +146,24 @@ func LoadConfig() (*Config, error) {
 		Port:               viper.GetString("port"),
 		Environment:        environment,
 		CorsAllowedOrigins: corsAllowedOrigins,
-		AuthSecret:         viper.GetString("authSecret"),
-		JWTExpirationHours: viper.GetInt("jwtExpirationHours"),
+		Auth: AuthConfig{
+			Secret:          viper.GetString("authSecret"),
+			ExpirationHours: viper.GetInt("jwtExpirationHours"),
+		},
+		User: UserConfig{
+			ServiceURL: viper.GetString("services.userService"),
+		},
 		Services: ServiceEndpoints{
-			UserService:            viper.GetString("services.userService"),
-			DocumentService:        viper.GetString("services.documentService"),
-			ContextService:         viper.GetString("services.contextService"),
-			EmbeddingService:       viper.GetString("services.embeddingService"),
-			RagAgent:               viper.GetString("services.ragAgent"),
-			TerminalGatewayService: viper.GetString("services.terminalGatewayService"),
-			TerminalSessionService: viper.GetString("services.terminalSessionService"),
+			UserService:                viper.GetString("services.userService"),
+			DocumentService:            viper.GetString("services.documentService"),
+			ContextService:             viper.GetString("services.contextService"),
+			EmbeddingService:           viper.GetString("services.embeddingService"),
+			RagAgent:                   viper.GetString("services.ragAgent"),
+			TerminalGatewayService:     viper.GetString("services.terminalGatewayService"),
+			TerminalSessionService:     viper.GetString("services.terminalSessionService"),
+			DBConnectionService:        viper.GetString("services.dbConnectionService"),
+			SchemaDiscoveryService:     viper.GetString("services.schemaDiscoveryService"),
+			AttackVulnerabilityService: viper.GetString("services.attackVulnerabilityService"),
 		},
 	}, nil
 }

@@ -47,8 +47,9 @@ class Settings(BaseSettings):
         if not self.JWT_SECRET:
             raise ValueError("JWT_SECRET environment variable is required")
     
-    class Config:
-        env_file = ".env"
+    model_config = {
+        "env_file": ".env"
+    }
 
 # Create global settings object
 settings = Settings()

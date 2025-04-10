@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -10,16 +9,15 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"terminal-session-service/models"
-	"terminal-session-service/repositories"
 )
 
 // QueryModeHandler handles queries related to terminal session query mode
 type QueryModeHandler struct {
-	repository *repositories.MongoDBRepository
+	repository SessionRepository
 }
 
 // NewQueryModeHandler creates a new QueryModeHandler
-func NewQueryModeHandler(repository *repositories.MongoDBRepository) *QueryModeHandler {
+func NewQueryModeHandler(repository SessionRepository) *QueryModeHandler {
 	return &QueryModeHandler{
 		repository: repository,
 	}
@@ -31,8 +29,8 @@ func (h *QueryModeHandler) UpdateSessionMode(c *gin.Context) {
 
 	// Parse request
 	var updateRequest struct {
-		Mode    string `json:"mode" binding:"required,oneof=normal query"`
-		AreaID  string `json:"area_id"`
+		Mode   string `json:"mode" binding:"required,oneof=normal query"`
+		AreaID string `json:"area_id"`
 	}
 
 	if err := c.ShouldBindJSON(&updateRequest); err != nil {
@@ -56,13 +54,13 @@ func (h *QueryModeHandler) UpdateSessionMode(c *gin.Context) {
 
 	// Create a mode change log entry
 	modeChangeLog := models.SessionModeChange{
-		ID:          primitive.NewObjectID(),
-		SessionID:   sessionID,
-		UserID:      userID.(string),
+		ID:           primitive.NewObjectID(),
+		SessionID:    sessionID,
+		UserID:       userID.(string),
 		PreviousMode: "", // We don't track this on the server side
-		NewMode:     updateRequest.Mode,
-		AreaID:      updateRequest.AreaID,
-		Timestamp:   time.Now(),
+		NewMode:      updateRequest.Mode,
+		AreaID:       updateRequest.AreaID,
+		Timestamp:    time.Now(),
 	}
 
 	// Save mode change log
@@ -109,21 +107,21 @@ func (h *QueryModeHandler) GetSessionContext(c *gin.Context) {
 	if len(commandHistory) > 0 {
 		commandTexts := make([]string, 0, len(commandHistory))
 		outputs := make([]string, 0, len(commandHistory))
-		
+
 		for _, cmd := range commandHistory {
 			commandTexts = append(commandTexts, cmd.CommandText)
 			if cmd.Output != "" {
 				outputs = append(outputs, cmd.Output)
 			}
 		}
-		
+
 		context["recent_commands"] = commandTexts
 		context["recent_outputs"] = outputs
 	}
 
 	// Add user ID to context
 	context["user_id"] = userID.(string)
-	
+
 	c.JSON(http.StatusOK, context)
 }
 

@@ -13,7 +13,39 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
-from fastmcp import MountMCP
+
+# Configurar logging primero para tener mejores mensajes de error
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("context_service")
+
+# Importación directa de FastMCP - CRÍTICO: debe estar disponible
+try:
+    import mcp
+    from fastmcp import FastMCP
+    from fastapi import FastAPI
+    
+    # Verificar la versión de las bibliotecas
+    mcp_version = getattr(mcp, "__version__", "desconocida")
+    fastmcp_version = getattr(FastMCP, "__version__", "desconocida")
+    
+    logger.info(f"MCP importado correctamente (versión: {mcp_version})")
+    logger.info(f"FastMCP importado correctamente (versión: {fastmcp_version})")
+    
+    # Validar que FastMCP funcione como app montable en FastAPI
+    # Verificamos que tenga las características necesarias
+    is_valid_app = hasattr(FastMCP, "__init__") and hasattr(FastMCP, "__call__")
+    USE_FASTMCP = is_valid_app
+    
+    if USE_FASTMCP:
+        logger.info("FastMCP parece compatible con FastAPI")
+    else:
+        logger.warning("FastMCP está instalado pero no parece compatible con FastAPI")
+except ImportError as e:
+    logger.error(f"Error importando MCP o FastMCP: {e}")
+    USE_FASTMCP = False
 
 # Mejoras de rendimiento
 try:
@@ -167,8 +199,267 @@ context_service = ContextService(db)
 embedding_client = EmbeddingServiceClient(settings)
 mcp_service = MCPService(settings, area_service, embedding_client)
 
-# Montar servidor MCP usando FastMCP
-MountMCP(app, mcp_service.server, settings.mcp.api_route)
+# Configuración de integración MCP con FastAPI
+# Usamos implementación Starlette/FastAPI - MCP
+from fastapi import APIRouter
+
+if USE_FASTMCP:
+    try:
+        logger.info(f"Configurando MCP como router FastAPI en ruta: {settings.mcp.api_route}")
+        
+        # Crear un router FastAPI dedicado para los endpoints MCP
+        mcp_router = APIRouter(prefix=settings.mcp.api_route, tags=["MCP"])
+        
+        # Crear una instancia de FastMCP para gestionar herramientas
+        mcp_app = FastMCP(name="MCP Knowledge Server")
+        
+        # Registrar herramientas en FastMCP
+        @mcp_app.tool(name="store_document", 
+                  description="Almacena un texto en la base de conocimiento vectorial")
+        async def store_document_tool(information: str, metadata: dict = None):
+            """Almacena un texto en la base de conocimiento"""
+            if not metadata:
+                metadata = {}
+            
+            # Llamamos a la implementación existente
+            for tool in mcp_service.server.tools:
+                if tool.name == "store_document":
+                    return await tool.func(information=information, metadata=metadata)
+            
+            return "Herramienta no disponible"
+        
+        @mcp_app.tool(name="find_relevant", 
+                  description="Busca en la base de conocimiento los textos más similares a una consulta")
+        async def find_relevant_tool(query: str, embedding_type: str = "general", 
+                       owner_id: str = None, area_id: str = None, limit: int = 5):
+            """Busca información relevante para una consulta"""
+            for tool in mcp_service.server.tools:
+                if tool.name == "find_relevant":
+                    return await tool.func(
+                        query=query, 
+                        embedding_type=embedding_type, 
+                        owner_id=owner_id, 
+                        area_id=area_id, 
+                        limit=limit
+                    )
+            
+            return ["Herramienta no disponible"]
+        
+        # Almacenar referencia a FastMCP en servicio MCP
+        mcp_service.fastmcp = mcp_app
+        
+        # Implementar endpoints MCP estándar como rutas FastAPI
+        
+        # Endpoint de estado
+        @mcp_router.get("/status")
+        async def mcp_status():
+            """Obtener estado del servidor MCP"""
+            try:
+                # Obtener información básica de estado
+                status = mcp_service.get_status()
+                # La función list_tools es asincrónica en FastMCP, debemos esperarla
+                try:
+                    tools = await mcp_app.list_tools()
+                    status["tools"] = tools
+                except Exception as tool_error:
+                    logger.error(f"Error obteniendo herramientas: {tool_error}")
+                    status["tools"] = []
+                return status
+            except Exception as e:
+                logger.error(f"Error en endpoint MCP status: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=str(e)
+                )
+        
+        # Endpoint de herramientas
+        @mcp_router.get("/tools")
+        async def mcp_tools():
+            """Listar herramientas MCP disponibles"""
+            try:
+                # list_tools es asincrónica, debemos esperarla
+                tools = await mcp_app.list_tools()
+                return {"tools": tools}
+            except Exception as e:
+                logger.error(f"Error en endpoint MCP tools: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=str(e)
+                )
+        
+        # Endpoint para contextos activos
+        @mcp_router.get("/active-contexts")
+        async def mcp_active_contexts():
+            """Obtener contextos activos MCP"""
+            try:
+                return mcp_service.get_active_contexts()
+            except Exception as e:
+                logger.error(f"Error en endpoint MCP active-contexts: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=str(e)
+                )
+        
+        # Endpoint para llamar a herramientas
+        @mcp_router.post("/tools/{tool_name}")
+        async def call_tool(tool_name: str, request: Request):
+            """Llamar a una herramienta MCP por nombre"""
+            try:
+                # Recibir datos del request
+                data = await request.json()
+                
+                # Transformar el formato del nombre de la herramienta
+                # Las URLs pueden tener guión, pero nuestras herramientas usan guión bajo
+                tool_name_normalized = tool_name.replace("-", "_")
+                logger.info(f"Comprobando herramienta: {tool_name} (normalizado a: {tool_name_normalized})")
+                
+                # Simplificamos la verificación de herramientas
+                # Nos limitamos a las herramientas conocidas
+                if tool_name_normalized in ["store_document", "find_relevant"]:
+                    tool_exists = True
+                    # Usaremos el nombre normalizado para buscar la herramienta
+                    tool_name = tool_name_normalized
+                else:
+                    tool_exists = False
+                    logger.warning(f"Herramienta desconocida: {tool_name}")
+                
+                if not tool_exists:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Tool not found: {tool_name}"
+                    )
+                
+                logger.info(f"Llamando a herramienta {tool_name} con parámetros: {data}")
+                
+                # Las herramientas registradas directamente en MCPService
+                if tool_name == "store_document":
+                    for tool in mcp_service.server.tools:
+                        if tool.name == "store_document":
+                            result = await tool.func(
+                                information=data.get("information", ""), 
+                                metadata=data.get("metadata", {})
+                            )
+                            return {"result": result}
+                            
+                elif tool_name == "find_relevant":
+                    for tool in mcp_service.server.tools:
+                        if tool.name == "find_relevant":
+                            result = await tool.func(
+                                query=data.get("query", ""),
+                                embedding_type=data.get("embedding_type", "general"),
+                                owner_id=data.get("owner_id"),
+                                area_id=data.get("area_id"),
+                                limit=data.get("limit", 5)
+                            )
+                            return {"result": result}
+                
+                # Si no se ha manejado por las funciones anteriores,
+                # intentar llamar a través de FastMCP
+                try:
+                    result = await mcp_app.call_tool(tool_name, **data)
+                    return {"result": result}
+                except Exception as tool_err:
+                    logger.error(f"Error usando FastMCP call_tool: {tool_err}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Error en call_tool: {str(tool_err)}"
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Error calling tool {tool_name}: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=str(e)
+                )
+        
+        # Incluir el router MCP en la aplicación principal
+        app.include_router(mcp_router)
+        logger.info("MCP Router incluido en FastAPI correctamente")
+        
+    except Exception as e:
+        logger.error(f"Error configurando MCP en FastAPI: {str(e)}")
+        logger.error(f"Detalle del error: {type(e).__name__}: {str(e)}")
+        USE_FASTMCP = False
+
+# Si no podemos usar FastMCP o falló el montaje, implementamos manualmente
+if not USE_FASTMCP:
+    logger.info(f"Implementando rutas MCP manualmente en: {settings.mcp.api_route}")
+    
+    # Status endpoint
+    @app.get(f"{settings.mcp.api_route}/status", tags=["MCP"])
+    async def mcp_status():
+        """Obtener estado del servidor MCP"""
+        try:
+            return mcp_service.get_status()
+        except Exception as e:
+            logger.error(f"Error al obtener estado MCP: {str(e)}")
+            return {
+                "name": "MCP Knowledge Server",
+                "version": settings.mcp.server_version,
+                "status": "error",
+                "error": str(e)
+            }
+    
+    # Active contexts endpoint
+    @app.get(f"{settings.mcp.api_route}/active-contexts", tags=["MCP"])
+    async def mcp_active_contexts():
+        """Obtener contextos activos"""
+        try:
+            return mcp_service.get_active_contexts()
+        except Exception as e:
+            logger.error(f"Error al obtener contextos activos MCP: {str(e)}")
+            return []
+    
+    # Store document tool
+    @app.post(f"{settings.mcp.api_route}/tools/store-document", tags=["MCP Tools"])
+    async def mcp_store_document(request: Request):
+        """Almacenar documento en MCP"""
+        try:
+            data = await request.json()
+            information = data.get("information", "")
+            metadata = data.get("metadata", {})
+            
+            # Buscar la herramienta por nombre
+            for tool in mcp_service.server.tools:
+                if tool.name == "store_document":
+                    result = await tool.func(information=information, metadata=metadata)
+                    return {"result": result}
+            
+            return {"error": "Herramienta store_document no encontrada"}
+        except Exception as e:
+            logger.error(f"Error al almacenar documento: {str(e)}")
+            return {"error": str(e)}
+    
+    # Find relevant tool
+    @app.post(f"{settings.mcp.api_route}/tools/find-relevant", tags=["MCP Tools"])
+    async def mcp_find_relevant(request: Request):
+        """Buscar información relevante en MCP"""
+        try:
+            data = await request.json()
+            query = data.get("query", "")
+            embedding_type = data.get("embedding_type", "general")
+            owner_id = data.get("owner_id")
+            area_id = data.get("area_id")
+            limit = data.get("limit", 5)
+            
+            # Obtener herramienta directamente
+            for tool in mcp_service.server.tools:
+                if tool.name == "find_relevant":
+                    result = await tool.func(
+                        query=query, 
+                        embedding_type=embedding_type, 
+                        owner_id=owner_id, 
+                        area_id=area_id, 
+                        limit=limit
+                    )
+                    return {"results": result}
+            
+            return {"error": "Herramienta find_relevant no encontrada"}
+        except Exception as e:
+            logger.error(f"Error al buscar información relevante: {str(e)}")
+            return {"error": str(e)}
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -185,29 +476,39 @@ async def startup_event():
         asyncio.create_task(update_metrics())
         logger.info("Metrics monitoring started")
     
-    # Verificar conexión a MongoDB
+    # Verificar conexión a MongoDB con mayor tolerancia a fallos
     logger.info("Connecting to MongoDB...")
+    connected = False
+    max_attempts = 10  # Aumentamos número de intentos
+    
     try:
-        for attempt in range(1, 6):
+        for attempt in range(1, max_attempts + 1):
             try:
                 await motor_client.admin.command("ping")
-                logger.info("Successfully connected to MongoDB")
+                logger.info(f"Successfully connected to MongoDB on attempt {attempt}")
                 if prometheus_available:
                     DB_OPERATIONS.labels(operation="connect", status="success").inc()
+                connected = True
                 break
             except Exception as e:
-                if attempt < 5:
-                    wait_time = 2 ** attempt  # Espera exponencial
-                    logger.warning(f"MongoDB connection attempt {attempt} failed. Retrying in {wait_time}s...", error=str(e))
+                if attempt < max_attempts:
+                    wait_time = min(2 ** attempt, 30)  # Espera exponencial con máximo de 30 segundos
+                    logger.warning(f"MongoDB connection attempt {attempt}/{max_attempts} failed. Retrying in {wait_time}s...", error=str(e))
                     await asyncio.sleep(wait_time)
                 else:
-                    logger.error(f"Failed to connect to MongoDB after 5 attempts", error=str(e))
+                    logger.error(f"Failed to connect to MongoDB after {max_attempts} attempts", error=str(e))
                     if prometheus_available:
                         DB_OPERATIONS.labels(operation="connect", status="error").inc()
-                    raise
+        
+        # Si después de todos los intentos aún no se ha conectado pero no queremos fallar completamente
+        if not connected:
+            logger.warning("Unable to establish initial MongoDB connection; service will continue and retry later")
+            # No lanzamos excepción para permitir que el servicio continúe y reintente en las operaciones
+            
     except Exception as e:
-        logger.error("Error connecting to MongoDB", error=str(e))
-        raise
+        logger.error("Unexpected error connecting to MongoDB", error=str(e))
+        # No lanzamos excepción para permitir que el servicio continúe
+        logger.warning("Service will continue despite MongoDB connection issues")
 
 
 @app.on_event("shutdown")
@@ -619,6 +920,94 @@ async def get_active_contexts():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error getting active contexts: {str(e)}"
+        )
+
+
+# ----- Extensiones MCP para integración con terminal -----
+
+class TerminalContextRequest(BaseModel):
+    """
+    Request model for terminal context retrieval
+    
+    Esta es una extensión del protocolo MCP estándar para permitir
+    la recuperación de contexto específico para terminales.
+    """
+    query: str
+    context: Dict[str, Any]
+    max_results: Optional[int] = Field(default=5)
+
+@app.post("/api/v1/context/retrieve", tags=["MCP-Extension"])
+async def retrieve_terminal_context(request: TerminalContextRequest):
+    """
+    Retrieve relevant context for a terminal command/query
+    
+    This is an MCP extension designed to work with the terminal context aggregator.
+    It provides a standardized way to retrieve relevant context for terminal commands
+    and integrates with the MCP standard tools.
+    """
+    try:
+        query = request.query
+        terminal_context = request.context.get("terminal_context", {})
+        user_id = request.context.get("user_id")
+        
+        # Check if we have the information we need
+        if not query or not user_id:
+            return {
+                "relevant_context": [],
+                "context_score": 0,
+                "message": "Missing required information in request"
+            }
+        
+        # Construct a rich query combining the query with terminal context
+        rich_query = f"""Query: {query}
+Current directory: {terminal_context.get('current_directory')}
+Current user: {terminal_context.get('current_user')}
+Recent commands: {terminal_context.get('command_history', '')}
+"""
+        
+        # Use the MCP find_relevant tool to find relevant information
+        try:
+            # Find any contexts associated with the user
+            contexts = await mcp_service.server.tools[0].func(
+                query=rich_query,
+                embedding_type="general",
+                limit=request.max_results
+            )
+            
+            if isinstance(contexts, list) and contexts:
+                return {
+                    "relevant_context": contexts,
+                    "context_score": 0.8,
+                    "message": "Found relevant context using MCP"
+                }
+            else:
+                # Try a more generic search if user-specific search yields no results
+                contexts = await mcp_service.server.tools[0].func(
+                    query=query,
+                    embedding_type="general",
+                    limit=request.max_results
+                )
+                
+                return {
+                    "relevant_context": contexts if isinstance(contexts, list) else [],
+                    "context_score": 0.5,
+                    "message": "Found general context"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error using MCP tools for terminal context: {e}")
+            # Provide empty results rather than failing
+            return {
+                "relevant_context": [],
+                "context_score": 0,
+                "message": f"Error searching context: {str(e)}"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error in retrieve_terminal_context: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving terminal context: {str(e)}"
         )
 
 

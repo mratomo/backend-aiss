@@ -10,7 +10,6 @@ import (
 	"time"
 	"user-service/config"
 	"user-service/controllers"
-	"user-service/models"
 	"user-service/repositories"
 	"user-service/services"
 
@@ -59,11 +58,11 @@ func main() {
 	userRepo := repositories.NewUserRepository(userCollection)
 
 	// Inicializar servicio
-	jwtSecret := os.Getenv("JWT_SECRET")
+	jwtSecret := os.Getenv("AUTH_SECRET")
 	if jwtSecret == "" {
-		jwtSecret = cfg.JWTSecret
+		jwtSecret = cfg.Auth.Secret
 	}
-	userService := services.NewUserService(userRepo, jwtSecret, cfg.JWTExpirationHours)
+	userService := services.NewUserService(userRepo, jwtSecret, cfg.Auth.ExpirationHours)
 
 	// Inicializar controlador
 	userController := controllers.NewUserController(userService)

@@ -6,20 +6,36 @@ from bson import ObjectId
 from pydantic import BaseModel, Field
 
 # Clase auxiliar para manejar ObjectId en modelos Pydantic
-class PyObjectId(ObjectId):
+class PyObjectId(str):
+    """
+    Una clase personalizada para convertir ObjectIds de MongoDB a/desde strings.
+    Esta implementación es compatible con Pydantic v2.
+    """
+    
     @classmethod
     def __get_validators__(cls):
         yield cls.validate
-
+        
     @classmethod
     def validate(cls, v):
-        if not ObjectId.is_valid(v):
-            raise ValueError("Invalid ObjectId")
-        return ObjectId(v)
-
+        if not isinstance(v, (str, ObjectId)):
+            raise TypeError("ObjectId required")
+        
+        if isinstance(v, str):
+            if not ObjectId.is_valid(v):
+                raise ValueError("Invalid ObjectId format")
+            return str(v)
+            
+        return str(v)
+    
     @classmethod
     def __modify_schema__(cls, field_schema):
         field_schema.update(type="string")
+    
+    @classmethod
+    def __get_pydantic_json_schema__(cls, field_schema, **kwargs):
+        field_schema.update(type="string")
+        return field_schema
 
 
 class LLMProviderType(str, Enum):
@@ -42,6 +58,7 @@ class LLMProviderCreate(BaseModel):
     temperature: float = Field(0.0, ge=0.0, le=1.0, description="Temperatura para generación")
     max_tokens: int = Field(4096, ge=1, description="Número máximo de tokens")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadatos adicionales")
+    use_gpu: bool = Field(True, description="Utilizar GPU para aceleración si está disponible")
 
 
 class LLMProviderUpdate(BaseModel):
@@ -54,6 +71,7 @@ class LLMProviderUpdate(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     metadata: Optional[Dict[str, Any]] = None
+    use_gpu: Optional[bool] = None
 
 
 class LLMProvider(BaseModel):
@@ -68,10 +86,12 @@ class LLMProvider(BaseModel):
     temperature: float
     max_tokens: int
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    use_gpu: bool = Field(True, description="Utilizar GPU para aceleración si está disponible")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str}
+    }

@@ -31,7 +31,7 @@ class AreaService:
             )
 
         # Crear nuevo documento de área
-        area_dict = area_data.dict()
+        area_dict = area_data.model_dump()
         area_dict["created_at"] = now
         area_dict["updated_at"] = now
         area_dict["active"] = True
@@ -84,7 +84,7 @@ class AreaService:
             )
 
         # Preparar actualización
-        update_data = {k: v for k, v in area_update.dict().items() if v is not None}
+        update_data = {k: v for k, v in area_update.model_dump().items() if v is not None}
         update_data["updated_at"] = datetime.utcnow()
 
         # Si se va a actualizar el nombre, verificar que no exista otro con ese nombre

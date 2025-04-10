@@ -571,7 +571,7 @@ class QueryService:
             max_tokens: Número máximo de tokens utilizado
         """
         # Convertir fuentes a formato para almacenamiento
-        sources_dict = [source.dict() for source in sources]
+        sources_dict = [source.model_dump() for source in sources]
 
         # Crear documento para historial
         history_item = {

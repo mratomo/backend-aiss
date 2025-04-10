@@ -24,26 +24,62 @@ except ImportError:
 
 # Métricas y monitoreo
 try:
-    from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+    from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST, REGISTRY
+    from prometheus_client.core import CounterMetricFamily, HistogramMetricFamily
+    import prometheus_client
     prometheus_available = True
     
-    # Definir métricas
-    HTTP_REQUESTS = Counter('embedding_http_requests_total', 'Total HTTP Requests', ['method', 'endpoint', 'status'])
-    HTTP_REQUEST_DURATION = Histogram('embedding_http_request_duration_seconds', 'HTTP Request Duration', ['method', 'endpoint'])
-    DB_OPERATIONS = Counter('embedding_db_operations_total', 'Total Database Operations', ['operation', 'status'])
-    EMBEDDING_GENERATIONS = Counter('embedding_generations_total', 'Total Embedding Generations', ['type', 'status'])
-    VECTOR_SEARCHES = Counter('embedding_vector_searches_total', 'Total Vector Searches', ['status'])
+    # Crear un registry limpio para evitar conflictos
+    # Este es el cambio clave: usar un registry personalizado en lugar del global
+    custom_registry = prometheus_client.CollectorRegistry(auto_describe=True)
+    
+    # Definir métricas con el registry personalizado
+    HTTP_REQUESTS = Counter(
+        'embedding_http_requests_total', 
+        'Total HTTP Requests', 
+        ['method', 'endpoint', 'status'],
+        registry=custom_registry
+    )
+    
+    HTTP_REQUEST_DURATION = Histogram(
+        'embedding_http_request_duration_seconds', 
+        'HTTP Request Duration', 
+        ['method', 'endpoint'],
+        registry=custom_registry
+    )
+    
+    DB_OPERATIONS = Counter(
+        'embedding_db_operations_total', 
+        'Total Database Operations', 
+        ['operation', 'status'],
+        registry=custom_registry
+    )
+    
+    EMBEDDING_GENERATIONS = Counter(
+        'embedding_generations_total', 
+        'Total Embedding Generations', 
+        ['type', 'status'],
+        registry=custom_registry
+    )
+    
+    VECTOR_SEARCHES = Counter(
+        'embedding_vector_searches_total', 
+        'Total Vector Searches', 
+        ['status'],
+        registry=custom_registry
+    )
     
 except ImportError:
     prometheus_available = False
+    custom_registry = None
 
 # Monitoreo de recursos
 try:
     import psutil
     psutil_available = True
     if prometheus_available:
-        MEMORY_USAGE = Gauge('embedding_memory_usage_bytes', 'Memory Usage in Bytes')
-        CPU_USAGE = Gauge('embedding_cpu_usage_percent', 'CPU Usage Percentage')
+        MEMORY_USAGE = Gauge('embedding_memory_usage_bytes', 'Memory Usage in Bytes', registry=custom_registry)
+        CPU_USAGE = Gauge('embedding_cpu_usage_percent', 'CPU Usage Percentage', registry=custom_registry)
 except ImportError:
     psutil_available = False
 
@@ -77,7 +113,7 @@ from models.embedding import (
     EmbeddingBatchResponse, EmbeddingType
 )
 from services.embedding_service import EmbeddingService
-from services.vectordb_service import VectorDBService
+from services.vectordb_factory import VectorDBFactory
 
 # Cargar configuración
 settings = Settings()
@@ -86,7 +122,7 @@ settings = Settings()
 app = FastAPI(
     title="Embedding Service",
     description="Servicio de generación de embeddings con soporte para modelos Nomic y HuggingFace",
-    version="1.1.0",
+    version="1.2.0",
     default_response_class=ORJSONResponse  # Usar orjson para respuestas más rápidas
 )
 
@@ -103,10 +139,12 @@ app.add_middleware(
 if prometheus_available:
     @app.middleware("http")
     async def metrics_middleware(request: Request, call_next):
-        start_time = time.time()
-        
-        # Extraer información de la ruta
+        # Ignorar endpoints internos para evitar métricas innecesarias
         path = request.url.path
+        if path.endswith(("/health", "/metrics")):
+            return await call_next(request)
+            
+        start_time = time.time()
         method = request.method
         
         try:
@@ -118,10 +156,14 @@ if prometheus_available:
             status_code = 500
             raise e
         finally:
-            # Registrar métricas
+            # Registrar métricas solo si no son endpoints internos
             duration = time.time() - start_time
-            HTTP_REQUESTS.labels(method=method, endpoint=path, status=status_code).inc()
-            HTTP_REQUEST_DURATION.labels(method=method, endpoint=path).observe(duration)
+            try:
+                HTTP_REQUESTS.labels(method=method, endpoint=path, status=status_code).inc()
+                HTTP_REQUEST_DURATION.labels(method=method, endpoint=path).observe(duration)
+            except Exception as metrics_error:
+                # Evitar que errores de métricas interrumpan el servicio
+                pass
             
         return response
 
@@ -166,8 +208,8 @@ def init_mongodb_client():
 motor_client = init_mongodb_client()
 db = motor_client[settings.mongodb_database]
 
-# Inicializar servicios
-vectordb_service = VectorDBService(settings)
+# Inicializar servicios usando la fábrica para seleccionar la implementación correcta
+vectordb_service = VectorDBFactory.create(settings)
 embedding_service = EmbeddingService(db, vectordb_service, settings)
 
 
@@ -210,14 +252,15 @@ async def startup_event():
         logger.error("Error connecting to MongoDB", error=str(e))
         raise
 
-    # Verificar conexión a Qdrant
-    logger.info("Connecting to Vector DB...")
+    # Verificar conexión a la base de datos vectorial
+    logger.info(f"Connecting to Vector DB ({settings.vector_db})...")
     try:
         status = await vectordb_service.get_status()
-        logger.info("Successfully connected to Vector DB", status=status)
+        logger.info(f"Successfully connected to {settings.vector_db}", status=status)
     except Exception as e:
-        logger.error("Error connecting to Vector DB", error=str(e))
-        raise
+        logger.error(f"Error connecting to {settings.vector_db}", error=str(e))
+        logger.warning("Continuing startup despite Vector DB connection failure")
+        # No propagamos la excepción para permitir que la aplicación continúe funcionando
 
     # Inicializar modelos de embeddings
     try:
@@ -227,6 +270,18 @@ async def startup_event():
         # Verificar disponibilidad de GPU
         if embedding_service.gpu_available:
             logger.info("GPU detected and will be used", gpu_info=embedding_service.gpu_info)
+            
+            # Información detallada de GPU
+            import torch
+            if torch.cuda.is_available():
+                device_count = torch.cuda.device_count()
+                for i in range(device_count):
+                    device_props = torch.cuda.get_device_properties(i)
+                    logger.info(f"GPU device {i} info",
+                               name=device_props.name,
+                               memory_gb=f"{device_props.total_memory / (1024**3):.2f}",
+                               compute_capability=f"{device_props.major}.{device_props.minor}",
+                               cuda_version=torch.version.cuda)
         else:
             logger.warning("No GPU detected, using CPU for embeddings")
     except Exception as e:
@@ -256,7 +311,8 @@ async def shutdown_event():
 if prometheus_available:
     @app.get("/metrics", tags=["Monitoring"])
     async def metrics():
-        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+        # Usar el registry personalizado en lugar del predeterminado
+        return Response(content=generate_latest(custom_registry), media_type=CONTENT_TYPE_LATEST)
 
 
 # Endpoint de health check optimizado
@@ -285,12 +341,18 @@ async def health_check():
         if prometheus_available:
             DB_OPERATIONS.labels(operation="ping", status="error").inc()
     
-    # Verificar Qdrant
+    # Verificar base de datos vectorial
     try:
         vectordb_status = await vectordb_service.get_status()
-        health_status["vectordb"] = vectordb_status
+        health_status["vectordb"] = {
+            "type": settings.vector_db,
+            "status": vectordb_status
+        }
     except Exception as e:
-        health_status["vectordb"] = f"error: {str(e)}"
+        health_status["vectordb"] = {
+            "type": settings.vector_db,
+            "status": f"error: {str(e)}"
+        }
         health_status["status"] = "degraded"
     
     # Verificar GPU
@@ -570,5 +632,5 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8084")),
-        reload=settings.environment == "development",
+        reload=False,  # Desactivar recarga para evitar problemas con Prometheus
     )

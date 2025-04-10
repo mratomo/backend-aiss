@@ -12,14 +12,14 @@ import (
 )
 
 // UpdateSessionMode updates the mode of a session
-func (r *MongoDBRepository) UpdateSessionMode(sessionID string, mode models.SessionMode, areaID string) error {
+func (r *MongoRepository) UpdateSessionMode(sessionID string, mode models.SessionMode, areaID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// Prepare update
 	update := bson.M{
 		"$set": bson.M{
-			"mode": mode,
+			"mode":        mode,
 			"last_active": time.Now(),
 		},
 	}
@@ -49,7 +49,7 @@ func (r *MongoDBRepository) UpdateSessionMode(sessionID string, mode models.Sess
 }
 
 // SaveSessionModeChange saves a record of a session mode change
-func (r *MongoDBRepository) SaveSessionModeChange(modeChange models.SessionModeChange) error {
+func (r *MongoRepository) SaveSessionModeChange(modeChange models.SessionModeChange) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -63,7 +63,7 @@ func (r *MongoDBRepository) SaveSessionModeChange(modeChange models.SessionModeC
 }
 
 // GetSessionContext gets the context for a terminal session
-func (r *MongoDBRepository) GetSessionContext(sessionID string) (map[string]interface{}, error) {
+func (r *MongoRepository) GetSessionContext(sessionID string) (map[string]interface{}, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -100,30 +100,30 @@ func (r *MongoDBRepository) GetSessionContext(sessionID string) (map[string]inte
 
 	// Convert to map for easier extension
 	contextMap := map[string]interface{}{
-		"session_id":             sessionID,
-		"current_directory":      sessionContext.CurrentDirectory,
-		"current_user":           sessionContext.CurrentUser,
-		"environment_variables":  sessionContext.EnvironmentVars,
-		"last_exit_code":         sessionContext.LastExitCode,
-		"detected_applications":  sessionContext.DetectedApplications,
-		"hostname":               session.TargetInfo.Hostname,
-		"os_type":                session.TargetInfo.OSType,
-		"os_version":             session.TargetInfo.OSVersion,
-		"detected_errors":        sessionContext.DetectedErrors,
-		"last_updated":           sessionContext.LastUpdated,
+		"session_id":            sessionID,
+		"current_directory":     sessionContext.CurrentDirectory,
+		"current_user":          sessionContext.CurrentUser,
+		"environment_variables": sessionContext.EnvironmentVars,
+		"last_exit_code":        sessionContext.LastExitCode,
+		"detected_applications": sessionContext.DetectedApplications,
+		"hostname":              session.TargetInfo.Hostname,
+		"os_type":               session.TargetInfo.OSType,
+		"os_version":            session.TargetInfo.OSVersion,
+		"detected_errors":       sessionContext.DetectedErrors,
+		"last_updated":          sessionContext.LastUpdated,
 	}
 
 	return contextMap, nil
 }
 
 // GetSessionsWithActiveArea gets all sessions for a user that have an active area
-func (r *MongoDBRepository) GetSessionsWithActiveArea(userID string) ([]models.Session, error) {
+func (r *MongoRepository) GetSessionsWithActiveArea(userID string) ([]models.Session, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// Define query to find sessions with active area
 	filter := bson.M{
-		"user_id": userID,
+		"user_id":        userID,
 		"active_area_id": bson.M{"$exists": true, "$ne": ""},
 	}
 

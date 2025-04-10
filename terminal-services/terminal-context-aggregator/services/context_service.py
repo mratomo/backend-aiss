@@ -180,7 +180,7 @@ class ContextService:
         
         return {
             "session_id": session_id,
-            "context": context.dict(),
+            "context": context.model_dump(),
             "analysis": analysis_results,
             "suggestions": suggestions
         }
@@ -221,7 +221,7 @@ class ContextService:
                             "user_id": context.user_id,
                             "command": command,
                             "output": output,
-                            "context": context.dict()
+                            "context": context.model_dump()
                         },
                         timeout=settings.SUGGESTION_TIMEOUT_SECONDS  # Use configurable timeout from settings
                     )

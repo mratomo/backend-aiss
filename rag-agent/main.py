@@ -87,9 +87,10 @@ from models.llm_provider import LLMProvider, LLMProviderCreate, LLMProviderUpdat
 # Inicialización de componentes DB necesarios
 from services.db_query_service import DBQueryService
 
-# Importar nuevo servicio de Ollama MCP
+# Importar nuevo servicio de Ollama MCP - Sin fallbacks
 from services.ollama_mcp_service import OllamaMCPService
 from services.ollama_mcp_server import create_ollama_mcp_server
+logger.info("Servicios Ollama MCP importados correctamente")
 
 # Cargar configuración
 settings = Settings()
@@ -100,6 +101,7 @@ if os.getenv("RUN_STANDALONE_MCP_SERVER", "").lower() in ("true", "1", "yes"):
     mcp_server_port = int(os.getenv("PORT", "8095"))
     logger.info(f"Starting Ollama MCP Server in standalone mode on port {mcp_server_port}")
     
+    # Sin fallbacks - debe funcionar o dar error
     mcp_server_app = create_ollama_mcp_server(settings)
     
     # Configurar CORS para el servidor MCP
@@ -115,25 +117,28 @@ if os.getenv("RUN_STANDALONE_MCP_SERVER", "").lower() in ("true", "1", "yes"):
     @mcp_server_app.get("/health")
     async def mcp_server_health():
         """Verificar salud del servidor MCP para Ollama"""
-        try:
-            # Verificar conexión con Ollama
-            ollama_service = OllamaMCPService(settings)
-            health_result = await ollama_service.health_check()
+        # Verificar conexión con Ollama
+        ollama_service = OllamaMCPService(settings)
+        health_result = await ollama_service.health_check()
+        
+        if health_result.get("status") != "ok":
+            return Response(
+                content=json.dumps({
+                    "status": "error",
+                    "service": "ollama-mcp-server",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "ollama": health_result
+                }),
+                status_code=500,
+                media_type="application/json"
+            )
             
-            return {
-                "status": "ok" if health_result.get("status") == "ok" else "degraded",
-                "service": "ollama-mcp-server",
-                "timestamp": datetime.utcnow().isoformat(),
-                "ollama": health_result
-            }
-        except Exception as e:
-            logger.error(f"Error checking Ollama health: {e}")
-            return {
-                "status": "degraded",
-                "service": "ollama-mcp-server",
-                "timestamp": datetime.utcnow().isoformat(),
-                "error": str(e)
-            }
+        return {
+            "status": "ok",
+            "service": "ollama-mcp-server",
+            "timestamp": datetime.utcnow().isoformat(),
+            "ollama": health_result
+        }
     
     # Si estamos en modo standalone, usar esta app en lugar de la principal
     app = mcp_server_app
@@ -225,21 +230,34 @@ else:
     motor_client = init_mongodb_client()
     db = motor_client[settings.mongodb_database]
 
-    # Inicializar servicios
+    # Inicializar servicios - sin fallbacks - todos son críticos
+    logger.info("Initializing critical RAG Agent services...")
+    
     mcp_service = MCPService(settings)
+    logger.info("MCP service instance created")
+    
     llm_service = LLMService(db, settings)
+    logger.info("LLM service instance created")
+    
     retrieval_service = RetrievalService(db, settings)
+    logger.info("Retrieval service instance created")
+    
     llm_settings_service = LLMSettingsService(db, settings)
+    logger.info("LLM settings service instance created")
 
-    # Inicializar nuevo servicio de Ollama MCP
+    # Inicializar servicio de Ollama MCP - Sin fallbacks
+    # Si falla, debe fallar completamente - es una dependencia crítica
     ollama_service = OllamaMCPService(settings)
+    logger.info("Ollama MCP service initialized successfully")
     
     # Inicializar servicio GraphRAG para consultas basadas en grafos
     from services.graph_rag_service import GraphRAGService
     graph_rag_service = GraphRAGService(db, llm_service, retrieval_service, mcp_service, settings)
+    logger.info("GraphRAG service initialized successfully")
 
     # Inicializar servicio de consultas con el servicio de Ollama
     query_service = QueryService(db, llm_service, retrieval_service, mcp_service, settings, ollama_service=ollama_service)
+    logger.info("Query service initialized successfully with all required dependencies")
 
 @app.on_event("startup")
 async def startup_event():
@@ -256,32 +274,32 @@ async def startup_event():
         asyncio.create_task(update_metrics())
         logger.info("Metrics monitoring started")
 
-    # Verificar conexión a MongoDB
+    # Verificar conexión a MongoDB - debe estar disponible o fallar
     logger.info("Connecting to MongoDB...")
-    try:
-        for attempt in range(1, 6):
-            try:
-                await motor_client.admin.command("ping")
-                logger.info("Successfully connected to MongoDB")
-                if prometheus_available:
-                    # En un entorno real, se registraría en un contador de DB_OPERATIONS
-                    pass
-                break
-            except Exception as e:
-                if attempt < 5:
-                    wait_time = 2 ** attempt  # Espera exponencial
-                    logger.warning(f"MongoDB connection attempt {attempt} failed. Retrying in {wait_time}s...", error=str(e))
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"Failed to connect to MongoDB after 5 attempts", error=str(e))
-                    raise
-    except Exception as e:
-        logger.error("Error connecting to MongoDB", error=str(e))
-        raise
+    max_attempts = 6  # Intentos razonables pero limitados
+    
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await motor_client.admin.command("ping")
+            logger.info(f"Successfully connected to MongoDB on attempt {attempt}")
+            break
+        except Exception as e:
+            if attempt < max_attempts:
+                wait_time = min(2 ** attempt, 20)  # Espera exponencial con máximo de 20 segundos
+                logger.warning(f"MongoDB connection attempt {attempt}/{max_attempts} failed. Retrying in {wait_time}s...", error=str(e))
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"Failed to connect to MongoDB after {max_attempts} attempts", error=str(e))
+                raise RuntimeError(f"Cannot start RAG Agent without MongoDB connection: {str(e)}")
 
-    # Inicializar servicios
-    await llm_service.initialize()  # Método que inicializa proveedores y cliente MCP
+    # Inicializar servicios - sin fallbacks
+    # Inicialización de LLM service - crítica
+    await llm_service.initialize()
+    logger.info("LLM service initialized successfully")
+    
+    # Inicialización de LLM settings service - crítica
     await llm_settings_service.initialize()
+    logger.info("LLM settings service initialized successfully")
     
     logger.info("RAG Agent started successfully")
 
@@ -290,28 +308,24 @@ async def shutdown_event():
     """Limpiar recursos al detener la aplicación"""
     logger.info("Shutting down RAG Agent...")
     
-    try:
-        # Cerrar conexión a MongoDB
-        motor_client.close()
-        logger.info("MongoDB connection closed")
-        
-        # Cerrar servicio Ollama si está disponible
-        if ollama_service:
-            await ollama_service.close()
-            logger.info("Ollama service closed")
-        
-        # Cerrar servicio GraphRAG si está disponible
-        if graph_rag_service:
-            await graph_rag_service.close()
-            logger.info("GraphRAG service closed")
-        
-        # Cerrar otros servicios que puedan tener recursos abiertos
-        # Por ejemplo, si query_service tiene un db_query_service inicializado
-        if hasattr(query_service, 'db_query_service') and query_service.db_query_service:
-            await query_service.db_query_service.close()
-            
-    except Exception as e:
-        logger.error("Error during shutdown", error=str(e))
+    # Cerrar conexión a MongoDB
+    motor_client.close()
+    logger.info("MongoDB connection closed")
+    
+    # Cerrar servicio Ollama
+    await ollama_service.close()
+    logger.info("Ollama service closed")
+    
+    # Cerrar servicio GraphRAG
+    await graph_rag_service.close()
+    logger.info("GraphRAG service closed")
+    
+    # Cerrar otros servicios
+    if hasattr(query_service, 'db_query_service') and query_service.db_query_service:
+        await query_service.db_query_service.close()
+        logger.info("DB query service closed")
+    
+    logger.info("All services shut down successfully")
 
 # Endpoint para métricas de Prometheus
 if prometheus_available:

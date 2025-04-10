@@ -19,14 +19,16 @@ import (
 
 // MongoRepository implements the SessionRepository interface using MongoDB
 type MongoRepository struct {
-	client    *mongo.Client
-	db        *mongo.Database
-	sessions  *mongo.Collection
-	commands  *mongo.Collection
-	bookmarks *mongo.Collection
-	contexts  *mongo.Collection
-	timeout   time.Duration
-	mu        sync.RWMutex // Mutex for thread-safe operations
+	client          *mongo.Client
+	db              *mongo.Database
+	sessions        *mongo.Collection
+	commands        *mongo.Collection
+	bookmarks       *mongo.Collection
+	contexts        *mongo.Collection
+	sessionContexts *mongo.Collection
+	modeChanges     *mongo.Collection
+	timeout         time.Duration
+	mu              sync.RWMutex // Mutex for thread-safe operations
 }
 
 // NewMongoRepository creates a new MongoRepository
@@ -51,15 +53,19 @@ func NewMongoRepository(uri, dbName string, timeout time.Duration) (*MongoReposi
 	commands := db.Collection("commands")
 	bookmarks := db.Collection("bookmarks")
 	contexts := db.Collection("contexts")
+	sessionContexts := db.Collection("session_contexts")
+	modeChanges := db.Collection("mode_changes")
 
 	repo := &MongoRepository{
-		client:    client,
-		db:        db,
-		sessions:  sessions,
-		commands:  commands,
-		bookmarks: bookmarks,
-		contexts:  contexts,
-		timeout:   timeout,
+		client:          client,
+		db:              db,
+		sessions:        sessions,
+		commands:        commands,
+		bookmarks:       bookmarks,
+		contexts:        contexts,
+		sessionContexts: sessionContexts,
+		modeChanges:     modeChanges,
+		timeout:         timeout,
 	}
 
 	// Create indexes
@@ -258,6 +264,34 @@ func (r *MongoRepository) GetUserSessions(userID, status string, limit, offset i
 	return sessions, nil
 }
 
+// GetSessionsByUserAndStatus gets all sessions for a user with a specific status
+func (r *MongoRepository) GetSessionsByUserAndStatus(userID, status string) ([]*models.Session, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+
+	// Create filter
+	filter := bson.M{"user_id": userID, "status": status}
+
+	// Create options
+	findOptions := options.Find()
+	findOptions.SetSort(bson.M{"last_active": -1})
+
+	// Find sessions
+	cursor, err := r.sessions.Find(ctx, filter, findOptions)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	// Decode sessions
+	var sessions []*models.Session
+	if err = cursor.All(ctx, &sessions); err != nil {
+		return nil, err
+	}
+
+	return sessions, nil
+}
+
 // SearchSessions searches for sessions based on criteria
 func (r *MongoRepository) SearchSessions(req *models.SessionSearchRequest) ([]*models.Session, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
@@ -271,13 +305,7 @@ func (r *MongoRepository) SearchSessions(req *models.SessionSearchRequest) ([]*m
 	if req.Status != "" {
 		filter["status"] = req.Status
 	}
-	if req.SearchTerm != "" {
-		filter["$or"] = []bson.M{
-			{"name": bson.M{"$regex": primitive.Regex{Pattern: req.SearchTerm, Options: "i"}}},
-			{"hostname": bson.M{"$regex": primitive.Regex{Pattern: req.SearchTerm, Options: "i"}}},
-			{"description": bson.M{"$regex": primitive.Regex{Pattern: req.SearchTerm, Options: "i"}}},
-		}
-	}
+	// Eliminado búsqueda por SearchTerm que no existe en el modelo
 	if !req.FromDate.IsZero() && !req.ToDate.IsZero() {
 		filter["created_at"] = bson.M{
 			"$gte": req.FromDate,
@@ -372,9 +400,9 @@ func (r *MongoRepository) SaveCommand(command *models.Command) error {
 	filter := bson.M{"session_id": command.SessionID}
 	update := bson.M{
 		"$inc": bson.M{
-			"stats.command_count":   1,
-			"stats.bytes_sent":      len(command.CommandText),
-			"stats.bytes_received":  len(command.OutputText),
+			"stats.command_count":    1,
+			"stats.bytes_sent":       len(command.CommandText),
+			"stats.bytes_received":   len(command.Output),
 			"stats.total_duration_s": command.DurationMs / 1000,
 		},
 		"$set": bson.M{
@@ -415,6 +443,35 @@ func (r *MongoRepository) GetSessionCommands(sessionID string, limit, offset int
 	findOptions.SetSort(bson.M{"executed_at": -1})
 	findOptions.SetLimit(int64(limit))
 	findOptions.SetSkip(int64(offset))
+
+	// Find commands
+	cursor, err := r.commands.Find(ctx, filter, findOptions)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	// Decode commands
+	var commands []*models.Command
+	if err = cursor.All(ctx, &commands); err != nil {
+		return nil, err
+	}
+
+	return commands, nil
+}
+
+// GetRecentCommands gets the most recent commands for a session
+func (r *MongoRepository) GetRecentCommands(sessionID string, limit int) ([]*models.Command, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+
+	// Create filter
+	filter := bson.M{"session_id": sessionID}
+
+	// Create options
+	findOptions := options.Find()
+	findOptions.SetSort(bson.M{"executed_at": -1})
+	findOptions.SetLimit(int64(limit))
 
 	// Find commands
 	cursor, err := r.commands.Find(ctx, filter, findOptions)
@@ -700,32 +757,33 @@ func (r *MongoRepository) SaveContext(sessionContext *models.SessionContext) err
 	// Set upsert to true to create if not exists (atomic operation)
 	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
 	filter := bson.M{"session_id": sessionContext.SessionID}
-	
+
 	// Use $setOnInsert to keep the original ID if updating
 	// and create a new one if inserting
 	update := bson.M{
 		"$set": bson.M{
-			"user_id":      sessionContext.UserID,
-			"current_dir":  sessionContext.CurrentDir,
-			"env_vars":     sessionContext.EnvVars,
-			"last_command": sessionContext.LastCommand,
-			"history":      sessionContext.History,
-			"metadata":     sessionContext.Metadata,
-			"last_updated": time.Now().UTC(),
+			"user_id":               sessionContext.UserID,
+			"working_directory":     sessionContext.CurrentDirectory,
+			"current_user":          sessionContext.CurrentUser,
+			"environment_variables": sessionContext.EnvironmentVars,
+			"last_exit_code":        sessionContext.LastExitCode,
+			"detected_applications": sessionContext.DetectedApplications,
+			"detected_errors":       sessionContext.DetectedErrors,
+			"last_updated":          time.Now().UTC(),
 		},
 		"$setOnInsert": bson.M{
 			"created_at": time.Now().UTC(),
 		},
 	}
-	
+
 	var updatedContext models.SessionContext
 	err := r.contexts.FindOneAndUpdate(ctx, filter, update, opts).Decode(&updatedContext)
-	
+
 	// If no documents matched and no documents were upserted
 	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
 		return err
 	}
-	
+
 	// Success - update the ID in the input object to match what's in the database
 	sessionContext.ID = updatedContext.ID
 	return nil

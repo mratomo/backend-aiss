@@ -11,7 +11,7 @@ import (
 )
 
 // CreateOptimizedIndexes creates optimized indexes for MongoDB collections
-func (r *MongoDBRepository) CreateOptimizedIndexes() error {
+func (r *MongoRepository) CreateOptimizedIndexes() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -46,13 +46,13 @@ func (r *MongoDBRepository) CreateOptimizedIndexes() error {
 		{
 			// Optimized text search index with weights and limiting keys
 			Keys: bson.D{
-				{Key: "command", Value: "text"}, 
+				{Key: "command", Value: "text"},
 				{Key: "output", Value: "text"},
 			},
 			Options: options.Index().
 				SetBackground(true).
 				SetWeights(bson.D{
-					{Key: "command", Value: 10}, 
+					{Key: "command", Value: 10},
 					{Key: "output", Value: 5},
 				}).
 				SetDefaultLanguage("english").
@@ -131,7 +131,7 @@ func (r *MongoDBRepository) CreateOptimizedIndexes() error {
 }
 
 // CreateSearchIndexes creates efficient text search indexes
-func (r *MongoDBRepository) CreateSearchIndexes() error {
+func (r *MongoRepository) CreateSearchIndexes() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -154,15 +154,15 @@ func (r *MongoDBRepository) CreateSearchIndexes() error {
 		if !ok {
 			continue
 		}
-		
+
 		// Check if this is a text index
-		for k, v := range keys {
+		for _, v := range keys {
 			if v == "text" {
 				hasTextIndex = true
 				break
 			}
 		}
-		
+
 		if hasTextIndex {
 			break
 		}
@@ -172,13 +172,13 @@ func (r *MongoDBRepository) CreateSearchIndexes() error {
 	if !hasTextIndex {
 		cmdSearchIdx := mongo.IndexModel{
 			Keys: bson.D{
-				{Key: "command", Value: "text"}, 
+				{Key: "command", Value: "text"},
 				{Key: "output", Value: "text"},
 			},
 			Options: options.Index().
 				SetBackground(true).
 				SetWeights(bson.D{
-					{Key: "command", Value: 10}, 
+					{Key: "command", Value: 10},
 					{Key: "output", Value: 2},
 				}).
 				SetDefaultLanguage("english").

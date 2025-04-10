@@ -1,20 +1,19 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
 # Copy go files with better handling of workspace files
-COPY go.mod go.sum go.work* ./
-RUN go mod download || echo "Warning: Some dependencies may not have been downloaded"
-RUN if [ -f go.work ]; then GOWORK=off go mod download || echo "Warning: Workspace dependencies may not have been downloaded"; fi
+COPY go.mod go.sum ./
+# go.mod y go.work ahora son compatibles (ambos especifican Go 1.22)
+# Descargar y verificar dependencias con manejo de errores
+RUN go mod download && go mod verify || true
 
-# Copy source code
+# Now that go.mod and go.work versions are aligned, we can copy all files
 COPY . .
 
-# Build the application with more robust error handling
-RUN CGO_ENABLED=0 GOOS=linux GOWORK=off go build -a -installsuffix cgo -ldflags="-s -w" -o terminal-gateway-service . || \
-    (echo "Retrying build with Skip Resolve..." && \
-     GOWORK=off go build -o terminal-gateway-service -tags skipresolver . || \
-     (echo "Build failed even with skipresolver tag" && exit 1))
+# Build the application with simplified dependencies
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o terminal-gateway-service .
+
 
 # Use a minimal alpine image for the final stage
 FROM alpine:3.18

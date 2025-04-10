@@ -45,11 +45,11 @@ class Area(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-        schema_extra = {
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str},
+        "json_schema_extra": {
             "example": {
                 "name": "Inteligencia Artificial",
                 "description": "Conocimiento sobre IA, aprendizaje automático y redes neuronales",
@@ -62,6 +62,7 @@ class Area(BaseModel):
                 "active": True
             }
         }
+    }
 
 
 # Modelo para la respuesta de área

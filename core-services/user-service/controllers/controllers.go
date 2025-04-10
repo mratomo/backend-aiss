@@ -269,3 +269,26 @@ func (ctrl *UserController) VerifyAdmin(c *gin.Context) {
 
 	c.JSON(http.StatusOK, response)
 }
+
+// ChangePassword cambia la contraseña de un usuario
+func (ctrl *UserController) ChangePassword(c *gin.Context) {
+	id := c.Param("id")
+	var req models.ChangePasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Crear contexto con timeout variable según la operación
+	ctx, cancel := context.WithTimeout(context.Background(), getOperationTimeout(c.FullPath()))
+	defer cancel()
+
+	// Cambiar contraseña
+	err := ctrl.userService.ChangePassword(ctx, id, req.CurrentPassword, req.NewPassword)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Contraseña actualizada correctamente"})
+}

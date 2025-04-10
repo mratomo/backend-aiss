@@ -179,7 +179,7 @@ async def analyze_terminal(request: AnalysisRequest, auth_token: str = Depends(v
         
         return {
             "session_id": request.session_id,
-            "context": context.dict(),
+            "context": context.model_dump(),
             "analysis": analysis,
             "suggestions": suggestions,
         }
@@ -246,7 +246,7 @@ async def get_terminal_context(
         context = await context_service.get_context(session_id, user_id)
         return {
             "session_id": session_id,
-            "context": context.dict(),
+            "context": context.model_dump(),
         }
         
     except Exception as e:
@@ -285,7 +285,7 @@ async def enrich_with_mcp(
         
         return {
             "session_id": session_id,
-            "context": context.dict(),
+            "context": context.model_dump(),
             "enrichment": enrichment,
         }
         

@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
@@ -6,18 +6,19 @@ WORKDIR /app
 RUN apk add --no-cache gcc musl-dev
 
 # Copiar archivos de módulos Go
-COPY go.mod go.sum go.work ./
+COPY go.mod go.sum ./
+RUN rm -f go.work
 
 # Descargar dependencias
-RUN go mod download || true
-RUN GOWORK=off go mod download || true
+# Descargar y verificar dependencias con manejo de errores
+RUN go mod download && go mod verify || true
 
-# Copiar código fuente
+# Ahora que go.mod y go.work son compatibles, podemos copiar todos los archivos
 COPY . .
 
-# Compilar la aplicación (ignore dependency checks)
-RUN CGO_ENABLED=0 GOWORK=off go build -ldflags="-s -w" -o user-service . || \
-    (echo "Building with Skip Resolve..." && GOWORK=off go build -o user-service -tags skipresolver .)
+# Compilar la aplicación con dependencias simplificadas
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o user-service .
+
 
 # Imagen final
 FROM alpine:3.18

@@ -35,17 +35,18 @@ type readResult struct {
 
 // SSHManager manages SSH connections
 type SSHManager struct {
-	sessions      map[string]*models.SSHConnection
-	sessionMutex  sync.RWMutex
-	config        *ssh.ClientConfig
-	upgrader      websocket.Upgrader
-	timeout       time.Duration
-	keepAlive     time.Duration
-	keyDir        string
-	maxSessions   int
-	sessionClient *services.SessionClient
+	sessions            map[string]*models.SSHConnection
+	sessionMutex        sync.RWMutex
+	config              *ssh.ClientConfig
+	upgrader            websocket.Upgrader
+	timeout             time.Duration
+	keepAlive           time.Duration
+	keyDir              string
+	maxSessions         int
+	sessionClient       *services.SessionClient
 	vulnerabilityClient *services.VulnerabilityClient
-	authToken     string
+	mcpClient           *services.MCPClient // MCP client for context operations
+	authToken           string
 	// WebSocket clients tracking for broadcasting events
 	wsClients      map[string][]*websocket.Conn // Map sessionID -> array of websocket connections
 	wsClientsMutex sync.RWMutex                 // Mutex for wsClients map
@@ -81,6 +82,19 @@ func NewSSHManager(timeout, keepAlive time.Duration, keyDir string, maxSessions 
 		log.Printf("Vulnerability service disabled (ATTACK_VULNERABILITY_SERVICE_URL not set)")
 	}
 
+	// Create MCP client if URL is provided
+	var mcpClient *services.MCPClient
+	mcpServiceURL := os.Getenv("MCP_SERVICE_URL")
+	if mcpServiceURL != "" {
+		mcpClient = services.NewMCPClient(mcpServiceURL, timeout)
+		if authToken != "" {
+			mcpClient.SetAuthToken(authToken)
+		}
+		log.Printf("MCP service enabled at %s", mcpServiceURL)
+	} else {
+		log.Printf("MCP service not configured (MCP_SERVICE_URL not set)")
+	}
+
 	// Create the SSH manager
 	manager := &SSHManager{
 		sessions:            make(map[string]*models.SSHConnection),
@@ -90,6 +104,7 @@ func NewSSHManager(timeout, keepAlive time.Duration, keyDir string, maxSessions 
 		maxSessions:         maxSessions,
 		sessionClient:       sessionClient,
 		vulnerabilityClient: vulnerabilityClient,
+		mcpClient:           mcpClient,
 		authToken:           authToken,
 		wsClients:           make(map[string][]*websocket.Conn),
 		workerPool:          make(chan struct{}, 100), // Limit concurrent goroutines
@@ -806,7 +821,7 @@ func (m *SSHManager) detectOSInfo(conn *models.SSHConnection) (models.TargetInfo
 		}
 
 		info.OSVersion = osVersion
-		
+
 		// After OS detection, check for software (asynchronously)
 		go m.detectSoftwareAndCheckVulnerabilities(conn.SessionID, conn)
 		return info, nil
@@ -940,7 +955,7 @@ func (m *SSHManager) detectSoftwareAndCheckVulnerabilities(sessionID string, con
 // detectSoftwareInfo attempts to identify important software packages
 func (m *SSHManager) detectSoftwareInfo(conn *models.SSHConnection) ([]models.SoftwareInfo, error) {
 	var softwareList []models.SoftwareInfo
-	
+
 	// Check OS type to determine appropriate detection methods
 	if strings.Contains(strings.ToLower(conn.OSInfo.Type), "windows") {
 		// Windows software detection using PowerShell
@@ -953,21 +968,21 @@ func (m *SSHManager) detectSoftwareInfo(conn *models.SSHConnection) ([]models.So
 				if line == "" {
 					continue
 				}
-				
+
 				parts := strings.Split(line, ",")
 				if len(parts) >= 2 {
 					software := models.SoftwareInfo{
-						Name:            parts[0],
-						Version:         parts[1],
-						Type:            models.SoftwareTypeApplication,
-						DetectionMethod: "wmi",
+						Name:             parts[0],
+						Version:          parts[1],
+						Type:             models.SoftwareTypeApplication,
+						DetectionMethod:  "wmi",
 						DetectionCommand: "Get-WmiObject -Class Win32_Product",
 					}
 					softwareList = append(softwareList, software)
 				}
 			}
 		}
-		
+
 		// Detect common Windows components
 		windowsComponents := []struct {
 			name    string
@@ -977,7 +992,7 @@ func (m *SSHManager) detectSoftwareInfo(conn *models.SSHConnection) ([]models.So
 			{".NET Framework", "powershell -Command \"[System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription\""},
 			{"Internet Explorer", "powershell -Command \"(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Internet Explorer').svcVersion\""},
 		}
-		
+
 		for _, component := range windowsComponents {
 			output, err := m.executeCommandWithOutput(conn.Client, component.command)
 			if err == nil && output != "" {
@@ -993,9 +1008,9 @@ func (m *SSHManager) detectSoftwareInfo(conn *models.SSHConnection) ([]models.So
 		}
 	} else {
 		// Linux/Unix software detection
-		
+
 		// Check for common package managers
-		
+
 		// 1. Debian/Ubuntu (apt)
 		output, err := m.executeCommandWithOutput(conn.Client, "dpkg-query -W -f='${Package},${Version}\n' openssh-server apache2 nginx mysql-server postgresql 2>/dev/null")
 		if err == nil && len(output) > 0 {
@@ -1006,21 +1021,21 @@ func (m *SSHManager) detectSoftwareInfo(conn *models.SSHConnection) ([]models.So
 				if line == "" {
 					continue
 				}
-				
+
 				parts := strings.Split(line, ",")
 				if len(parts) >= 2 {
 					software := models.SoftwareInfo{
-						Name:            parts[0],
-						Version:         parts[1],
-						Type:            getSoftwareType(parts[0]),
-						DetectionMethod: "dpkg",
+						Name:             parts[0],
+						Version:          parts[1],
+						Type:             getSoftwareType(parts[0]),
+						DetectionMethod:  "dpkg",
 						DetectionCommand: "dpkg-query",
 					}
 					softwareList = append(softwareList, software)
 				}
 			}
 		}
-		
+
 		// 2. RHEL/CentOS (rpm)
 		output, err = m.executeCommandWithOutput(conn.Client, "rpm -qa --queryformat '%{NAME},%{VERSION}\n' openssh-server httpd nginx mysql-server postgresql-server 2>/dev/null")
 		if err == nil && len(output) > 0 {
@@ -1031,39 +1046,39 @@ func (m *SSHManager) detectSoftwareInfo(conn *models.SSHConnection) ([]models.So
 				if line == "" {
 					continue
 				}
-				
+
 				parts := strings.Split(line, ",")
 				if len(parts) >= 2 {
 					software := models.SoftwareInfo{
-						Name:            parts[0],
-						Version:         parts[1],
-						Type:            getSoftwareType(parts[0]),
-						DetectionMethod: "rpm",
+						Name:             parts[0],
+						Version:          parts[1],
+						Type:             getSoftwareType(parts[0]),
+						DetectionMethod:  "rpm",
 						DetectionCommand: "rpm -qa",
 					}
 					softwareList = append(softwareList, software)
 				}
 			}
 		}
-		
+
 		// 3. Try to detect kernel version
 		output, err = m.executeCommandWithOutput(conn.Client, "uname -r")
 		if err == nil && len(output) > 0 {
 			software := models.SoftwareInfo{
-				Name:            "kernel",
-				Version:         strings.TrimSpace(output),
-				Type:            models.SoftwareTypeOS,
-				DetectionMethod: "uname",
+				Name:             "kernel",
+				Version:          strings.TrimSpace(output),
+				Type:             models.SoftwareTypeOS,
+				DetectionMethod:  "uname",
 				DetectionCommand: "uname -r",
 			}
 			softwareList = append(softwareList, software)
 		}
-		
+
 		// 4. Check for specific software versions
 		commonSoftware := []struct {
-			name     string
-			command  string
-			swType   models.SoftwareType
+			name    string
+			command string
+			swType  models.SoftwareType
 		}{
 			{"bash", "bash --version | head -1", models.SoftwareTypeApplication},
 			{"python", "python --version 2>&1", models.SoftwareTypeApplication},
@@ -1075,7 +1090,7 @@ func (m *SSHManager) detectSoftwareInfo(conn *models.SSHConnection) ([]models.So
 			{"postgresql", "psql --version", models.SoftwareTypeDatabase},
 			{"docker", "docker --version", models.SoftwareTypeContainer},
 		}
-		
+
 		for _, sw := range commonSoftware {
 			output, err := m.executeCommandWithOutput(conn.Client, sw.command)
 			if err == nil && output != "" {
@@ -1086,7 +1101,7 @@ func (m *SSHManager) detectSoftwareInfo(conn *models.SSHConnection) ([]models.So
 					DetectionMethod:  "version-command",
 					DetectionCommand: sw.command,
 				}
-				
+
 				// Extract version number with a generic regex
 				versionPattern := regexp.MustCompile(`(\d+\.\d+(\.\d+)*)`)
 				if matches := versionPattern.FindStringSubmatch(output); len(matches) > 1 {
@@ -1094,19 +1109,19 @@ func (m *SSHManager) detectSoftwareInfo(conn *models.SSHConnection) ([]models.So
 				} else {
 					software.Version = "Unknown"
 				}
-				
+
 				softwareList = append(softwareList, software)
 			}
 		}
 	}
-	
+
 	return softwareList, nil
 }
 
 // getSoftwareType determines the type of software based on name
 func getSoftwareType(name string) models.SoftwareType {
 	name = strings.ToLower(name)
-	
+
 	if strings.Contains(name, "kernel") || strings.HasPrefix(name, "linux") {
 		return models.SoftwareTypeOS
 	} else if strings.Contains(name, "ssh") || strings.Contains(name, "openssh") {
@@ -2247,7 +2262,7 @@ func (m *SSHManager) executeSuggestionCommand(sessionID string, suggestion struc
 	return result, nil
 }
 
-// analyzeCommand analyzes a command for patterns and sends the analysis to the context aggregator
+// analyzeCommand analyzes a command for patterns and sends the analysis to the MCP service
 func (m *SSHManager) analyzeCommand(cmdInfo CommandAnalysis) {
 	// Exit early if we don't have a session client
 	if m.sessionClient == nil {
@@ -2257,19 +2272,87 @@ func (m *SSHManager) analyzeCommand(cmdInfo CommandAnalysis) {
 	// Wait a short delay to allow output to be processed
 	time.Sleep(500 * time.Millisecond)
 
-	// Here we would typically call the context aggregator to analyze the command
-	// For now, we'll just log that we would do this
+	// Log the command being analyzed
 	log.Printf("Analyzing command: %s (ID: %s, Suggested: %v)",
 		cmdInfo.Command, cmdInfo.ID, cmdInfo.IsSuggested)
 
-	// In a complete implementation, we would call an endpoint like:
-	// POST /api/v1/context-aggregator/analyze-command
-	// with details about the command, its output, and context
+	// If we have MCP client, store the command context
+	if m.mcpClient != nil {
+		// Get the SSH connection
+		m.sessionMutex.RLock()
+		conn, exists := m.sessions[cmdInfo.SessionID]
+		m.sessionMutex.RUnlock()
 
-	// You could implement a more sophisticated version that:
-	// 1. Retrieves recent output from the session service
-	// 2. Sends it to the context aggregator for analysis
-	// 3. Updates the command record with analysis results
+		if !exists {
+			log.Printf("Cannot analyze command: session %s not found", cmdInfo.SessionID)
+			return
+		}
+
+		// Get session context and recent commands
+		sessionContext, err := m.sessionClient.GetSessionContext(cmdInfo.SessionID)
+		if err != nil {
+			log.Printf("Failed to get session context: %v", err)
+			// Continue with partial data
+		}
+
+		// Get recent commands
+		var lastCommands []string
+		if sessionContext != nil {
+			if cmds, ok := sessionContext["command_history"].([]interface{}); ok {
+				for _, cmd := range cmds {
+					if cmdStr, ok := cmd.(string); ok {
+						lastCommands = append(lastCommands, cmdStr)
+					}
+				}
+			}
+		}
+
+		// Add the current command to the history
+		lastCommands = append(lastCommands, cmdInfo.Command)
+		if len(lastCommands) > 10 {
+			// Keep only the last 10 commands
+			lastCommands = lastCommands[len(lastCommands)-10:]
+		}
+
+		// Get basic information
+		currentDir := ""
+		currentUser := ""
+		hostname := ""
+
+		if sessionContext != nil {
+			if dir, ok := sessionContext["working_directory"].(string); ok {
+				currentDir = dir
+			}
+			if user, ok := sessionContext["current_user"].(string); ok {
+				currentUser = user
+			}
+		}
+
+		// Get hostname from connection
+		conn.Lock.RLock()
+		hostname = conn.TargetHost
+		userID := conn.UserID
+		conn.Lock.RUnlock()
+
+		// Store in MCP
+		go func() {
+			_, err := m.mcpClient.StoreTerminalContext(
+				cmdInfo.SessionID,
+				userID,
+				currentDir,
+				currentUser,
+				lastCommands,
+				hostname,
+			)
+			if err != nil {
+				log.Printf("Failed to store terminal context in MCP: %v", err)
+			} else {
+				log.Printf("Successfully stored terminal context in MCP for session %s", cmdInfo.SessionID)
+			}
+		}()
+	} else {
+		log.Printf("MCP client not available, skipping context storage")
+	}
 }
 
 // getAreaInfo obtiene información sobre un área de conocimiento, delegando al session client

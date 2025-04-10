@@ -9,7 +9,6 @@ import (
 	"github.com/google/uuid"
 
 	"terminal-session-service/models"
-	"terminal-session-service/repositories"
 )
 
 // SessionRepository interface defines the methods required for session operations
@@ -17,6 +16,7 @@ type SessionRepository interface {
 	SaveSession(session *models.Session) error
 	GetSession(sessionID string) (*models.Session, error)
 	GetUserSessions(userID string, status string, limit, offset int) ([]*models.Session, error)
+	GetSessionsByUserAndStatus(userID, status string) ([]*models.Session, error)
 	SearchSessions(req *models.SessionSearchRequest) ([]*models.Session, int, error)
 	UpdateSessionStatus(sessionID string, status models.SessionStatus) error
 
@@ -24,6 +24,7 @@ type SessionRepository interface {
 	GetCommand(commandID string) (*models.Command, error)
 	GetSessionCommands(sessionID string, limit, offset int) ([]*models.Command, error)
 	GetUserCommands(userID string, limit, offset int) ([]*models.Command, error)
+	GetRecentCommands(sessionID string, limit int) ([]*models.Command, error)
 	SearchCommands(req *models.HistorySearchRequest) ([]*models.Command, int, error)
 
 	SaveBookmark(bookmark *models.Bookmark) error
@@ -33,6 +34,11 @@ type SessionRepository interface {
 
 	SaveContext(context *models.SessionContext) error
 	GetContext(sessionID string) (*models.SessionContext, error)
+
+	UpdateSessionMode(sessionID string, mode models.SessionMode, areaID string) error
+	SaveSessionModeChange(modeChange models.SessionModeChange) error
+	GetSessionContext(sessionID string) (map[string]interface{}, error)
+	GetSessionsWithActiveArea(userID string) ([]models.Session, error)
 
 	PurgeOldSessions(days int) (int, error)
 	PurgeOldCommands(days int) (int, error)

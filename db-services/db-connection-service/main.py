@@ -59,10 +59,20 @@ except ImportError:
     structlog_available = False
 
 # Métricas para Prometheus
-HTTP_REQUESTS = Counter('http_requests_total', 'Total HTTP Requests', ['method', 'endpoint', 'status'])
-HTTP_REQUEST_DURATION = Histogram('http_request_duration_seconds', 'HTTP Request Duration', ['method', 'endpoint'])
-DB_OPERATIONS = Counter('db_operations_total', 'Total Database Operations', ['operation', 'status'])
-DB_OPERATION_DURATION = Histogram('db_operation_duration_seconds', 'Database Operation Duration', ['operation'])
+try:
+    # Registrar métricas una sola vez para evitar duplicados
+    HTTP_REQUESTS = Counter('http_requests_total', 'Total HTTP Requests', ['method', 'endpoint', 'status'])
+    HTTP_REQUEST_DURATION = Histogram('http_request_duration_seconds', 'HTTP Request Duration', ['method', 'endpoint'])
+    DB_OPERATIONS = Counter('db_operations_total', 'Total Database Operations', ['operation', 'status'])
+    DB_OPERATION_DURATION = Histogram('db_operation_duration_seconds', 'Database Operation Duration', ['operation'])
+except ValueError as e:
+    # Si ya existen, obtener las métricas existentes
+    from prometheus_client import REGISTRY
+    HTTP_REQUESTS = REGISTRY.get_sample_value('http_requests_total')
+    HTTP_REQUEST_DURATION = REGISTRY.get_sample_value('http_request_duration_seconds')
+    DB_OPERATIONS = REGISTRY.get_sample_value('db_operations_total')
+    DB_OPERATION_DURATION = REGISTRY.get_sample_value('db_operation_duration_seconds')
+    print(f"Reutilizando métricas Prometheus existentes: {e}")
 
 # Cargar configuración
 settings = Settings()

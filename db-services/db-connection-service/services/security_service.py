@@ -4,14 +4,14 @@ import logging
 from typing import List, Dict, Any
 
 from models.models import DBType
-from config.settings import Settings
+from config.settings import Settings, SecuritySettings
 
 logger = logging.getLogger(__name__)
 
 class SecurityService:
     """Servicio para validación de seguridad de consultas"""
     
-    def __init__(self, security_settings: Settings.SecuritySettings):
+    def __init__(self, security_settings: SecuritySettings):
         """
         Inicializar servicio con configuración
         

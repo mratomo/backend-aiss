@@ -12,6 +12,7 @@ class DBType(str, Enum):
     SQLSERVER = "sqlserver"
     ELASTICSEARCH = "elasticsearch"
     INFLUXDB = "influxdb"
+    WEAVIATE = "weaviate"
 
 class ConnectionStatus(str, Enum):
     """Estados posibles de una conexión"""
@@ -45,8 +46,8 @@ class DBConnection(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     created_by: Optional[str] = None
 
-    class Config:
-        schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "name": "Producción PostgreSQL",
                 "type": "postgresql",
@@ -61,6 +62,7 @@ class DBConnection(BaseModel):
                 "options": {"sslmode": "require"}
             }
         }
+    }
 
 class DBConnectionResponse(BaseModel):
     """Modelo para respuesta de conexión (sin credenciales)"""

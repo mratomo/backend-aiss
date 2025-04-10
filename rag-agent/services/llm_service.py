@@ -1263,16 +1263,24 @@ class LLMService:
             "Content-Type": "application/json"
         }
 
+        # Opciones básicas - simplemente pasar las opciones proporcionadas
+        # sin añadir configuración de GPU (eso debe configurarse en el servidor Ollama remoto)
+        options = {
+            "num_predict": max_tokens,
+            "temperature": temperature
+        }
+        
+        # Pasar opciones avanzadas si están en los metadatos del proveedor
+        if advanced_settings and "options" in advanced_settings:
+            options.update(advanced_settings["options"])
+        
         payload = {
             "model": provider.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            "options": {
-                "num_predict": max_tokens,
-                "temperature": temperature
-            }
+            "options": options
         }
 
         # Incorporar configuraciones avanzadas si se proporcionan

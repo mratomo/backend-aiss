@@ -2,7 +2,8 @@
 import os
 from typing import Dict, List, Optional, Union, Any
 
-from pydantic import BaseSettings, Field
+from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
 class OpenAISettings(BaseSettings):
@@ -42,6 +43,15 @@ class OllamaSettings(BaseSettings):
     enable_mcp: bool = Field(default=True)  # Habilitar integración MCP para Ollama
     models_path: str = Field(default="/usr/local/share/ollama/models")  # Ruta a los modelos de Ollama
     is_remote: bool = Field(default=False)  # Indica si Ollama está en un servidor remoto
+    use_gpu: bool = Field(default=True)  # Usar GPU para la instancia local (validación de consultas)
+    # Opciones para optimizar el rendimiento de GPU con Ollama local
+    gpu_options: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "num_gpu": 1,         # Número de GPUs a usar
+            "f16_kv": True,       # Usar FP16 para KV-cache (menor uso de memoria)
+            "mirostat": 2,        # Estabilizador de muestreo (2 = medio)
+        }
+    )
 
 
 class RetrievalSettings(BaseSettings):
@@ -104,10 +114,12 @@ class Settings(BaseSettings):
     use_mcp_tools: bool = Field(default=True)  # Usar herramientas MCP cuando estén disponibles
     prefer_direct_mcp: bool = Field(default=True)  # Preferir LLMs con soporte MCP nativo
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "case_sensitive": False,
+        "extra": "ignore"
+    }
 
     def __init__(self, **kwargs):
         """Inicializar configuraciones con valores de variables de entorno"""
@@ -165,6 +177,7 @@ class Settings(BaseSettings):
             "OLLAMA_MCP_URL", self.ollama.mcp_url
         )
         self.ollama.is_remote = os.getenv("OLLAMA_IS_REMOTE", "false").lower() in ("true", "1", "yes")
+        self.ollama.use_gpu = os.getenv("OLLAMA_USE_GPU", "true").lower() in ("true", "1", "yes")
 
         # Configuración de MCP
         self.use_mcp_tools = os.getenv("USE_MCP_TOOLS", "true").lower() in ("true", "1", "yes")

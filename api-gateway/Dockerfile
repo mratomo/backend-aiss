@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
@@ -6,20 +6,19 @@ WORKDIR /app
 RUN apk add --no-cache gcc musl-dev
 
 # Copiar archivos de módulos Go
-COPY go.mod go.sum go.work* ./
+COPY go.mod go.sum ./
+# go.mod y go.work ahora son compatibles (ambos especifican Go 1.22)
 
 # Descargar dependencias (con mejor manejo de errores)
-RUN go mod download || echo "Warning: Some dependencies may not have been downloaded"
-RUN if [ -f go.work ]; then GOWORK=off go mod download || echo "Warning: Workspace dependencies may not have been downloaded"; fi
+# Descargar y verificar dependencias con manejo de errores
+RUN go mod download && go mod verify || true
 
-# Copiar código fuente
+# Ahora que go.mod y go.work son compatibles, podemos copiar todos los archivos
 COPY . .
 
-# Compilar la aplicación con manejo más robusto de errores
-RUN CGO_ENABLED=0 GOWORK=off go build -ldflags="-s -w" -o api-gateway . || \
-    (echo "Retrying build with Skip Resolve..." && \
-     GOWORK=off go build -o api-gateway -tags skipresolver . || \
-     (echo "Build failed even with skipresolver tag" && exit 1))
+# Compilar la aplicación con dependencias simplificadas
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o api-gateway .
+
 
 # Imagen final
 FROM alpine:3.18
@@ -36,7 +35,7 @@ COPY --from=builder /app/api-gateway .
 COPY --from=builder /app/config ./config
 
 # Exponer puerto
-EXPOSE 8080
+EXPOSE 8088
 
 # Ejecutar la aplicación
 CMD ["./api-gateway"]

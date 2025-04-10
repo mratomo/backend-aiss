@@ -2,21 +2,23 @@
 import os
 from typing import Dict, List, Optional, Union
 
-from pydantic import BaseSettings, Field, validator
+from pydantic import Field, validator
+from pydantic_settings import BaseSettings
 
 
-class QdrantSettings(BaseSettings):
-    """Configuración para Qdrant"""
-    url: str = Field(default="http://qdrant:6333")
+
+class WeaviateSettings(BaseSettings):
+    """Configuración para Weaviate"""
+    url: str = Field(default="http://weaviate:8080")  # Puerto interno de Weaviate
     api_key: Optional[str] = Field(default=None)
-
-    # Nombres de colecciones para diferentes tipos de embeddings
-    collection_general: str = Field(default="general_knowledge")
-    collection_personal: str = Field(default="personal_knowledge")
-
-    # Configuración de las colecciones
-    vector_size: Optional[int] = Field(default=None)  # Automático basado en modelo
-    distance: str = Field(default="Cosine")  # Métrica de distancia (Cosine, Euclid, Dot)
+    
+    # Nombres de clases para diferentes tipos de embeddings
+    class_general: str = Field(default="GeneralKnowledge")
+    class_personal: str = Field(default="PersonalKnowledge")
+    
+    # Parámetros para Weaviate
+    batch_size: int = Field(default=100)
+    timeout: int = Field(default=60)
 
 
 class ModelSettings(BaseSettings):
@@ -54,8 +56,11 @@ class Settings(BaseSettings):
     mongodb_uri: str = Field(default="mongodb://localhost:27017")
     mongodb_database: str = Field(default="mcp_knowledge_system")
 
-    # Configuración de Qdrant
-    qdrant: QdrantSettings = Field(default_factory=QdrantSettings)
+    # Configuración de base de datos vectorial
+    weaviate: WeaviateSettings = Field(default_factory=WeaviateSettings)
+    
+    # Selección de base de datos vectorial a utilizar (weaviate)
+    vector_db: str = Field(default="weaviate")
 
     # Configuración de modelos
     models: ModelSettings = Field(default_factory=ModelSettings)
@@ -71,33 +76,34 @@ class Settings(BaseSettings):
     max_document_size_mb: int = Field(default=20)  # Tamaño máximo de documento en MB
     max_texts_per_batch: int = Field(default=50)  # Número máximo de textos por batch
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "case_sensitive": False
+    }
 
     def __init__(self, **kwargs):
         """Inicializar configuraciones con valores de variables de entorno"""
+        # Definir CORS primero para evitar problemas de parsing
+        cors_origins = os.getenv("CORS_ALLOWED_ORIGINS")
+        if cors_origins:
+            kwargs["cors_allowed_origins"] = cors_origins.split(",")
+            
         super().__init__(**kwargs)
 
         # Priorizar variables de entorno sobre valores por defecto
         self.environment = os.getenv("ENVIRONMENT", self.environment)
         self.port = int(os.getenv("PORT", str(self.port)))
 
-        # Configuración de CORS
-        cors_origins = os.getenv("CORS_ALLOWED_ORIGINS")
-        if cors_origins:
-            self.cors_allowed_origins = cors_origins.split(",")
-
         # Configuración de MongoDB
         self.mongodb_uri = os.getenv("MONGODB_URI", self.mongodb_uri)
         self.mongodb_database = os.getenv("MONGODB_DATABASE", self.mongodb_database)
 
-        # Configuración de Qdrant
-        self.qdrant.url = os.getenv("QDRANT_URL", self.qdrant.url)
-        self.qdrant.api_key = os.getenv("QDRANT_API_KEY", self.qdrant.api_key)
-        self.qdrant.collection_general = os.getenv("QDRANT_COLLECTION_GENERAL", self.qdrant.collection_general)
-        self.qdrant.collection_personal = os.getenv("QDRANT_COLLECTION_PERSONAL", self.qdrant.collection_personal)
+        # Configuración de Weaviate
+        self.weaviate.url = os.getenv("WEAVIATE_URL", self.weaviate.url)
+        self.weaviate.api_key = os.getenv("WEAVIATE_API_KEY", self.weaviate.api_key)
+        self.weaviate.class_general = os.getenv("WEAVIATE_CLASS_GENERAL", self.weaviate.class_general)
+        self.weaviate.class_personal = os.getenv("WEAVIATE_CLASS_PERSONAL", self.weaviate.class_personal)
 
         # Configuración de modelos
         self.models.general_model = os.getenv("GENERAL_EMBEDDING_MODEL", self.models.general_model)

@@ -1,29 +1,33 @@
-fastapi==0.103.1
-uvicorn==0.23.2
-motor==3.3.1
-pymongo==4.5.0
-pydantic==2.3.0
-python-dotenv==1.0.0
-aiohttp==3.8.5
-torch==2.0.1
-transformers==4.33.2
-sentence-transformers==2.2.2
-python-multipart==0.0.6
-PyPDF2==3.0.1
-python-docx==0.8.11
+fastapi>=0.103.1,<0.116.0
+uvicorn>=0.23.2,<0.35.0
+motor>=3.3.1,<3.8.0
+pymongo>=4.5.0,<4.10.0
+pydantic>=2.3.0,<2.12.0
+pydantic-settings>=2.0.0,<2.9.0
+python-dotenv>=1.0.0,<1.1.0
+aiohttp>=3.8.5,<3.10.0
+numpy<2.0.0  # Explicit dependency on NumPy 1.x to avoid compatibility issues
+# No especificar torch aquí, se instalará en el Dockerfile con soporte CUDA
+transformers>=4.33.2,<4.52.0  # Actualizado para permitir versiones más recientes como 4.51.1
+sentence-transformers>=2.2.2,<2.3.0
+python-multipart>=0.0.6,<0.0.7
+PyPDF2>=3.0.1,<3.1.0
+python-docx>=0.8.11,<0.9.0
 # Optimizaciones para HuggingFace models
-accelerate==0.26.1
-bitsandbytes==0.41.0  # Para cuantización de 8-bit
+accelerate>=0.26.1,<0.28.0
+bitsandbytes>=0.41.0,<0.42.0  # Para cuantización de 8-bit
 # Modelo de embeddings Nomic 
-nomic==3.4.1
+nomic>=3.4.1,<3.5.0
+# Weaviate client para base de datos vectorial
+weaviate-client>=3.25.3,<4.0.0
 # Dependencias adicionales para manejo de errores y gestión de reintentos
-tenacity==8.2.3  # Para reintentos automáticos
+tenacity>=8.2.3,<8.3.0  # Para reintentos automáticos
 # Mejoras de rendimiento
-ujson==5.9.0      # JSON más rápido
-orjson==3.9.15    # Serialización JSON aún más rápida para FastAPI
-uvloop==0.19.0    # Mejora de rendimiento para asyncio (solo para Unix)
-httpx==0.25.2     # Cliente HTTP más moderno que aiohttp
+ujson>=5.9.0,<6.0.0      # JSON más rápido
+orjson>=3.9.15,<4.0.0    # Serialización JSON aún más rápida para FastAPI
+uvloop>=0.19.0,<0.20.0; sys_platform != "win32"    # Mejora de rendimiento para asyncio (solo para Unix)
+httpx>=0.25.2,<0.28.0     # Cliente HTTP más moderno que aiohttp
 # Monitoreo y observabilidad
-structlog==23.2.0          # Logging estructurado
-prometheus-client==0.18.0  # Métricas y monitoreo
-psutil==5.9.8              # Monitoreo de recursos del sistema
+structlog>=23.2.0,<24.0.0          # Logging estructurado
+prometheus-client>=0.18.0,<0.19.0  # Métricas y monitoreo
+psutil>=5.9.8,<6.0.0              # Monitoreo de recursos del sistema

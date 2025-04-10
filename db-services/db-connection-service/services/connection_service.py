@@ -86,7 +86,7 @@ class ConnectionService:
             connection.password = self.encryption_service.encrypt(connection.password)
         
         # Preparar documento
-        connection_dict = connection.dict(exclude={"id"})
+        connection_dict = connection.model_dump(exclude={"id"})
         connection_dict["created_at"] = datetime.utcnow()
         connection_dict["updated_at"] = datetime.utcnow()
         
@@ -124,7 +124,7 @@ class ConnectionService:
             return None
         
         # Preparar actualización
-        update_dict = update.dict(exclude_none=True)
+        update_dict = update.model_dump(exclude_none=True)
         
         # Encriptar contraseña si se proporciona
         if "password" in update_dict and update_dict["password"]:

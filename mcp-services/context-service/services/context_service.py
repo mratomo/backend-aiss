@@ -39,7 +39,7 @@ class ContextService:
             )
 
         # Crear documento de contexto
-        context_dict = context_data.dict()
+        context_dict = context_data.model_dump()
         context_dict["context_id"] = context_id
         context_dict["created_at"] = now
         context_dict["updated_at"] = now
@@ -145,7 +145,7 @@ class ContextService:
             )
 
         # Preparar datos de actualización
-        update_dict = {k: v for k, v in update_data.dict().items() if v is not None}
+        update_dict = {k: v for k, v in update_data.model_dump().items() if v is not None}
         update_dict["updated_at"] = datetime.utcnow()
 
         # Actualizar en la base de datos

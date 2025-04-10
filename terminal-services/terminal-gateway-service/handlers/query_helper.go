@@ -48,17 +48,17 @@ func (q *queryModeHandler) toggleQueryMode(sessionID string, ws *websocket.Conn,
 				ws.WriteJSON(models.WebSocketMessage{
 					Type: "mode_change_request",
 					Data: map[string]interface{}{
-						"message": "Please select a knowledge area for query mode",
+						"message":  "Please select a knowledge area for query mode",
 						"required": true,
 					},
 				})
 				return
 			}
-			
+
 			// Use the most recent area
 			activeAreaID = recentArea
 		}
-		
+
 		// Enable query mode with the active area
 		q.enableQueryMode(sessionID, ws, conn, activeAreaID)
 	}
@@ -108,7 +108,7 @@ func (q *queryModeHandler) enableQueryMode(sessionID string, ws *websocket.Conn,
 
 	// Send visual indicator to the terminal
 	promptMsg := utils.FormatQueryModeActivation(areaID, areaName)
-	
+
 	// Send the message to the client
 	ws.WriteJSON(models.WebSocketMessage{
 		Type: "terminal_output",
@@ -155,7 +155,7 @@ func (q *queryModeHandler) disableQueryMode(sessionID string, ws *websocket.Conn
 
 	// Send visual indicator to the terminal
 	promptMsg := utils.FormatQueryModeDeactivation()
-	
+
 	// Send the message to the client
 	ws.WriteJSON(models.WebSocketMessage{
 		Type: "terminal_output",
@@ -184,7 +184,7 @@ func (q *queryModeHandler) handleRagQuery(sessionID string, userID string, query
 
 	// Start timer for tracking query duration
 	startTime := time.Now()
-	
+
 	// Get terminal context if needed
 	terminalContext, err := q.getTerminalContext(sessionID)
 	if err != nil {
@@ -194,13 +194,13 @@ func (q *queryModeHandler) handleRagQuery(sessionID string, userID string, query
 
 	// Call the RAG Agent via the session client
 	response, err := q.manager.sessionClient.ProcessRagQuery(query, userID, areaID, terminalContext)
-	
+
 	// Stop progress renderer
 	progressRenderer.Stop()
 
 	// Calculate query time
 	queryTime := time.Since(startTime)
-	
+
 	if err != nil {
 		q.logger.Error("Failed to process RAG query (%s): %v", query, err)
 		// Send error message to the client
@@ -215,10 +215,10 @@ func (q *queryModeHandler) handleRagQuery(sessionID string, userID string, query
 
 	// Format the response
 	formattedResponse := utils.FormatRagResponse(response.Answer, response.Sources)
-	
+
 	// Log successful completion
 	q.logger.Info("RAG Query completed in %v: %s", queryTime, query)
-	
+
 	// Send the response to the client
 	ws.WriteJSON(models.WebSocketMessage{
 		Type: "terminal_output",
@@ -226,7 +226,7 @@ func (q *queryModeHandler) handleRagQuery(sessionID string, userID string, query
 			Data: formattedResponse,
 		},
 	})
-	
+
 	// Also send the structured response for the UI to handle
 	ws.WriteJSON(models.WebSocketMessage{
 		Type: "rag_response",
@@ -236,12 +236,39 @@ func (q *queryModeHandler) handleRagQuery(sessionID string, userID string, query
 
 // getTerminalContext retrieves the terminal context for a session
 func (q *queryModeHandler) getTerminalContext(sessionID string) (map[string]interface{}, error) {
-	// Get the session context from the session service
+	// First try to get from MCP if available
+	if q.manager.mcpClient != nil {
+		// Get basic session context first
+		basicContext, err := q.manager.sessionClient.GetSessionContext(sessionID)
+		if err != nil {
+			q.logger.Warning("Failed to get session context from session service: %v", err)
+			// Continue with empty context, we'll try to enrich from MCP
+		}
+
+		// Try to get enriched context from MCP
+		enrichedContext, err := q.manager.mcpClient.RetrieveTerminalContext(sessionID, "", basicContext)
+		if err == nil && enrichedContext != nil {
+			// Check if we have relevant context
+			if relevantContext, ok := enrichedContext["relevant_context"]; ok && relevantContext != nil {
+				q.logger.Info("Retrieved enriched terminal context from MCP for session %s", sessionID)
+				return enrichedContext, nil
+			}
+		} else if err != nil {
+			q.logger.Warning("Failed to get context from MCP: %v", err)
+		}
+
+		// Return basic context if we couldn't get enriched
+		if basicContext != nil {
+			return basicContext, nil
+		}
+	}
+
+	// Fallback to session service context
 	context, err := q.manager.sessionClient.GetSessionContext(sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session context: %w", err)
 	}
-	
+
 	return context, nil
 }
 
@@ -249,23 +276,23 @@ func (q *queryModeHandler) getTerminalContext(sessionID string) (map[string]inte
 func isShortcutKey(input string, shortcut string) bool {
 	// This is a simplified check - in a real terminal client,
 	// we would receive proper keyboard events with key codes
-	
+
 	// Check for control characters that might represent the shortcut
 	if shortcut == "ctrl+alt+q" {
 		// Check for variations of Ctrl+Alt+Q
 		variants := []string{
-			"\x11q", // Ctrl+Q
+			"\x11q",     // Ctrl+Q
 			"\x11\x01q", // Some terminals might send this for Ctrl+Alt+Q
-			"^Qq", // Another representation
+			"^Qq",       // Another representation
 		}
-		
+
 		for _, variant := range variants {
 			if strings.Contains(input, variant) {
 				return true
 			}
 		}
 	}
-	
+
 	// Also check for a literal string match (for testing)
 	return strings.Contains(strings.ToLower(input), shortcut)
 }

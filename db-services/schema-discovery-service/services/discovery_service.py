@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union, Protocol
 
@@ -42,8 +43,9 @@ class SchemaDiscoveryService:
         self.use_httpx = HTTPX_AVAILABLE and isinstance(http_client, httpx.AsyncClient)
         
         # Inicializar cliente MongoDB
-        self.mongo_client = AsyncIOMotorClient(settings.mongodb_uri)
-        self.db = self.mongo_client[settings.mongodb_db_name]
+        mongodb_uri = os.getenv("MONGODB_URI", "mongodb://admin:password@mongodb:27017/aiss?authSource=admin")
+        self.mongo_client = AsyncIOMotorClient(mongodb_uri)
+        self.db = self.mongo_client["aiss"]
         self.collection = self.db["database_schemas"]
         
         # Crear índice en connection_id si no existe
@@ -77,7 +79,7 @@ class SchemaDiscoveryService:
             ID del documento
         """
         # Convertir a dict para MongoDB
-        schema_dict = schema.dict()
+        schema_dict = schema.model_dump()
         
         # Actualizar o insertar
         result = await self.collection.update_one(

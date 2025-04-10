@@ -181,14 +181,21 @@ class OllamaMCPService:
         try:
             client = await self.get_http_client()
             
+            # Opciones básicas de generación
+            options = {
+                "num_predict": max_tokens,
+                "temperature": temperature
+            }
+            
+            # Añadir opciones de GPU si está habilitado y es la instancia local (para validación de consultas)
+            if self.settings.ollama.use_gpu and not self.is_remote:
+                options.update(self.settings.ollama.gpu_options)
+            
             payload = {
                 "model": model,
                 "prompt": prompt,
                 "system": system_prompt,
-                "options": {
-                    "num_predict": max_tokens,
-                    "temperature": temperature
-                },
+                "options": options,
                 "stream": False
             }
             
@@ -245,6 +252,16 @@ class OllamaMCPService:
             # En una implementación real, este código podría ser más complejo
             # y manejar la comunicación con un servidor MCP externo
             
+            # Opciones básicas de generación
+            options = {
+                "num_predict": max_tokens,
+                "temperature": temperature
+            }
+            
+            # Añadir opciones de GPU si está habilitado y es la instancia local (para validación de consultas)
+            if self.settings.ollama.use_gpu and not self.is_remote:
+                options.update(self.settings.ollama.gpu_options)
+            
             # Crear una solicitud MCP para Ollama
             payload = {
                 "model": model,
@@ -252,10 +269,7 @@ class OllamaMCPService:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
                 ],
-                "options": {
-                    "num_predict": max_tokens,
-                    "temperature": temperature
-                }
+                "options": options
             }
             
             # Llamar a Ollama a través de la interfaz MCP

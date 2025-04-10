@@ -42,11 +42,11 @@ class Context(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     last_activated: Optional[datetime] = None
 
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-        schema_extra = {
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str},
+        "json_schema_extra": {
             "example": {
                 "context_id": "ctx_123456789",
                 "name": "Inteligencia Artificial",
@@ -58,6 +58,7 @@ class Context(BaseModel):
                 "last_activated": "2023-01-15T12:30:45.123Z"
             }
         }
+    }
 
 
 # Modelo para la respuesta de contexto

@@ -66,6 +66,12 @@ type UpdatePasswordRequest struct {
 	NewPassword     string `json:"new_password" binding:"required,min=8"`
 }
 
+// ChangePasswordRequest representa la solicitud para cambiar la contraseña de un usuario
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+	NewPassword     string `json:"new_password" binding:"required,min=8"`
+}
+
 // UpdatePermissionsRequest representa la solicitud para actualizar permisos
 type UpdatePermissionsRequest struct {
 	AreaID string `json:"area_id" binding:"required"`

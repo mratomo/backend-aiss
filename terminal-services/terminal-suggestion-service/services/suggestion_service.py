@@ -4,6 +4,7 @@ import uuid
 import logging
 import asyncio
 import aiohttp
+import httpx
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 
@@ -13,6 +14,7 @@ from models.suggestion import (
     SuggestionType, 
     SuggestionRisk
 )
+from services.mcp_service import MCPService
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,7 @@ class SuggestionService:
     
     def __init__(self):
         self.cache = SuggestionCache()
+        self.mcp_service = MCPService()
         
         # Simple rules for pattern matching
         self.error_patterns = {
@@ -143,7 +146,7 @@ class SuggestionService:
                              exit_code: int = 0, 
                              context: Optional[Dict[str, Any]] = None,
                              use_cache: bool = True) -> Dict[str, Any]:
-        """Get suggestions for a terminal command and output"""
+        """Get suggestions for a terminal command and output using MCP context when available"""
         start_time = time.time()
         
         # Check cache if enabled
@@ -161,7 +164,10 @@ class SuggestionService:
                     "cached": True,
                 }
         
-        # Basic suggestions using rules
+        # Check MCP service status asynchronously to avoid delaying critical suggestion generation
+        mcp_status_task = asyncio.create_task(self.mcp_service.get_status())
+        
+        # Basic suggestions using rules - generate these immediately while waiting for LLM
         rule_suggestions = self._get_rule_based_suggestions(command, output, exit_code)
         
         # Try to get LLM-based suggestions with timeout
@@ -181,6 +187,15 @@ class SuggestionService:
         # Limit to max suggestions
         all_suggestions = all_suggestions[:settings.MAX_SUGGESTIONS]
         
+        # Wait for MCP status check to complete if it's not done yet
+        try:
+            # Use a short timeout to avoid blocking
+            mcp_status = await asyncio.wait_for(mcp_status_task, timeout=0.5)
+            mcp_available = isinstance(mcp_status, dict) and "name" in mcp_status
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.warning(f"MCP status check timed out or failed: {str(e)}")
+            mcp_available = False
+        
         # Calculate processing time
         processing_time = time.time() - start_time
         
@@ -190,6 +205,7 @@ class SuggestionService:
             "suggestions": all_suggestions,
             "processing_time_ms": processing_time * 1000,
             "context_used": bool(context),
+            "mcp_available": mcp_available,
             "source": "llm" if llm_suggestions else "rules",
         }
         
@@ -264,14 +280,66 @@ class SuggestionService:
                                   output: str, 
                                   exit_code: int,
                                   context: Optional[Dict[str, Any]]) -> List[Suggestion]:
-        """Get suggestions using LLM service"""
+        """Get suggestions using LLM service with MCP context enhancement"""
         try:
-            # Build prompt with context
-            prompt = self._build_llm_prompt(command, output, exit_code, context)
+            # Enrich context with MCP if context wasn't provided
+            mcp_context = None
+            if not context or len(context) == 0:
+                try:
+                    # Try to get relevant context from MCP for this command
+                    mcp_result = await self.mcp_service.get_command_context(session_id, command)
+                    
+                    if mcp_result.get("enriched", False):
+                        # Extract relevant context from MCP
+                        relevant_items = mcp_result.get("relevant_context", [])
+                        if relevant_items:
+                            # Convert MCP context to a format that can be used in the prompt
+                            mcp_context = {
+                                "command_history": [],
+                                "mcp_context": []
+                            }
+                            
+                            # Process each context item
+                            for item in relevant_items:
+                                if isinstance(item, dict):
+                                    text = item.get("text", "")
+                                    if "Command History:" in text:
+                                        # Extract command history
+                                        cmd_history_section = text.split("Command History:")[1].strip()
+                                        commands = [cmd.strip() for cmd in cmd_history_section.split("\n") if cmd.strip()]
+                                        mcp_context["command_history"].extend(commands[-5:])  # Last 5 commands
+                                    
+                                    # Add the relevant context
+                                    mcp_context["mcp_context"].append(text)
+                                elif isinstance(item, str):
+                                    mcp_context["mcp_context"].append(item)
+                except Exception as e:
+                    logger.warning(f"Failed to get MCP context: {e}")
+                    # Continue without MCP context
+            
+            # Merge existing context with MCP context
+            merged_context = context or {}
+            if mcp_context:
+                # If both have command_history, combine them
+                if "command_history" in merged_context and "command_history" in mcp_context:
+                    # Get unique commands from both sources, prioritizing existing context
+                    existing_cmds = set(merged_context["command_history"])
+                    merged_context["command_history"] = merged_context["command_history"] + [
+                        cmd for cmd in mcp_context["command_history"] if cmd not in existing_cmds
+                    ]
+                elif "command_history" in mcp_context:
+                    merged_context["command_history"] = mcp_context["command_history"]
+                
+                # Add MCP-specific context
+                if "mcp_context" in mcp_context:
+                    merged_context["mcp_context"] = mcp_context["mcp_context"]
+            
+            # Build prompt with enhanced context
+            prompt = self._build_llm_prompt(command, output, exit_code, merged_context)
             
             # Call LLM service
-            async with aiohttp.ClientSession() as session:
-                response = await session.post(
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
                     settings.LLM_SERVICE_URL,
                     json={
                         "prompt": prompt,
@@ -283,11 +351,11 @@ class SuggestionService:
                     headers={"Content-Type": "application/json"}
                 )
                 
-                if response.status != 200:
-                    logger.warning(f"LLM service returned error: {response.status}")
+                if response.status_code != 200:
+                    logger.warning(f"LLM service returned error: {response.status_code}")
                     return []
                 
-                result = await response.json()
+                result = response.json()
                 response_text = result.get("response", "")
                 
                 try:
@@ -316,6 +384,14 @@ class SuggestionService:
                                 metadata=item.get("metadata", {})
                             )
                             suggestions.append(suggestion)
+                            
+                            # Store quality suggestions in MCP for future reference
+                            if suggestion.command and suggestion.type in [SuggestionType.COMMAND, SuggestionType.ERROR_FIX]:
+                                # Store asynchronously without waiting for result
+                                asyncio.create_task(
+                                    self.mcp_service.store_suggestion(session_id, command, suggestion)
+                                )
+                                
                         except KeyError as e:
                             logger.warning(f"Invalid suggestion data, missing key: {e}")
                     
@@ -334,7 +410,7 @@ class SuggestionService:
                          output: str, 
                          exit_code: int,
                          context: Optional[Dict[str, Any]]) -> str:
-        """Build prompt for LLM"""
+        """Build prompt for LLM with enhanced MCP context"""
         system_prompt = """
         You are an AI assistant specialized in terminal operations. Generate helpful suggestions for the user based on their recent terminal command and its output.
         Focus on providing actionable, specific suggestions that will help the user achieve their goal.
@@ -379,11 +455,49 @@ Context information:
                 context_str += f"\nCurrent user: {context['current_user']}"
             if "hostname" in context:
                 context_str += f"\nHostname: {context['hostname']}"
+            
+            # Add recent commands (from terminal-context-aggregator or MCP)
+            command_history = []
             if "last_commands" in context and context["last_commands"]:
-                commands = context["last_commands"][-5:]  # Last 5 commands
-                context_str += "\nRecent commands:\n" + "\n".join(commands)
+                command_history.extend(context["last_commands"])
+            elif "command_history" in context and context["command_history"]:
+                command_history.extend(context["command_history"])
+                
+            if command_history:
+                # Get unique commands, limit to most recent 5
+                unique_commands = []
+                for cmd in reversed(command_history):
+                    if cmd not in unique_commands and cmd != command:  # Exclude current command
+                        unique_commands.append(cmd)
+                        if len(unique_commands) >= 5:
+                            break
+                            
+                if unique_commands:
+                    context_str += "\nRecent commands:\n" + "\n".join(reversed(unique_commands))
+            
+            # Add detected applications
             if "detected_applications" in context and context["detected_applications"]:
                 context_str += f"\nDetected applications: {', '.join(context['detected_applications'])}"
+            
+            # Add MCP context if available
+            if "mcp_context" in context and context["mcp_context"]:
+                mcp_context_items = context["mcp_context"]
+                # Filter to avoid too much redundancy or irrelevant information
+                filtered_items = []
+                for item in mcp_context_items:
+                    # Extract useful segments and avoid duplicating information already in context
+                    if isinstance(item, str):
+                        # Only include if likely to be relevant to current command
+                        if any(term in command.lower() for term in item.lower().split()[:10]):
+                            filtered_items.append(item)
+                    elif isinstance(item, dict) and "text" in item:
+                        if any(term in command.lower() for term in item["text"].lower().split()[:10]):
+                            filtered_items.append(item["text"])
+                
+                if filtered_items:
+                    context_str += "\n\nRelevant historical context:\n"
+                    for item in filtered_items[:3]:  # Limit to 3 items to avoid too much context
+                        context_str += f"\n---\n{item[:300]}..."  # Truncate long items
             
             prompt += context_str
         
