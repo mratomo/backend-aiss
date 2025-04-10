@@ -7,17 +7,19 @@ pydantic-settings>=2.0.0,<2.9.0
 python-dotenv>=1.0.0,<1.1.0
 aiohttp>=3.8.5,<3.10.0
 numpy<2.0.0  # Explicit dependency on NumPy 1.x to avoid compatibility issues
-# No especificar torch aquí, se instalará en el Dockerfile con soporte CUDA
-transformers>=4.33.2,<4.52.0  # Actualizado para permitir versiones más recientes como 4.51.1
-sentence-transformers>=2.2.2,<2.3.0
 python-multipart>=0.0.6,<0.0.7
 PyPDF2>=3.0.1,<3.1.0
 python-docx>=0.8.11,<0.9.0
-# Optimizaciones para HuggingFace models
-accelerate>=0.26.1,<0.28.0
-bitsandbytes>=0.41.0,<0.42.0  # Para cuantización de 8-bit
-# Modelo de embeddings Nomic 
-nomic>=3.4.1,<3.5.0
+
+accelerate==0.26.1
+
+# --- VERSIONES ACTUALIZADAS ---
+sentence-transformers==4.0.2
+transformers==4.51.1
+torch>=2.5.1 # Requisito mínimo, la versión exacta con CUDA se instala en Dockerfile
+# --- FIN VERSIONES ACTUALIZADAS ---
+# Dependencias para el modelo Nomic
+einops>=0.6.1
 # Weaviate client para base de datos vectorial
 weaviate-client>=3.25.3,<4.0.0
 # Dependencias adicionales para manejo de errores y gestión de reintentos

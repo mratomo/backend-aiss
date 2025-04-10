@@ -476,7 +476,7 @@ services:
       - ALLOW_DEGRADED_MODE=true
       - USE_HTTPX=true
       # Configuración de modelo embedding
-      - GENERAL_EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5-fp16
+      - GENERAL_EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5
       - USE_GPU=true
       - USE_8BIT=true
       - USE_FP16=true

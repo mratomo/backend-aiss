@@ -6,7 +6,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple, Union
 
 import torch
-from transformers import AutoModel, AutoTokenizer
+# Importar sentence_transformers directamente en lugar de transformers
+from sentence_transformers import SentenceTransformer
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from fastapi import HTTPException
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
@@ -102,21 +103,13 @@ class EmbeddingService:
                         else:
                             raise ValueError(f"Error al inicializar GPU: {e}")
                     
-                    # Verificar que Nomic también detecta GPU
+                    # Verificar que estamos usando tecnología adecuada para RTX 4090
                     if self.gpu_available:
-                        try:
-                            from nomic import embed
-                            import nomic
-                            # Comprobar versión de Nomic de manera segura
-                            try:
-                                version = getattr(nomic, "__version__", "desconocida")
-                                logger.info(f"Nomic versión: {version}")
-                            except AttributeError:
-                                logger.info("Nomic instalado, pero no se pudo determinar la versión")
-                            # Nomic automáticamente usa la GPU si está disponible
-                            logger.info("Nomic configurado para usar GPU disponible")
-                        except ImportError:
-                            logger.warning("No se pudo importar Nomic para verificar soporte de GPU")
+                        logger.info("SentenceTransformer está configurado para aprovechar la GPU detectada")
+                        logger.info("Batch size optimizado para RTX 4090: " + str(self.settings.models.batch_size))
+                        if self.settings.models.use_fp16:
+                            logger.info("FP16 (media precisión) activado para mejor rendimiento en RTX 4090")
+                        logger.info("Modelo Nomic utilizará GPU a través de SentenceTransformer")
                 except Exception as e:
                     # Error general al configurar GPU
                     logger.error(f"Error configurando GPU: {e}")
@@ -170,113 +163,123 @@ class EmbeddingService:
         self._update_vector_size()
 
     async def _load_model(self, model_name: str) -> Dict[str, Any]:
-        """Cargar y optimizar modelo de embeddings"""
+        """
+        Cargar y optimizar modelo de embeddings (SOLO NOMIC v1.5).
+        Devuelve un diccionario con la instancia del modelo y metadatos.
+        """
+        # Como solo usamos Nomic, model_name siempre debería ser "nomic-ai/nomic-embed-text-v1.5"
+        if "nomic-ai/nomic-embed-text-v1.5" not in model_name:
+            # Forzar al modelo correcto si por alguna razón se intenta cargar otro
+            logger.warning(f"Intentando cargar un modelo no soportado: {model_name}. Usando Nomic v1.5.")
+            model_name = "nomic-ai/nomic-embed-text-v1.5"
+            
         try:
-            # Verificar si es un modelo de Nomic
-            if "nomic" in model_name.lower():
+            # Verificar versión de sentence_transformers 
+            try:
+                import importlib.metadata
+                st_version = importlib.metadata.version("sentence_transformers")
+                logger.info(f"SentenceTransformer versión detectada: {st_version}")
+            except ImportError:
+                logger.error("Biblioteca sentence_transformers no está instalada correctamente.")
+                raise
+            
+            # Crear directorio para caché si no existe
+            import os
+            cache_dir = "./modelos"
+            os.makedirs(cache_dir, exist_ok=True)
+            
+            # Cargar el modelo una sola vez - esta función es crucial para la eficiencia
+            logger.info(f"Cargando modelo {model_name} usando SentenceTransformer...")
+            
+            # Ejecutar en un thread separado para no bloquear
+            def load_actual_model():
                 try:
-                    # Importar SentenceTransformer en lugar de Nomic API
-                    try:
-                        from sentence_transformers import SentenceTransformer
-                        import importlib.metadata
-                        
-                        # Verificar versión de sentence-transformers
-                        st_version = importlib.metadata.version("sentence-transformers")
-                        logger.info(f"SentenceTransformer versión detectada: {st_version}")
-                        
-                    except ImportError:
-                        logger.error("Biblioteca SentenceTransformer no está instalada. Instálala con 'pip install sentence-transformers'")
-                        raise
+                    # Determinar dispositivo (ya debería estar en self.device)
+                    device = self.device
                     
-                    # Crear directorio para caché si no existe
-                    import os
-                    cache_dir = "./modelos"
-                    os.makedirs(cache_dir, exist_ok=True)
+                    # Si fallback_to_cpu=False y solo hay CPU disponible, es un error crítico
+                    if device == "cpu" and not self.settings.models.fallback_to_cpu:
+                        raise RuntimeError("GPU requerida pero solo CPU disponible y fallback desactivado.")
                     
-                    # Precargar el modelo para verificar que funciona
-                    # No es necesario mantenerlo en memoria, solo verificar que puede cargarse
-                    logger.info(f"Verificando carga del modelo {model_name}...")
-                    
-                    # Ejecutar en un thread separado para no bloquear
-                    def verify_model_loading():
-                        device = "cuda:0" if self.gpu_available else "cpu"
-                        # Verificar carga del modelo
-                        _ = SentenceTransformer(model_name, cache_folder=cache_dir, 
-                                              device=device, trust_remote_code=True)
-                        return True
-                    
-                    # Verificar de forma asíncrona
-                    await asyncio.to_thread(verify_model_loading)
-                    
-                    # Los modelos Nomic tienen una dimensión fija de 1024
-                    vector_dim = 1024
-                    
-                    logger.info(f"Modelo Nomic inicializado para uso con SentenceTransformer: {model_name}")
-                    
+                    # Verificar disponibilidad de GPU y mostrar información
                     if self.gpu_available:
-                        logger.info(f"Nomic utilizará GPU en dispositivo: {self.device}")
+                        # Verificar memoria disponible - útil para RTX 4090 con 24GB
+                        mem_info = torch.cuda.get_device_properties(0)
+                        total_mem_gb = mem_info.total_memory / (1024 * 1024 * 1024)
+                        logger.info(f"GPU detectada: {mem_info.name} con {total_mem_gb:.1f} GB de memoria")
+                    else:
+                        if not self.settings.models.fallback_to_cpu:
+                            raise RuntimeError("No se detectó GPU y fallback a CPU está desactivado.")
+                        logger.warning("Usando CPU (GPU no disponible o desactivada).")
                     
-                    # Guardar la información del modelo para uso posterior
+                    # Cargar modelo usando SentenceTransformer - ESTA INSTANCIA SE REUTILIZARÁ
+                    logger.info(f"Cargando y manteniendo en memoria modelo {model_name} en {device}...")
+                    sentence_model = SentenceTransformer(
+                        model_name, 
+                        cache_folder=cache_dir,
+                        device=device,
+                        trust_remote_code=True  # Necesario para modelos Nomic
+                    )
+                    
+                    # Verificar modelo con una entrada simple
+                    test_text = "search_document: Prueba de modelo"
+                    logger.info(f"Verificando el modelo con texto de prueba: '{test_text}'")
+                    
+                    # Generar embedding de prueba
+                    embedding = sentence_model.encode(
+                        test_text, 
+                        convert_to_tensor=True,
+                        show_progress_bar=False
+                    )
+                    
+                    # Obtener dimensión del embedding
+                    embedding_dim = embedding.size(-1)
+                    logger.info(f"Dimensión de embedding detectada: {embedding_dim}")
+                    logger.info(f"Modelo verificado exitosamente en {device}")
+                    
+                    # Importante: NO eliminamos el modelo, lo devolvemos para reutilizarlo
+                    # Solo liberamos el embedding de prueba
+                    del embedding
+                    
+                    # Devolvemos la instancia del modelo y la dimensión del vector
                     return {
-                        "model_type": "nomic",
-                        "model_name": model_name,
-                        "vector_dim": vector_dim,
-                        "tokenizer": None,  # Manejado por SentenceTransformer
-                        "version": st_version,  # Versión de SentenceTransformer
-                        "cache_dir": cache_dir  # Directorio de caché para modelos
+                        "model_instance": sentence_model,
+                        "vector_dim": embedding_dim
                     }
-                except ImportError as e:
-                    logger.error(f"Error importando SentenceTransformer: {e}")
-                    raise
                 except Exception as e:
-                    logger.error(f"Error inicializando modelo Nomic con SentenceTransformer: {e}")
+                    logger.error(f"Error cargando modelo: {e}", exc_info=True)
                     raise
-            else:
-                # Cargar tokenizer de HuggingFace
-                tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-                # Configurar opciones de carga
-                load_options = {}
-
-                # Activar cuantización 8-bit si está configurada
-                if self.gpu_available and self.settings.models.use_8bit:
-                    try:
-                        import bitsandbytes as bnb
-                        logger.info(f"Cargando modelo {model_name} con cuantización 8-bit")
-                        load_options["load_in_8bit"] = True
-                    except ImportError:
-                        logger.warning("bitsandbytes no está instalado. Desactivando cuantización 8-bit.")
-
-                # Usar asyncio para no bloquear el bucle de eventos durante la carga
-                model = await asyncio.to_thread(
-                    AutoModel.from_pretrained, model_name, **load_options
-                )
-
-                # Optimizar para inferencia
-                model = model.eval()
-
-                # Usar media precisión si está disponible
-                if self.gpu_available and self.settings.models.use_fp16:
-                    model = model.half()  # FP16 para aumentar el rendimiento
-
-                # Mover el modelo a la GPU si está disponible
-                model = model.to(self.device)
-
-                # Obtener dimensión del vector (útil para Qdrant)
-                # Para BGE, generalmente es 1024, para E5 podría ser 768
-                # Lo obtenemos dinámicamente a partir de la configuración del modelo
-                vector_dim = model.config.hidden_size
-
-                logger.info(f"Modelo HuggingFace {model_name} cargado exitosamente. Dimensión del vector: {vector_dim}")
-
-                return {
-                    "model_type": "huggingface",
-                    "model": model,
-                    "tokenizer": tokenizer,
-                    "vector_dim": vector_dim
-                }
+            
+            # Cargar el modelo de forma asíncrona
+            model_data = await asyncio.to_thread(load_actual_model)
+            
+            # Obtener la instancia del modelo y la dimensión del vector
+            sentence_model = model_data["model_instance"]
+            vector_dim = model_data["vector_dim"]
+            
+            logger.info(f"Modelo Nomic cargado exitosamente con SentenceTransformer: {model_name}")
+            
+            if self.gpu_available:
+                logger.info(f"Nomic utilizará GPU en dispositivo: {self.device}")
+            
+            # Obtener versión de transformers
+            try:
+                import transformers
+                transformers_version = getattr(transformers, "__version__", "desconocida")
+            except ImportError:
+                transformers_version = "no disponible"
+            
+            # Devolver diccionario con la instancia del modelo y metadatos
+            return {
+                "model_type": "nomic",
+                "model_name": model_name,
+                "model_instance": sentence_model,  # IMPORTANTE: Ahora devolvemos la instancia real del modelo
+                "vector_dim": vector_dim,
+                "version": transformers_version,
+                "cache_dir": cache_dir
+            }
         except Exception as e:
-            logger.error(f"Error cargando modelo {model_name}: {e}")
+            logger.error(f"Error cargando modelo Nomic con SentenceTransformer: {e}", exc_info=True)
             raise
 
     def _update_vector_size(self):
@@ -296,17 +299,28 @@ class EmbeddingService:
             logger.info(f"Base de datos vectorial: {self.settings.vector_db} configurada para manejar vectores de {vector_dim} dimensiones")
 
     async def close(self):
-        """Liberar recursos del servicio"""
+        """Liberar recursos del servicio - limpieza adecuada de modelos cargados"""
         # Liberar modelos y GPU si es necesario
         for model_type in self.models:
-            self.models[model_type].clear()
+            model_info = self.models[model_type]
+            
+            # Liberar la instancia del modelo explícitamente
+            if "model_instance" in model_info:
+                logger.info(f"Liberando instancia del modelo para {model_type}")
+                model_instance = model_info["model_instance"]
+                model_info["model_instance"] = None
+                del model_instance
+            
+            # Limpiar el resto de la información
+            model_info.clear()
 
+        # Limpiar diccionario de modelos
         self.models.clear()
 
         if self.gpu_available:
             # Limpiar caché de CUDA
             torch.cuda.empty_cache()
-            logger.info("Recursos de GPU liberados")
+            logger.info("Instancias de modelos y recursos de GPU liberados correctamente")
 
     def _get_model(self, embedding_type: EmbeddingType) -> Dict[str, Any]:
         """Obtener modelo para el tipo de embedding especificado"""
@@ -393,126 +407,65 @@ class EmbeddingService:
                                   text: str,
                                   model_info: Dict[str, Any]) -> torch.Tensor:
         """
-        Genera embedding para un texto usando el modelo correspondiente (HuggingFace o Nomic)
+        Genera embedding para un texto usando el modelo Nomic v1.5 con SentenceTransformer.
+        Usa la instancia precargada del modelo para mayor eficiencia.
         Con reintentos automáticos en caso de fallos transitorios.
 
         Args:
             text: Texto a convertir en embedding
-            model_info: Información del modelo cargado
+            model_info: Información del modelo cargado, incluye la instancia SentenceTransformer
 
         Returns:
             Vector de embedding normalizado
         """
-        model_type = model_info.get("model_type", "huggingface")
-        
-        # Generar embeddings con SentenceTransformer (en lugar de la API de Nomic)
-        if model_type == "nomic":
-            try:
-                # Importar de manera segura
+        try:
+            # Verificar disponibilidad de GPU si es obligatoria
+            if self.device == "cpu" and not self.settings.models.fallback_to_cpu:
+                raise RuntimeError("GPU requerida para generar embeddings pero solo CPU disponible.")
+            
+            # Importante: Obtener la instancia del modelo ya cargada
+            sentence_model = model_info.get("model_instance")
+            if sentence_model is None:
+                raise ValueError("Instancia de modelo no disponible - inicialización incorrecta")
+            
+            # Generar embeddings usando la instancia precargada del modelo
+            def generate_nomic_embedding(model, input_text):
                 try:
-                    from sentence_transformers import SentenceTransformer
-                except ImportError:
-                    logger.error("No se pudo importar SentenceTransformer, asegúrate de tener la versión correcta instalada")
-                    raise
-                
-                # Generar embeddings usando SentenceTransformer con modelo de Nomic localmente
-                def generate_nomic_local():
-                    try:
-                        # Crear directorio para caché si no existe
-                        import os
-                        cache_dir = "./modelos"
-                        os.makedirs(cache_dir, exist_ok=True)
-                        
-                        # Cargar modelo con SentenceTransformer y forzar uso de GPU
-                        model_name = "nomic-ai/nomic-embed-text-v1.5"
-                        
-                        # Configuramos explícitamente para usar GPU
-                        if not self.gpu_available:
-                            raise ValueError("GPU requerida para generar embeddings. No se encontró GPU disponible.")
-                        
-                        # Cargar modelo en GPU explícitamente con trust_remote_code=True para modelos de Nomic
-                        sentence_model = SentenceTransformer(model_name, cache_folder=cache_dir, 
-                                                            device=self.device, trust_remote_code=True)
-                        
-                        # Añadir prefijo de instrucción según recomendación de Nomic
-                        # 'search_document:' para textos que serán buscados, 'search_query:' para consultas
-                        prefixed_text = f"search_document: {text}"
-                        
-                        # Generar embedding desde el texto con prefijo
-                        embedding = sentence_model.encode(prefixed_text, convert_to_tensor=True)
-                        
-                        # Verificar que se haya generado correctamente
-                        if embedding.dim() == 0 or embedding.numel() == 0:
-                            raise ValueError(f"Embedding generado inválido: {embedding.shape}")
-                        
-                        # Los embeddings de Nomic ya vienen normalizados por el modelo
-                        # pero aseguramos la normalización para consistencia
-                        normalized = torch.nn.functional.normalize(embedding, p=2, dim=0)
-                        
-                        # Revisar el resultado y su formato
-                        logger.info(f"Embedding generado con SentenceTransformer correctamente - forma: {normalized.shape}")
-                        logger.info(f"Dispositivo usado: {sentence_model.device}")
-                        
-                        return normalized
-                    except Exception as e:
-                        logger.error(f"Error en generate_nomic_local: {e}")
-                        raise
-                
-                # Ejecutar de forma asíncrona
-                result = await asyncio.to_thread(generate_nomic_local)
-                return result
-                
-            except Exception as e:
-                logger.error(f"Error generando embedding con SentenceTransformer: {e}")
-                raise
-        
-        # Generar embeddings con modelos HuggingFace (BGE/E5)
-        else:
-            max_length = self.settings.models.max_length
-            model = model_info["model"]
-            tokenizer = model_info["tokenizer"]
-
-            # Tokenizar texto con manejo de errores
-            try:
-                inputs = tokenizer(
-                    text,
-                    max_length=max_length,
-                    padding="max_length",
-                    truncation=True,
-                    return_tensors="pt"
-                )
-            except Exception as e:
-                logger.error(f"Error al tokenizar texto: {e}")
-                # Crear un texto más pequeño y simple si la tokenización falla
-                fallback_text = text[:500] if len(text) > 500 else text
-                inputs = tokenizer(
-                    fallback_text,
-                    max_length=max_length // 2,
-                    padding="max_length",
-                    truncation=True,
-                    return_tensors="pt"
-                )
-
-            # Mover a GPU si está disponible
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-            # Ejecutar en un thread separado para no bloquear el event loop
-            def generate_huggingface():
-                try:
-                    with torch.no_grad():
-                        outputs = model(**inputs)
-                        # Para modelos BGE/E5, usamos el token [CLS] (primer token)
-                        embeddings = outputs.last_hidden_state[:, 0]
-                        # Normalizar para similaridad de coseno
-                        normalized = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-                        return normalized[0].cpu()  # Mover de vuelta a CPU para el resultado
+                    # Añadir prefijo de instrucción según recomendación de Nomic si no existe ya
+                    # 'search_document:' para textos que serán almacenados
+                    # 'search_query:' para consultas de búsqueda
+                    if input_text.startswith("search_query:") or input_text.startswith("search_document:"):
+                        prefixed_text = input_text  # Ya tiene el prefijo correcto
+                    else:
+                        prefixed_text = f"search_document: {input_text}"  # Por defecto usar search_document
+                    
+                    # Generar embedding usando el modelo precargado (más eficiente)
+                    embedding = model.encode(
+                        prefixed_text, 
+                        convert_to_tensor=True,
+                        show_progress_bar=False
+                    )
+                    
+                    # Normalizar para consistencia (aunque SentenceTransformer ya lo hace)
+                    normalized = torch.nn.functional.normalize(embedding, p=2, dim=0)
+                    
+                    # Mover a CPU para procesamiento posterior
+                    normalized = normalized.cpu()
+                    
+                    # NO destruimos el modelo, solo la representación intermedia
+                    del embedding
+                    
+                    return normalized
                 except Exception as e:
-                    logger.error(f"Error en generate_huggingface: {e}")
+                    logger.error(f"Error en generate_nomic_embedding: {e}", exc_info=True)
                     raise
-
-            # Ejecutar de forma asíncrona
-            result = await asyncio.to_thread(generate_huggingface)
+            
+            # Ejecutar de forma asíncrona - pasamos la instancia del modelo
+            result = await asyncio.to_thread(generate_nomic_embedding, sentence_model, text)
             return result
+        except Exception as e:
+            logger.error(f"Error generando embedding con Nomic/SentenceTransformer: {e}", exc_info=True)
+            raise
 
     async def create_embeddings_batch(self,
                                       texts: List[str],
@@ -521,7 +474,7 @@ class EmbeddingService:
                                       owner_id: str,
                                       area_id: Optional[str] = None,
                                       metadata: Optional[Dict[str, Any]] = None) -> List[EmbeddingResponse]:
-        """Generar y almacenar embeddings para múltiples textos en batch"""
+        """Generar y almacenar embeddings para múltiples textos en batch (optimizado para RTX 4090)"""
         # Verificar que las listas tienen el mismo tamaño
         if len(texts) != len(doc_ids):
             logger.error("Las listas de textos y doc_ids tienen diferente tamaño")
@@ -534,107 +487,62 @@ class EmbeddingService:
 
         # Obtener modelo para el tipo de embedding
         model_info = self._get_model(embedding_type)
-        model_type = model_info.get("model_type", "huggingface")
         
-        vectors = []
+        # Verificar disponibilidad de GPU si es obligatoria
+        if self.device == "cpu" and not self.settings.models.fallback_to_cpu:
+            raise RuntimeError("GPU requerida para generar embeddings batch pero solo CPU disponible.")
         
-        # Manejar diferentes tipos de modelos
-        if model_type == "nomic":
-            # Procesamiento por lotes con SentenceTransformer para modelo Nomic
-            try:
-                # Importación segura
+        # Importante: Obtener la instancia del modelo ya cargada
+        sentence_model = model_info.get("model_instance")
+        if sentence_model is None:
+            raise ValueError("Instancia de modelo no disponible - inicialización incorrecta")
+        
+        # Procesamiento por lotes con la instancia de SentenceTransformer ya cargada
+        try:
+            # Función para generar embeddings en batch con el modelo precargado
+            def generate_nomic_batch(model, input_texts):
                 try:
-                    from sentence_transformers import SentenceTransformer
-                except ImportError:
-                    logger.error("No se pudo importar SentenceTransformer para procesamiento por lotes")
+                    # Añadir prefijo de instrucción a todos los textos que no lo tengan ya
+                    prefixed_texts = []
+                    for t in input_texts:
+                        if t.startswith("search_query:") or t.startswith("search_document:"):
+                            prefixed_texts.append(t)  # Ya tiene el prefijo correcto
+                        else:
+                            prefixed_texts.append(f"search_document: {t}")  # Por defecto
+                    
+                    # Usar el batch_size configurado - optimizado para RTX 4090 (128)
+                    batch_size = self.settings.models.batch_size
+                    
+                    logger.info(f"Procesando embeddings batch con modelo precargado (total: {len(input_texts)} textos)")
+                    logger.info(f"Usando batch_size={batch_size} optimizado para RTX 4090")
+                    
+                    # Generar embeddings en batch con el modelo precargado - mucho más eficiente
+                    embeddings = model.encode(
+                        prefixed_texts,
+                        batch_size=batch_size,
+                        convert_to_tensor=True,
+                        show_progress_bar=True  # Mostrar progreso en batches grandes
+                    )
+                    
+                    # Normalizar y convertir a CPU
+                    all_embeddings = [torch.nn.functional.normalize(emb, p=2, dim=0).cpu() for emb in embeddings]
+                    
+                    # Liberar memoria de tensores temporales (pero NO el modelo)
+                    del embeddings
+                    
+                    logger.info(f"Generados {len(all_embeddings)} vectores. Dimensión: {all_embeddings[0].shape if all_embeddings else 'N/A'}")
+                    
+                    return all_embeddings
+                except Exception as e:
+                    logger.error(f"Error en generate_nomic_batch: {e}", exc_info=True)
                     raise
-                
-                # Usar SentenceTransformer en modo batch para procesamiento eficiente
-                def generate_nomic_local_batch():
-                    try:
-                        # Crear directorio para caché si no existe
-                        import os
-                        cache_dir = "./modelos"
-                        os.makedirs(cache_dir, exist_ok=True)
-                        
-                        # Configuramos explícitamente para usar GPU
-                        if not self.gpu_available:
-                            raise ValueError("GPU requerida para generar embeddings batch. No se encontró GPU disponible.")
-                        
-                        # Cargar modelo con SentenceTransformer y forzar uso de GPU
-                        model_name = "nomic-ai/nomic-embed-text-v1.5"
-                        sentence_model = SentenceTransformer(model_name, cache_folder=cache_dir, 
-                                                           device=self.device, trust_remote_code=True)
-                        
-                        # Añadir prefijo de instrucción a todos los textos
-                        prefixed_texts = [f"search_document: {t}" for t in texts]
-                        
-                        # Dividir en lotes más pequeños si es necesario
-                        max_batch_size = 64  # Optimizado para GPU
-                        
-                        logger.info(f"Procesando embeddings batch con SentenceTransformer (total: {len(texts)} textos)")
-                        
-                        # Generar embeddings en lote directamente
-                        embeddings = sentence_model.encode(
-                            prefixed_texts,
-                            convert_to_tensor=True,
-                            batch_size=max_batch_size,
-                            show_progress_bar=False
-                        )
-                        
-                        # Normalizar para similaridad de coseno
-                        normalized_embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-                        
-                        # Convertir a lista de tensores individuales
-                        tensors = [emb for emb in normalized_embeddings]
-                        
-                        logger.info(f"Embeddings batch generados con SentenceTransformer: {len(tensors)} vectores")
-                        logger.info(f"Forma del primer embedding: {tensors[0].shape}")
-                        logger.info(f"Dispositivo usado: {sentence_model.device}")
-                        return tensors
-                    except Exception as e:
-                        logger.error(f"Error en generate_nomic_local_batch: {e}")
-                        raise
-                
-                # Ejecutar de forma asíncrona
-                vectors = await asyncio.to_thread(generate_nomic_local_batch)
-                
-            except Exception as e:
-                logger.error(f"Error generando embeddings batch con SentenceTransformer: {e}")
-                raise
-        else:
-            # Procesar en batches con modelos HuggingFace para optimizar GPU
-            model = model_info["model"]
-            tokenizer = model_info["tokenizer"]
-            batch_size = min(len(texts), self.settings.models.batch_size)
             
-            # Procesar por lotes para aprovechar el hardware
-            for i in range(0, len(texts), batch_size):
-                batch_texts = texts[i:i+batch_size]
-
-                # Tokenizar en batch
-                inputs = tokenizer(
-                    batch_texts,
-                    max_length=self.settings.models.max_length,
-                    padding=True,
-                    truncation=True,
-                    return_tensors="pt"
-                )
-
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-                # Generar embeddings (usando asyncio para no bloquear)
-                def generate_batch():
-                    with torch.no_grad():
-                        outputs = model(**inputs)
-                        # Para modelos BGE/E5, usamos el token [CLS] (primer token)
-                        embeddings = outputs.last_hidden_state[:, 0]
-                        # Normalizar para similaridad de coseno
-                        normalized = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-                        return normalized.cpu()  # Mover de vuelta a CPU
-
-                batch_vectors = await asyncio.to_thread(generate_batch)
-                vectors.extend(batch_vectors.unbind())
+            # Ejecutar de forma asíncrona - pasamos el modelo precargado
+            vectors = await asyncio.to_thread(generate_nomic_batch, sentence_model, texts)
+            
+        except Exception as e:
+            logger.error(f"Error generando embeddings batch con Nomic/SentenceTransformer: {e}", exc_info=True)
+            raise
 
         # Convertir a listas de Python
         vector_lists = [vector.tolist() for vector in vectors]
@@ -933,9 +841,15 @@ class EmbeddingService:
                      owner_id: Optional[str] = None,
                      area_id: Optional[str] = None,
                      limit: int = 10) -> List[Dict[str, Any]]:
-        """Buscar textos similares a la consulta"""
+        """Buscar textos similares a la consulta usando Nomic v1.5"""
         # Obtener modelo para el tipo de embedding
         model_info = self._get_model(embedding_type)
+
+        # Agregar prefijo especial search_query para consultas (recomendado por Nomic)
+        # Esto optimiza el embedding para búsqueda
+        if not query.startswith("search_query:"):
+            query = f"search_query: {query}"
+            logger.info(f"Prefijo de búsqueda añadido a la consulta: '{query}'")
 
         # Generar embedding para la consulta
         query_vector = await self._generate_embedding(query, model_info)
@@ -949,6 +863,13 @@ class EmbeddingService:
             area_id=area_id,
             limit=limit
         )
+
+        # Log para debug
+        if results:
+            logger.info(f"Búsqueda con Nomic v1.5 encontró {len(results)} resultados. " +
+                       f"Mejor score: {results[0].score:.4f}")
+        else:
+            logger.info("La búsqueda no encontró resultados.")
 
         # Convertir a formato de respuesta simple
         return [

@@ -22,26 +22,24 @@ class WeaviateSettings(BaseSettings):
 
 
 class ModelSettings(BaseSettings):
-    """Configuración para modelos de embeddings"""
-    # Modelos actualizados
-    general_model: str = Field(default="nomic-ai/nomic-embed-text-v1.5-fp16")
-    personal_model: str = Field(default="nomic-ai/nomic-embed-text-v1.5-fp16")
-    # O alternativas:
-    # "BAAI/bge-large-en-v1.5" (HuggingFace)
-    # "intfloat/multilingual-e5-base" (HuggingFace multilingüe)
+    """Configuración para modelos de embeddings (SOLO NOMIC v1.5)"""
+    # Modelos fijos - ya no configurables por env var para estos campos
+    general_model: str = Field(default="nomic-ai/nomic-embed-text-v1.5")
+    personal_model: str = Field(default="nomic-ai/nomic-embed-text-v1.5")
 
-    # Configuración común
-    batch_size: int = Field(default=32)
-    use_gpu: bool = Field(default=True)
-    device: Optional[str] = Field(default=None)  # Auto-detection if None
-    fallback_to_cpu: bool = Field(default=True)  # Si GPU no disponible, usar CPU
+    # Configuración común - Optimizada para RTX 4090 con 24GB VRAM
+    batch_size: int = Field(default=128) # Aumentado para RTX 4090 (24GB VRAM)
+    use_gpu: bool = Field(default=True) # Forzar uso de GPU por defecto
+    device: Optional[str] = Field(default=None)  # Se detectará automáticamente ("cuda:0" o "cpu")
+    fallback_to_cpu: bool = Field(default=False) # IMPORTANTE: Poner en False si la GPU es requisito estricto
 
     # Opciones de optimización
-    use_8bit: bool = Field(default=False)  # Cuantización 8-bit para ahorrar memoria
-    use_fp16: bool = Field(default=True)   # Habilitar media precisión cuando hay GPU
-    max_length: int = Field(default=512)   # Máxima longitud de secuencia para modelos HuggingFace
+    use_fp16: bool = Field(default=True) # Media precisión para mayor rendimiento en RTX 4090
+    # Estas opciones ya no son relevantes al quitar los modelos HF genéricos
+    # use_8bit: bool = Field(default=False)
+    # max_length: int = Field(default=512) # Nomic/SentenceTransformer lo maneja internamente
 
-    # Umbral de similaridad (0.0 a 1.0)
+    # Umbral de similaridad (0.0 a 1.0) - Aún relevante para búsquedas
     similarity_threshold: float = Field(default=0.65)
 
 
@@ -109,11 +107,10 @@ class Settings(BaseSettings):
         self.weaviate.class_general = os.getenv("WEAVIATE_CLASS_GENERAL", self.weaviate.class_general)
         self.weaviate.class_personal = os.getenv("WEAVIATE_CLASS_PERSONAL", self.weaviate.class_personal)
 
-        # Configuración de modelos
-        self.models.general_model = os.getenv("GENERAL_EMBEDDING_MODEL", self.models.general_model)
-        self.models.personal_model = os.getenv("PERSONAL_EMBEDDING_MODEL", self.models.personal_model)
+        # Configuración de modelos - Ya no se leen de env vars los nombres de modelos
+        # Los modelos están fijos en "nomic-ai/nomic-embed-text-v1.5"
         self.models.use_gpu = os.getenv("USE_GPU", "true").lower() in ("true", "1", "yes")
-        self.models.use_8bit = os.getenv("USE_8BIT", "false").lower() in ("true", "1", "yes")
+        self.models.fallback_to_cpu = os.getenv("FALLBACK_TO_CPU", "false").lower() in ("true", "1", "yes")
         self.models.use_fp16 = os.getenv("USE_FP16", "true").lower() in ("true", "1", "yes")
 
         # Configuración de MCP
