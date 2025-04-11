@@ -11,13 +11,15 @@ python-multipart>=0.0.6,<0.0.7
 PyPDF2>=3.0.1,<3.1.0
 python-docx>=0.8.11,<0.9.0
 
-accelerate==0.26.1
-
 # --- VERSIONES ACTUALIZADAS ---
-sentence-transformers==4.0.2
-transformers==4.51.1
-torch>=2.5.1 # Requisito mínimo, la versión exacta con CUDA se instala en Dockerfile
+# Versiones específicas compatibles con BAAI/bge-m3-large
+torch==2.1.2  # Versión estable compatible con la mayoría de las bibliotecas
+transformers==4.35.2  # Versión compatible con SentenceTransformers
+sentence-transformers==2.2.2  # Última versión compatible con BGE-M3
+huggingface-hub==0.20.3  # Versión compatible con transformers 4.35
+accelerate==0.26.1
 # --- FIN VERSIONES ACTUALIZADAS ---
+
 # Dependencias para el modelo Nomic
 einops>=0.6.1
 # Weaviate client para base de datos vectorial

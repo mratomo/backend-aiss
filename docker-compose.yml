@@ -1,9 +1,4 @@
-# Docker Compose configuration for AISS
-
-#################################################
-# Definición de servicios para el sistema AISS  #
-
-#################################################
+# Definición de servicios para el sistema AISS (Verificado y Corregido error build/image)
 
 services:
   #-----------------------------------------
@@ -14,13 +9,11 @@ services:
     container_name: aiss-mongodb
     volumes:
       - ${VOLUMES_PATH:-/home/prods/ssd/aissdata}/data/mongodb:/data/db
-      # Configuración específica del contenedor
       - ${VOLUMES_PATH:-/home/prods/ssd/aissdata}/config/mongodb:/docker-entrypoint-initdb.d
     environment:
       - MONGO_INITDB_ROOT_USERNAME=admin
       - MONGO_INITDB_ROOT_PASSWORD=password
-      # Configuración adicional para mejor rendimiento y seguridad
-      - MONGO_INITDB_DATABASE=mcp_knowledge_system
+      - MONGO_INITDB_DATABASE=mcp_knowledge_system # O aiss si prefieres ese nombre DB
       - MONGODB_ENABLE_JOURNAL=true
       - MONGODB_OPLOG_SIZE=128
       - MONGODB_BIND_IP=0.0.0.0
@@ -35,7 +28,7 @@ services:
     restart: unless-stopped
     networks:
       - aiss-network
-      
+
   weaviate:
     image: semitechnologies/weaviate:1.24.3
     container_name: aiss-weaviate
@@ -47,7 +40,7 @@ services:
       - DEFAULT_VECTORIZER_MODULE=none
       - CLUSTER_HOSTNAME=node1
       - PERSISTENCE_DATA_PATH=/var/lib/weaviate
-      - ENABLE_MODULES=backup
+      - ENABLE_MODULES=backup # Añadido 'backup-s3' si usas backups a S3/Minio
       - AUTOSCHEMA_ENABLED=true
     ports:
       - "6333:8080"
@@ -88,14 +81,14 @@ services:
       - aiss-network
 
   minio:
-    image: minio/minio:RELEASE.2023-07-21T21-12-44Z
+    image: minio/minio:RELEASE.2023-07-21T21-12-44Z # Considera usar una versión más reciente si es posible
     container_name: aiss-minio
     volumes:
       - ${VOLUMES_PATH:-/home/prods/ssd/aissdata}/data/minio:/data
     environment:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
-      - MINIO_HEALTHCHECK_SERVER=true
+      # MINIO_HEALTHCHECK_SERVER=true no es una variable estándar, removida. El healthcheck ya lo comprueba.
     command: server /data --console-address ":9001"
     ports:
       - "9000:9000"
@@ -110,234 +103,152 @@ services:
     networks:
       - aiss-network
 
-  # Servicios de configuración de bases de datos con manejo robusto basado en pruebas
+  #-----------------------------------------
+  # FASE de Setup (Ejecutan una vez y terminan)
+  #-----------------------------------------
   mongodb-setup:
     image: mongo:6.0.5
     container_name: aiss-mongodb-setup
     volumes:
-      - ./db/mongodb/mongodb.js:/scripts/mongodb.js
-    # Entrypoint modificado para manejar errores y reintentos
+      - ./db/mongodb/mongodb.js:/scripts/mongodb.js # Asegúrate que esta ruta es correcta
     entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "echo 'Esperando a que MongoDB esté disponible...' &&
-      mongosh --host mongodb --port 27017 -u admin -p password --authenticationDatabase admin --quiet --eval 'db.adminCommand(\"ping\")' &&
+    # Comando simplificado para claridad
+    command: |
+      echo 'Esperando a que MongoDB esté disponible...' &&
+      until mongosh --host mongodb --port 27017 -u admin -p password --authenticationDatabase admin --quiet --eval 'db.adminCommand("ping")'; do
+        echo "Esperando a MongoDB..."; sleep 2;
+      done &&
       echo 'Ejecutando script de inicialización de MongoDB...' &&
       mongosh --host mongodb --port 27017 -u admin -p password --authenticationDatabase admin /scripts/mongodb.js &&
-      echo 'Inicialización de MongoDB completada'"
+      echo 'Inicialización de MongoDB completada'
     depends_on:
       mongodb:
         condition: service_healthy
     networks:
       - aiss-network
+    # No necesita restart ni healthcheck si solo corre una vez
 
   weaviate-setup:
     image: curlimages/curl:8.2.1
     container_name: aiss-weaviate-setup
     entrypoint: ["/bin/sh", "-c"]
-    # Script integrado para crear clases en Weaviate sin depender del archivo externo
-    command: >
-      "echo 'Esperando a que Weaviate esté disponible...' &&
+    # Comando con JSON indentado y verificaciones
+    command: |
+      echo 'Esperando a que Weaviate esté disponible...'
       until curl -s -f http://weaviate:8080/v1/.well-known/ready; do
-        echo 'Esperando a que Weaviate esté listo...';
-        sleep 5;
-      done &&
-      echo 'Weaviate está disponible. Creando clases...' &&
-      curl -X POST 'http://weaviate:8080/v1/schema' -H 'Content-Type: application/json' -d '{
-        \"class\": \"GeneralKnowledge\",
-        \"vectorizer\": \"none\",
-        \"vectorIndexConfig\": {
-          \"distance\": \"cosine\"
-        },
-        \"properties\": [
-          {
-            \"name\": \"doc_id\",
-            \"dataType\": [\"string\"],
-            \"description\": \"ID del documento\",
-            \"indexFilterable\": true,
-            \"indexSearchable\": true
-          },
-          {
-            \"name\": \"owner_id\",
-            \"dataType\": [\"string\"],
-            \"description\": \"ID del propietario\",
-            \"indexFilterable\": true,
-            \"indexSearchable\": true
-          },
-          {
-            \"name\": \"area_id\",
-            \"dataType\": [\"string\"],
-            \"description\": \"ID del área\",
-            \"indexFilterable\": true,
-            \"indexSearchable\": true
-          },
-          {
-            \"name\": \"text\",
-            \"dataType\": [\"text\"],
-            \"description\": \"Texto del embedding\",
-            \"indexFilterable\": true,
-            \"indexSearchable\": true,
-            \"tokenization\": \"field\"
-          },
-          {
-            \"name\": \"meta_info\",
-            \"dataType\": [\"string\"],
-            \"description\": \"Metadatos adicionales como JSON string\",
-            \"indexFilterable\": false,
-            \"indexSearchable\": false
-          }
+        echo 'Esperando a que Weaviate esté listo...'; sleep 5;
+      done
+      echo 'Weaviate está disponible. Creando clases...'
+      curl -X POST 'http://weaviate:8080/v1/schema' -H 'Content-Type: application/json' -d \
+      '{
+        "class": "GeneralKnowledge",
+        "vectorizer": "none",
+        "vectorIndexConfig": { "distance": "cosine" },
+        "properties": [
+          {"name": "doc_id", "dataType": ["string"], "description": "ID del documento", "indexFilterable": true, "indexSearchable": true},
+          {"name": "owner_id", "dataType": ["string"], "description": "ID del propietario", "indexFilterable": true, "indexSearchable": true},
+          {"name": "area_id", "dataType": ["string"], "description": "ID del área", "indexFilterable": true, "indexSearchable": true},
+          {"name": "text", "dataType": ["text"], "description": "Texto del embedding", "indexFilterable": true, "indexSearchable": true, "tokenization": "field"},
+          {"name": "meta_info", "dataType": ["string"], "description": "Metadatos adicionales como JSON string", "indexFilterable": false, "indexSearchable": false}
         ]
-      }' &&
-      echo 'Creando clase PersonalKnowledge...' &&
-      curl -X POST 'http://weaviate:8080/v1/schema' -H 'Content-Type: application/json' -d '{
-        \"class\": \"PersonalKnowledge\",
-        \"vectorizer\": \"none\",
-        \"vectorIndexConfig\": {
-          \"distance\": \"cosine\"
-        },
-        \"properties\": [
-          {
-            \"name\": \"doc_id\",
-            \"dataType\": [\"string\"],
-            \"description\": \"ID del documento\",
-            \"indexFilterable\": true,
-            \"indexSearchable\": true
-          },
-          {
-            \"name\": \"owner_id\",
-            \"dataType\": [\"string\"],
-            \"description\": \"ID del propietario\",
-            \"indexFilterable\": true,
-            \"indexSearchable\": true
-          },
-          {
-            \"name\": \"area_id\",
-            \"dataType\": [\"string\"],
-            \"description\": \"ID del área\",
-            \"indexFilterable\": true,
-            \"indexSearchable\": true
-          },
-          {
-            \"name\": \"text\",
-            \"dataType\": [\"text\"],
-            \"description\": \"Texto del embedding\",
-            \"indexFilterable\": true,
-            \"indexSearchable\": true,
-            \"tokenization\": \"field\"
-          },
-          {
-            \"name\": \"meta_info\",
-            \"dataType\": [\"string\"],
-            \"description\": \"Metadatos adicionales como JSON string\",
-            \"indexFilterable\": false,
-            \"indexSearchable\": false
-          }
+      }' && echo 'Clase GeneralKnowledge creada/existente.'
+      curl -X POST 'http://weaviate:8080/v1/schema' -H 'Content-Type: application/json' -d \
+      '{
+        "class": "PersonalKnowledge",
+        "vectorizer": "none",
+        "vectorIndexConfig": { "distance": "cosine" },
+        "properties": [
+          {"name": "doc_id", "dataType": ["string"], "description": "ID del documento", "indexFilterable": true, "indexSearchable": true},
+          {"name": "owner_id", "dataType": ["string"], "description": "ID del propietario", "indexFilterable": true, "indexSearchable": true},
+          {"name": "area_id", "dataType": ["string"], "description": "ID del área", "indexFilterable": true, "indexSearchable": true},
+          {"name": "text", "dataType": ["text"], "description": "Texto del embedding", "indexFilterable": true, "indexSearchable": true, "tokenization": "field"},
+          {"name": "meta_info", "dataType": ["string"], "description": "Metadatos adicionales como JSON string", "indexFilterable": false, "indexSearchable": false}
         ]
-      }' &&
-      echo 'Verificando esquema creado...' &&
-      curl -s http://weaviate:8080/v1/schema &&
-      echo 'Inicialización de Weaviate completada'"
+      }' && echo 'Clase PersonalKnowledge creada/existente.'
+      echo 'Verificando esquema creado...'
+      curl -s http://weaviate:8080/v1/schema && echo
+      echo 'Inicialización de Weaviate completada'
     depends_on:
       weaviate:
         condition: service_healthy
     networks:
       - aiss-network
+    # No necesita restart ni healthcheck
 
   minio-setup:
     image: minio/mc:latest
     container_name: aiss-minio-setup
     entrypoint: ["/bin/sh", "-c"]
-    # Script integrado para configurar MinIO correctamente
-    command: >
-      "mc alias set myminio http://minio:9000 minioadmin minioadmin &&
-      echo 'Creando buckets de MinIO...' &&
-      mc mb --ignore-existing myminio/documents &&
-      mc mb --ignore-existing myminio/uploads &&
-      mc mb --ignore-existing myminio/temp &&
-      mc mb --ignore-existing myminio/personal-documents &&
-      mc mb --ignore-existing myminio/shared-documents &&
-      echo 'Configurando permisos...' &&
-      mc anonymous set download myminio/documents &&
-      mc anonymous set upload myminio/uploads &&
-      mc anonymous set public myminio/temp &&
-      mc anonymous set download myminio/personal-documents &&
-      mc anonymous set download myminio/shared-documents &&
-      echo 'Verificando configuración de buckets:' &&
-      mc ls myminio &&
-      echo 'Inicialización de MinIO completada'"
+    command: |
+      echo "Esperando a MinIO..."
+      until mc alias set myminio http://minio:9000 minioadmin minioadmin; do
+        echo "Intentando conectar a MinIO..."; sleep 2;
+      done
+      echo 'Creando buckets de MinIO (si no existen)...'
+      mc mb --ignore-existing myminio/documents
+      mc mb --ignore-existing myminio/uploads
+      mc mb --ignore-existing myminio/temp
+      mc mb --ignore-existing myminio/personal-documents
+      mc mb --ignore-existing myminio/shared-documents
+      echo 'Configurando permisos...'
+      mc anonymous set download myminio/documents
+      mc anonymous set upload myminio/uploads # Considera si realmente quieres uploads anónimos
+      mc anonymous set public myminio/temp    # Considera si realmente quieres acceso público
+      mc anonymous set download myminio/personal-documents
+      mc anonymous set download myminio/shared-documents
+      echo 'Verificando configuración de buckets:'
+      mc ls myminio
+      echo 'Inicialización de MinIO completada'
     depends_on:
       minio:
         condition: service_healthy
     networks:
       - aiss-network
-  
+    # No necesita restart ni healthcheck
+
   neo4j-setup:
-    image: neo4j:5.9.0
+    image: neo4j:5.9.0 # O la imagen que prefieras con cypher-shell
     container_name: aiss-neo4j-setup
-    # Configuración de Neo4j con manejo robusto de inicialización
     entrypoint: ["/bin/bash", "-c"]
-    command: >
-      "echo 'Esperando a que Neo4j esté disponible...' &&
+    command: |
+      echo 'Esperando a que Neo4j esté disponible...'
       until cypher-shell -a bolt://neo4j:7687 -u neo4j -p supersecret 'RETURN 1;' > /dev/null 2>&1; do
-        echo 'Esperando a que Neo4j esté listo...';
-        sleep 5;
-      done &&
-      echo 'Neo4j disponible. Creando constraints e índices...' &&
+        echo 'Esperando a que Neo4j esté listo...'; sleep 5;
+      done
+      echo 'Neo4j disponible. Creando constraints e índices (si no existen)...'
       cypher-shell -a bolt://neo4j:7687 -u neo4j -p supersecret '
-      CREATE CONSTRAINT unique_database_id IF NOT EXISTS
-      FOR (d:Database)
-      REQUIRE d.connection_id IS UNIQUE;
-      
-      CREATE CONSTRAINT unique_table_id IF NOT EXISTS
-      FOR (t:Table)
-      REQUIRE t.table_id IS UNIQUE;
-      
-      CREATE CONSTRAINT unique_column_id IF NOT EXISTS
-      FOR (c:Column)
-      REQUIRE c.column_id IS UNIQUE;
-      
-      CREATE INDEX database_name_index IF NOT EXISTS
-      FOR (d:Database)
-      ON (d.name);
-      
-      CREATE INDEX table_name_index IF NOT EXISTS
-      FOR (t:Table)
-      ON (t.name);
-      
-      CREATE INDEX column_name_index IF NOT EXISTS
-      FOR (c:Column)
-      ON (c.name);
-      
-      CREATE INDEX table_schema_index IF NOT EXISTS
-      FOR (t:Table)
-      ON (t.schema);
-      ' &&
-      echo 'Verificando instalación del plugin Graph Data Science...' &&
-      cypher-shell -a bolt://neo4j:7687 -u neo4j -p supersecret 'CALL gds.list() YIELD name RETURN count(name) AS procedureCount' &&
-      echo 'Inicialización de Neo4j completada'"
-    environment:
-      - NEO4J_HOST=neo4j
-      - NEO4J_PORT=7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=supersecret
+      CREATE CONSTRAINT unique_database_id IF NOT EXISTS FOR (d:Database) REQUIRE d.connection_id IS UNIQUE;
+      CREATE CONSTRAINT unique_table_id IF NOT EXISTS FOR (t:Table) REQUIRE t.table_id IS UNIQUE;
+      CREATE CONSTRAINT unique_column_id IF NOT EXISTS FOR (c:Column) REQUIRE c.column_id IS UNIQUE;
+      CREATE INDEX database_name_index IF NOT EXISTS FOR (d:Database) ON (d.name);
+      CREATE INDEX table_name_index IF NOT EXISTS FOR (t:Table) ON (t.name);
+      CREATE INDEX column_name_index IF NOT EXISTS FOR (c:Column) ON (c.name);
+      CREATE INDEX table_schema_index IF NOT EXISTS FOR (t:Table) ON (t.schema);
+      ' && echo "Constraints/índices creados/verificados."
+      echo 'Verificando instalación del plugin Graph Data Science...'
+      cypher-shell -a bolt://neo4j:7687 -u neo4j -p supersecret 'CALL gds.list() YIELD name RETURN count(name) AS procedureCount'
+      echo 'Inicialización de Neo4j completada'
+    # No necesita environment si las credenciales están en el comando
     depends_on:
       neo4j:
         condition: service_healthy
     networks:
       - aiss-network
+    # No necesita restart ni healthcheck
 
   #-----------------------------------------
   # FASE 2: Servicios core
   #-----------------------------------------
   user-service:
-    build: 
+    build:
       context: ./core-services/user-service
-    image: aiss-user-service
+    image: aiss-user-service # Etiqueta para la imagen construida
     container_name: aiss-user-service
     environment:
       - MONGODB_URI=mongodb://admin:password@mongodb:27017/aiss?authSource=admin
       - JWT_SECRET=${JWT_SECRET:-supersecretkey}
       - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-supersecretrefreshkey}
-      - AUTH_SECRET=${JWT_SECRET:-supersecretkey}
+      - AUTH_SECRET=${JWT_SECRET:-supersecretkey} # Considerar si es redundante
       - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
       - LOG_LEVEL=info
     ports:
@@ -358,14 +269,14 @@ services:
   document-service:
     build:
       context: ./core-services/document-service
-    image: aiss-document-service
+    image: aiss-document-service # Etiqueta para la imagen construida
     container_name: aiss-document-service
     environment:
       - MONGODB_URI=mongodb://admin:password@mongodb:27017/aiss?authSource=admin
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
-      - MINIO_USE_SSL=false
+      - MINIO_USE_SSL=false # Asegúrate que sea 'false' si MinIO corre sin TLS
       - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
       - LOG_LEVEL=info
     ports:
@@ -385,60 +296,25 @@ services:
     networks:
       - aiss-network
 
-  api-gateway:
-    build:
-      context: ./api-gateway
-    image: aiss-api-gateway
-    container_name: aiss-api-gateway
-    environment:
-      - USER_SERVICE_URL=http://user-service:8081
-      - DOCUMENT_SERVICE_URL=http://document-service:8082
-      - DB_CONNECTION_SERVICE_URL=http://db-connection-service:8086
-      - SCHEMA_DISCOVERY_SERVICE_URL=http://schema-discovery-service:8087
-      - CONTEXT_SERVICE_URL=http://context-service:8083
-      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
-      - RAG_AGENT_URL=http://rag-agent:8085
-      - TERMINAL_GATEWAY_URL=http://terminal-gateway-service:8090
-      - JWT_SECRET=${JWT_SECRET:-supersecretkey}
-      - AUTH_SECRET=${JWT_SECRET:-supersecretkey}
-      - PORT=8088
-      - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
-      - LOG_LEVEL=info
-    # El API Gateway debe ser accesible tanto desde el frontend como desde el host para pruebas
-    ports:
-      - "8088:8088"
-    depends_on:
-      user-service:
-        condition: service_healthy
-      document-service:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: wget -qO- http://localhost:8088/api/health || exit 1
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 20s
-    networks:
-      - aiss-network
-
   #-----------------------------------------
-  # FASE 3: Servicios MCP
+  # FASE 3: Servicios MCP (Context, Embedding, RAG)
   #-----------------------------------------
   context-service:
     build:
       context: ./mcp-services/context-service
-    image: aiss-context-service
+    image: aiss-context-service # Etiqueta para la imagen construida
     container_name: aiss-context-service
     environment:
       - MONGODB_URI=mongodb://admin:password@mongodb:27017/aiss?authSource=admin
-      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
-      - MCP_API_URL=http://context-service:8083/api/v1/mcp
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084 # Dependencia funcional
+      - MCP_API_URL=http://context-service:8083/api/v1/mcp # URL interna del propio servicio? Verificar si es correcto
       - LOG_LEVEL=info
     ports:
       - "8083:8083"
     depends_on:
       mongodb:
+        condition: service_healthy
+      embedding-service: # Añadido porque se usa en env var
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -453,38 +329,34 @@ services:
   embedding-service:
     build:
       context: ./mcp-services/embedding-service
-    image: aiss-embedding-service
+    image: aiss-embedding-service # Etiqueta para la imagen construida
     container_name: aiss-embedding-service
-    # Agregar acceso a la GPU para Nomic
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              count: 1 # O 'all' si quieres todas las GPUs
               capabilities: [gpu]
+    volumes:
+      - ${VOLUMES_PATH:-/home/prods/ssd/aissdata}/data/embedding-models:/app/modelos # Ruta donde se cachean modelos?
     environment:
       - MONGODB_URI=mongodb://admin:password@mongodb:27017/aiss?authSource=admin
-      # Configuración para base de datos vectorial
       - VECTOR_DB=weaviate
       - WEAVIATE_URL=http://weaviate:8080
       - WEAVIATE_CLASS_GENERAL=GeneralKnowledge
       - WEAVIATE_CLASS_PERSONAL=PersonalKnowledge
-      # Configuración de modelo y servicios
-      - MCP_SERVICE_URL=http://context-service:8083
+      - MCP_SERVICE_URL=http://context-service:8083 # Dependencia funcional
       - MCP_SERVICE_TIMEOUT=30.0
       - ALLOW_DEGRADED_MODE=true
       - USE_HTTPX=true
-      # Configuración de modelo embedding
-      - GENERAL_EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5
-      - USE_GPU=true
-      - USE_8BIT=true
-      - USE_FP16=true
-      - FALLBACK_TO_CPU=true
-      # Configuración de límites y control de errores
+      - DEFAULT_EMBEDDING_MODEL=${DEFAULT_EMBEDDING_MODEL:-BAAI/bge-m3} # Modelo por defecto
+      - USE_GPU=${USE_GPU:-true} # Permitir configurar desde .env
+      - USE_FP16=${USE_FP16:-true} # Permitir configurar desde .env
+      - FALLBACK_TO_CPU=${FALLBACK_TO_CPU:-true} # Permitir configurar desde .env
       - MAX_DOCUMENT_SIZE_MB=20
       - MAX_TEXTS_PER_BATCH=50
-      - CORS_ALLOWED_ORIGINS=["http://localhost:3000","http://localhost","http://localhost:80"]
+      - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
       - LOG_LEVEL=info
     ports:
       - "8084:8084"
@@ -493,49 +365,51 @@ services:
         condition: service_healthy
       weaviate:
         condition: service_healthy
+      # Context-service no es estrictamente necesario para *arrancar* embedding,
+      # pero sí para funcionar. No se añade aquí para evitar posible ciclo si context usa embedding.
     restart: unless-stopped
     healthcheck:
       test: wget -qO- http://localhost:8084/health || exit 1
       interval: 20s
       timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 30s # Puede tardar en cargar modelos
     networks:
       - aiss-network
 
   rag-agent:
     build:
       context: ./rag-agent
-    image: aiss-rag-agent
+    image: aiss-rag-agent # Etiqueta para la imagen construida
     container_name: aiss-rag-agent
     environment:
       - MONGODB_URI=mongodb://admin:password@mongodb:27017/aiss?authSource=admin
-      # Configuración de servicios dependientes
+      # Servicios dependientes (URLs internas)
       - EMBEDDING_SERVICE_URL=http://embedding-service:8084
       - CONTEXT_SERVICE_URL=http://context-service:8083
       - DOCUMENT_SERVICE_URL=http://document-service:8082
       - DB_CONNECTION_SERVICE_URL=http://db-connection-service:8086
       - SCHEMA_DISCOVERY_SERVICE_URL=http://schema-discovery-service:8087
-      # Configuración de proveedores LLM
+      # LLM Providers
       - OLLAMA_API_BASE=${OLLAMA_BASE_URL:-http://ollama:11434}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
-      # Configuración de Neo4j para GraphRAG
+      # Neo4j (GraphRAG)
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USERNAME=neo4j
       - NEO4J_PASSWORD=supersecret
-      # Configuración de comportamiento y límites
+      # Comportamiento y configuración
       - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
       - LOG_LEVEL=info
-      - PORT=8085
-      # Configuración avanzada de LLM
-      - OLLAMA_USE_GPU=true
-      - OLLAMA_IS_REMOTE=${OLLAMA_IS_REMOTE:-false}
+      - PORT=8085 # Puerto interno del servicio RAG
+      # LLM Avanzado
+      - OLLAMA_USE_GPU=${OLLAMA_USE_GPU:-true} # Configurable desde .env
+      - OLLAMA_IS_REMOTE=${OLLAMA_IS_REMOTE:-false} # Configurable desde .env
       - DEFAULT_SYSTEM_PROMPT="Eres un asistente IA especializado en bases de datos y seguridad. Proporciona respuestas claras y precisas."
       - MAX_CONTEXT_LENGTH=4000
     ports:
-      - "8085:8085"
+      - "8085:8085" # Mapeo puerto interno a externo
     depends_on:
       mongodb:
         condition: service_healthy
@@ -543,31 +417,41 @@ services:
         condition: service_healthy
       weaviate:
         condition: service_healthy
-      context-service:
+      embedding-service: # Necesario para embeddings
         condition: service_healthy
+      context-service: # Necesario para contexto
+        condition: service_healthy
+      document-service: # Necesario para documentos
+        condition: service_healthy
+      db-connection-service: # Necesario para conexiones DB
+        condition: service_healthy
+      schema-discovery-service: # Necesario para descubrimiento
+        condition: service_healthy
+      ollama: # Necesario si se usa Ollama como provider
+        condition: service_healthy # O service_started si no necesita estar fully ready
     restart: unless-stopped
     healthcheck:
-      test: wget -qO- http://localhost:8085/health || exit 1
+      test: wget -qO- http://localhost:8085/health || exit 1 # Usa puerto interno
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 30s # RAG puede tardar en iniciar
     networks:
       - aiss-network
 
   #-----------------------------------------
-  # FASE 4: Servicios DB
+  # FASE 4: Servicios DB (Conexión, Descubrimiento, Ataque)
   #-----------------------------------------
   db-connection-service:
     build:
       context: ./db-services/db-connection-service
-    image: aiss-db-connection-service
+    image: aiss-db-connection-service # Etiqueta para la imagen construida
     container_name: aiss-db-connection-service
     environment:
       - MONGODB_URI=mongodb://admin:password@mongodb:27017/aiss?authSource=admin
-      - SCHEMA_DISCOVERY_URL=http://schema-discovery-service:8087
-      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
-      - MCP_SERVICE_URL=http://context-service:8083
+      - SCHEMA_DISCOVERY_URL=http://schema-discovery-service:8087 # Dependencia funcional
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084 # Dependencia funcional
+      - MCP_SERVICE_URL=http://context-service:8083 # Dependencia funcional
       - DB_ENCRYPTION_KEY=${DB_ENCRYPTION_KEY:-supersecretencryptionkey}
       - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
       - LOG_LEVEL=info
@@ -576,9 +460,15 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
+      # Añadir otros si son estrictamente necesarios *para iniciar*
+      embedding-service:
+        condition: service_healthy
+      context-service:
+        condition: service_healthy
+      # Schema discovery es usado pero también usa este servicio (posible ciclo si ambos dependen al inicio)
     restart: unless-stopped
     healthcheck:
-      test: wget -qO- http://localhost:8086/health || exit 1
+      test: wget -qO- http://localhost:8086/health || exit 1 # Usa puerto interno
       interval: 15s
       timeout: 10s
       retries: 5
@@ -589,13 +479,13 @@ services:
   schema-discovery-service:
     build:
       context: ./db-services/schema-discovery-service
-    image: aiss-schema-discovery-service
+    image: aiss-schema-discovery-service # Etiqueta para la imagen construida
     container_name: aiss-schema-discovery-service
     environment:
       - MONGODB_URI=mongodb://admin:password@mongodb:27017/aiss?authSource=admin
-      - DB_CONNECTION_SERVICE_URL=http://db-connection-service:8086
-      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
-      - MCP_SERVICE_URL=http://context-service:8083
+      - DB_CONNECTION_SERVICE_URL=http://db-connection-service:8086 # Dependencia funcional
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084 # Dependencia funcional
+      - MCP_SERVICE_URL=http://context-service:8083 # Dependencia funcional
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USERNAME=neo4j
       - NEO4J_PASSWORD=supersecret
@@ -604,13 +494,19 @@ services:
     ports:
       - "8087:8087"
     depends_on:
-      db-connection-service:
+      mongodb: # Heredado de db-connection? Añadir explícito si es necesario.
         condition: service_healthy
       neo4j:
         condition: service_healthy
+      db-connection-service: # Necesario para funcionar
+        condition: service_healthy
+      embedding-service: # Necesario para funcionar
+        condition: service_healthy
+      context-service: # Necesario para funcionar
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: wget -qO- http://localhost:8087/health || exit 1
+      test: wget -qO- http://localhost:8087/health || exit 1 # Usa puerto interno
       interval: 10s
       timeout: 5s
       retries: 3
@@ -621,21 +517,23 @@ services:
   attack-vulnerability-service:
     build:
       context: ./attack-vulnerability-service
-    image: aiss-attack-vulnerability-service
+    image: aiss-attack-vulnerability-service # Etiqueta para la imagen construida - NIVEL CORRECTO
     container_name: aiss-attack-vulnerability-service
     environment:
-      - LLM_PROVIDER_URL=http://rag-agent:8085/api/v1/llm
-      - MCP_SERVICE_URL=http://context-service:8083
+      - LLM_PROVIDER_URL=http://rag-agent:8085/api/v1/llm # Dependencia funcional
+      - MCP_SERVICE_URL=http://context-service:8083 # Dependencia funcional
       - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
       - LOG_LEVEL=info
     ports:
-      - "8092:8400"
+      - "8092:8400" # Puerto interno 8400 mapeado a externo 8092
     restart: unless-stopped
     depends_on:
-      context-service:
-        condition: service_started
+      rag-agent: # Necesario para LLM
+        condition: service_healthy
+      context-service: # Necesario para MCP
+        condition: service_healthy
     healthcheck:
-      test: wget -qO- http://localhost:8400/health || exit 1
+      test: wget -qO- http://localhost:8400/health || exit 1 # Usa puerto interno 8400
       interval: 10s
       timeout: 5s
       retries: 3
@@ -644,45 +542,45 @@ services:
       - aiss-network
 
   #-----------------------------------------
-  # FASE 5: Servicios Terminal
+  # FASE 5: Servicios Terminal y LLM local
   #-----------------------------------------
   ollama:
-    image: ollama/ollama:0.1.27
+    image: ollama/ollama:0.1.27 # Considera usar una versión más reciente si es posible
     container_name: aiss-ollama
-    # Esta instancia local es para validación de consultas, necesita GPU para un mejor rendimiento
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              count: 1 # O 'all'
               capabilities: [gpu]
     volumes:
       - ${VOLUMES_PATH:-/home/prods/ssd/aissdata}/data/ollama:/root/.ollama
-    # Exponemos el puerto al host para el entorno de desarrollo
     ports:
       - "11434:11434"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - OLLAMA_HOST=0.0.0.0 # Asegura que escucha en todas las IPs dentro del contenedor
     restart: unless-stopped
     healthcheck:
-      test: wget -qO- http://localhost:11434/api/tags || exit 1
+      # Test más robusto que solo '/'
+      test: wget -qO- http://localhost:11434/api/tags > /dev/null || exit 1
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 15s # Ollama puede tardar un poco en iniciar
     networks:
       - aiss-network
 
   terminal-session-service:
     build:
       context: ./backend-aiss/terminal-services/terminal-session-service
-    image: aiss-terminal-session-service
+    image: aiss-terminal-session-service # Etiqueta para la imagen construida
     container_name: aiss-terminal-session-service
     environment:
       - MONGODB_URI=mongodb://admin:password@mongodb:27017/aiss?authSource=admin
-      - MCP_SERVICE_URL=http://context-service:8083
+      - MCP_SERVICE_URL=http://context-service:8083 # Dependencia funcional
       - JWT_SECRET=${JWT_SECRET:-supersecretkey}
       - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
       - LOG_LEVEL=info
@@ -691,43 +589,11 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: wget -qO- http://localhost:8091/health || exit 1
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
-    networks:
-      - aiss-network
-
-  terminal-gateway-service:
-    build:
-      context: ./backend-aiss/terminal-services/terminal-gateway-service
-    image: aiss-terminal-gateway-service
-    container_name: aiss-terminal-gateway-service
-    volumes:
-      - ${VOLUMES_PATH:-/home/prods/ssd/aissdata}/data/terminal-ssh-keys:/keys
-    environment:
-      - SESSION_SERVICE_URL=http://terminal-session-service:8091
-      - VULNERABILITY_SERVICE_URL=http://attack-vulnerability-service:8092
-      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8093
-      - MCP_SERVICE_URL=http://context-service:8083
-      - RAG_AGENT_URL=http://rag-agent:8085
-      - JWT_SECRET=${JWT_SECRET:-supersecretkey}
-      - SSH_KEYGEN_PATH=/usr/bin/ssh-keygen
-      - SSH_KEY_DIR=/keys
-      - SERVER_PORT=8090
-      - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
-      - LOG_LEVEL=info
-    ports:
-      - "8090:8090"
-    depends_on:
-      terminal-session-service:
+      context-service: # Necesario para funcionar
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: wget -qO- http://localhost:8090/health || exit 1
+      test: wget -qO- http://localhost:8091/health || exit 1 # Usa puerto interno
       interval: 10s
       timeout: 5s
       retries: 3
@@ -738,23 +604,26 @@ services:
   terminal-context-aggregator:
     build:
       context: ./backend-aiss/terminal-services/terminal-context-aggregator
-    image: aiss-terminal-context-aggregator
+    image: aiss-terminal-context-aggregator # Etiqueta para la imagen construida
     container_name: aiss-terminal-context-aggregator
     environment:
-      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
-      - MCP_SERVICE_URL=http://context-service:8083
-      - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8094
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084 # Dependencia funcional
+      - MCP_SERVICE_URL=http://context-service:8083 # Dependencia funcional
+      - SUGGESTION_SERVICE_URL=http://terminal-suggestion-service:8094 # Dependencia funcional
       - JWT_SECRET=${JWT_SECRET:-supersecretkey}
       - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
       - LOG_LEVEL=info
     ports:
-      - "8093:8093"
+      - "8093:8093" # Puerto interno y externo
     depends_on:
+      embedding-service:
+        condition: service_healthy
       context-service:
         condition: service_healthy
+      # terminal-suggestion-service no puede ser dependencia aquí si hay ciclo
     restart: unless-stopped
     healthcheck:
-      test: wget -qO- http://localhost:8093/health || exit 1
+      test: wget -qO- http://localhost:8093/health || exit 1 # Usa puerto interno
       interval: 15s
       timeout: 5s
       retries: 3
@@ -765,26 +634,28 @@ services:
   terminal-suggestion-service:
     build:
       context: ./backend-aiss/terminal-services/terminal-suggestion-service
-    image: aiss-terminal-suggestion-service
+    image: aiss-terminal-suggestion-service # Etiqueta para la imagen construida
     container_name: aiss-terminal-suggestion-service
     environment:
-      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8093
-      - MCP_SERVICE_URL=http://context-service:8083
-      - LLM_SERVICE_URL=http://rag-agent:8085/api/v1/llm
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8093 # Dependencia funcional
+      - MCP_SERVICE_URL=http://context-service:8083 # Dependencia funcional
+      - LLM_SERVICE_URL=http://rag-agent:8085/api/v1/llm # Dependencia funcional
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-} # Opcional
       - JWT_SECRET=${JWT_SECRET:-supersecretkey}
       - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
       - LOG_LEVEL=info
     ports:
-      - "8094:8094"
+      - "8094:8094" # Puerto interno y externo
     depends_on:
       terminal-context-aggregator:
         condition: service_healthy
-      rag-agent:
+      context-service:
+        condition: service_healthy
+      rag-agent: # Necesario para LLM
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: wget -qO- http://localhost:8094/health || exit 1
+      test: wget -qO- http://localhost:8094/health || exit 1 # Usa puerto interno
       interval: 15s
       timeout: 5s
       retries: 3
@@ -792,9 +663,107 @@ services:
     networks:
       - aiss-network
 
+  terminal-gateway-service:
+    build:
+      context: ./backend-aiss/terminal-services/terminal-gateway-service
+    image: aiss-terminal-gateway-service # Etiqueta para la imagen construida
+    container_name: aiss-terminal-gateway-service
+    volumes:
+      - ${VOLUMES_PATH:-/home/prods/ssd/aissdata}/data/terminal-ssh-keys:/keys
+    environment:
+      # URLs de servicios internos que usa
+      - SESSION_SERVICE_URL=http://terminal-session-service:8091
+      - VULNERABILITY_SERVICE_URL=http://attack-vulnerability-service:8400 # Puerto interno del servicio de vulnerabilidad
+      - CONTEXT_AGGREGATOR_URL=http://terminal-context-aggregator:8093
+      - MCP_SERVICE_URL=http://context-service:8083
+      - RAG_AGENT_URL=http://rag-agent:8085
+      # Configuración propia
+      - JWT_SECRET=${JWT_SECRET:-supersecretkey}
+      - SSH_KEYGEN_PATH=/usr/bin/ssh-keygen
+      - SSH_KEY_DIR=/keys
+      - SERVER_PORT=8090 # Puerto interno del gateway
+      - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
+      - LOG_LEVEL=info
+    ports:
+      - "8090:8090" # Mapea puerto interno a externo
+    depends_on:
+      # Depende de todos los servicios terminal a los que redirige
+      terminal-session-service:
+        condition: service_healthy
+      attack-vulnerability-service:
+        condition: service_healthy
+      terminal-context-aggregator:
+        condition: service_healthy
+      # Otras dependencias funcionales
+      context-service:
+        condition: service_healthy
+      rag-agent:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: wget -qO- http://localhost:8090/health || exit 1 # Usa puerto interno
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s # Dar tiempo a que las dependencias estén listas
+    networks:
+      - aiss-network
 
+  #-----------------------------------------
+  # FASE 6: API Gateway principal
+  #-----------------------------------------
+  api-gateway:
+    build:
+      context: ./api-gateway
+    image: aiss-api-gateway # Etiqueta para la imagen construida
+    container_name: aiss-api-gateway
+    environment:
+      # URLs servicios internos (puertos internos)
+      - USER_SERVICE_URL=http://user-service:8081
+      - DOCUMENT_SERVICE_URL=http://document-service:8082
+      - DB_CONNECTION_SERVICE_URL=http://db-connection-service:8086
+      - SCHEMA_DISCOVERY_SERVICE_URL=http://schema-discovery-service:8087
+      - CONTEXT_SERVICE_URL=http://context-service:8083
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8084
+      - RAG_AGENT_URL=http://rag-agent:8085
+      - TERMINAL_GATEWAY_URL=http://terminal-gateway-service:8090
+      # Configuración propia
+      - JWT_SECRET=${JWT_SECRET:-supersecretkey}
+      - AUTH_SECRET=${JWT_SECRET:-supersecretkey} # Redundante?
+      - PORT=8088 # Puerto interno del gateway
+      - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
+      - LOG_LEVEL=info
+    ports:
+      - "8088:8088" # Mapea puerto interno a externo
+    depends_on:
+      # Depende de TODOS los servicios a los que puede enrutar tráfico
+      user-service:
+        condition: service_healthy
+      document-service:
+        condition: service_healthy
+      db-connection-service:
+        condition: service_healthy
+      schema-discovery-service:
+        condition: service_healthy
+      context-service:
+        condition: service_healthy
+      embedding-service:
+        condition: service_healthy
+      rag-agent:
+        condition: service_healthy
+      terminal-gateway-service:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: wget -qO- http://localhost:8088/api/health || exit 1 # Ruta de healthcheck del gateway
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s # Dar tiempo a que las dependencias estén listas
+    networks:
+      - aiss-network
 
-# Red definida para todos los servicios
+# Definición de la red compartida por defecto
 networks:
   aiss-network:
     driver: bridge
