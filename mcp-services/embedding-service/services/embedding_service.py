@@ -5,6 +5,7 @@ import asyncio
 import gc
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple, Union
+from enum import Enum, auto
 
 import torch
 from sentence_transformers import SentenceTransformer
@@ -21,6 +22,15 @@ from services.vectordb_base import VectorDBBase
 
 logger = logging.getLogger(__name__)
 
+
+class ModelStatus(str, Enum):
+    """Estado del modelo de embedding"""
+    IDLE = "idle"
+    LOADING = "loading"
+    LOADED = "loaded"
+    ERROR = "error"
+
+
 class EmbeddingService:
     """Servicio para generar y gestionar embeddings con modelos avanzados"""
 
@@ -36,6 +46,8 @@ class EmbeddingService:
         self.current_model_instance: Optional[SentenceTransformer] = None
         self.current_model_dim: Optional[int] = None
         self.model_change_lock = asyncio.Lock()  # Lock para proteger cambios de modelo
+        self.model_status = ModelStatus.IDLE  # Estado inicial del modelo
+        self.model_error: Optional[str] = None  # Error durante la carga, si ocurre
 
         # Estado de GPU
         self.gpu_available = False
@@ -58,7 +70,7 @@ class EmbeddingService:
             logger.warning("python-docx no está instalado. El procesamiento de documentos Word será limitado.")
 
     async def initialize_models(self):
-        """Inicializar modelo de embedding por defecto"""
+        """Inicializar configuración de hardware sin cargar modelos"""
         try:
             # Comprobar disponibilidad de GPU
             use_gpu = self.settings.models.use_gpu
@@ -83,7 +95,8 @@ class EmbeddingService:
                     # Intentar inicializar y obtener información detallada de GPU
                     device_count = torch.cuda.device_count()
                     device_name = torch.cuda.get_device_name(0) if device_count > 0 else "Desconocida"
-                    memory_info = torch.cuda.get_device_properties(0).total_memory / (1024**3) if device_count > 0 else 0
+                    memory_info = torch.cuda.get_device_properties(0).total_memory / (
+                                1024 ** 3) if device_count > 0 else 0
                     self.gpu_info = f"{device_count} dispositivo(s), {device_name} ({memory_info:.1f} GB)"
                     self.device = "cuda:0"
 
@@ -130,10 +143,9 @@ class EmbeddingService:
             # Asegurarse de que las colecciones existen en la base de datos vectorial
             await self.vectordb_service.ensure_collections_exist()
 
-            # Cargar el modelo por defecto
-            default_model = self.settings.models.default_model_name
-            logger.info(f"Cargando modelo de embedding por defecto: {default_model}")
-            await self._load_and_set_model(default_model)
+            # Registrar que estamos listos para recibir solicitudes (pero sin modelo cargado)
+            logger.info("Servicio inicializado correctamente. No hay modelo cargado inicialmente.")
+            logger.info("Use el endpoint POST /models/load para cargar un modelo.")
 
         except Exception as e:
             logger.error(f"Error crítico inicializando hardware para modelos: {e}")
@@ -175,16 +187,27 @@ class EmbeddingService:
 
                     # Cargar modelo usando SentenceTransformer
                     logger.info(f"Cargando modelo {model_name} en {device}...")
+
+                    # Obtener token de Hugging Face desde variable de entorno (que puede ser actualizada)
+                    hf_token = os.environ.get("HF_TOKEN", None)
+
+                    # Cargar el modelo con trust_remote_code=True para modelos como BGE-M3
                     sentence_model = SentenceTransformer(
                         model_name,
                         cache_folder=cache_dir,
                         device=device,
-                        trust_remote_code=True
+                        trust_remote_code=True,
+                        use_auth_token=hf_token
                     )
 
                     # Verificar modelo con una entrada simple
                     test_text = "Prueba de modelo"
                     logger.info(f"Verificando el modelo con texto de prueba: '{test_text}'")
+
+                    # Para modelos BGE-M3, añadir prefijo si es necesario
+                    if "bge-m3" in model_name.lower():
+                        test_text = f"passage: {test_text}"
+                        logger.info(f"Usando prefijo para BGE-M3: '{test_text}'")
 
                     # Generar embedding de prueba
                     embedding = sentence_model.encode(
@@ -276,31 +299,89 @@ class EmbeddingService:
         Returns:
             True si se cambió correctamente, False en caso contrario
         """
-        # Adquirir lock para proteger el proceso de cambio
-        async with self.model_change_lock:
+        # No adquirimos el lock aquí, lo haremos dentro de la tarea en segundo plano
+        try:
+            # Actualizar estado a "loading"
+            self.model_status = ModelStatus.LOADING
+            self.model_error = None
+
             # Si es el mismo modelo, no hacer nada
-            if new_model_name == self.current_model_name:
+            if new_model_name == self.current_model_name and self.current_model_instance is not None:
                 logger.info(f"El modelo {new_model_name} ya está activo")
+                self.model_status = ModelStatus.LOADED
                 return True
 
-            # Descargar modelo actual
-            await self._unload_current_model()
+            # Adquirir lock para proteger el proceso de cambio
+            async with self.model_change_lock:
+                # Descargar modelo actual
+                await self._unload_current_model()
 
-            # Cargar nuevo modelo
-            success = await self._load_and_set_model(new_model_name)
+                # Cargar nuevo modelo
+                success = await self._load_and_set_model(new_model_name)
 
-            if success:
-                logger.info(f"Cambio de modelo exitoso: {new_model_name}")
-                # Aquí podríamos emitir un evento o actualizar métricas sobre el cambio
-            else:
-                logger.error(f"Error al cambiar al modelo {new_model_name}")
-                # Intentar volver al modelo por defecto si fallamos
-                default_model = self.settings.models.default_model_name
-                if default_model != new_model_name:
-                    logger.info(f"Intentando volver al modelo por defecto: {default_model}")
-                    await self._load_and_set_model(default_model)
+                if success:
+                    logger.info(f"Cambio de modelo exitoso: {new_model_name}")
+                    self.model_status = ModelStatus.LOADED
+                    # Aquí podríamos emitir un evento o actualizar métricas sobre el cambio
+                else:
+                    logger.error(f"Error al cambiar al modelo {new_model_name}")
+                    self.model_status = ModelStatus.ERROR
+                    self.model_error = f"Error al cargar el modelo {new_model_name}"
+                    # Intentar volver al modelo por defecto si fallamos
+                    default_model = self.settings.models.default_model_name
+                    if default_model != new_model_name:
+                        logger.info(f"Intentando volver al modelo por defecto: {default_model}")
+                        await self._load_and_set_model(default_model)
+                        if self.current_model_instance is not None:
+                            self.model_status = ModelStatus.LOADED
+                            self.model_error = None
 
-            return success
+                return success
+        except Exception as e:
+            logger.error(f"Error en proceso de cambio de modelo: {e}")
+            self.model_status = ModelStatus.ERROR
+            self.model_error = str(e)
+            return False
+
+    async def get_model_status(self) -> Dict[str, Any]:
+        """
+        Obtener el estado actual del modelo
+
+        Returns:
+            Dict con estado, nombre del modelo y error (si existe)
+        """
+        return {
+            "status": self.model_status,
+            "current_model_name": self.current_model_name,
+            "error": self.model_error,
+            "device": self.device,
+            "gpu_info": self.gpu_info,
+            "vector_dimension": self.current_model_dim
+        }
+
+    async def unload_model(self) -> bool:
+        """
+        Descargar el modelo actual
+
+        Returns:
+            True si se descargó correctamente o no había modelo, False en caso de error
+        """
+        try:
+            async with self.model_change_lock:
+                if self.current_model_instance is None:
+                    logger.info("No hay modelo para descargar")
+                    self.model_status = ModelStatus.IDLE
+                    return True
+
+                # Descargar modelo
+                await self._unload_current_model()
+                self.model_status = ModelStatus.IDLE
+                return True
+        except Exception as e:
+            logger.error(f"Error al descargar modelo: {e}")
+            self.model_status = ModelStatus.ERROR
+            self.model_error = str(e)
+            return False
 
     async def close(self):
         """Liberar recursos del servicio"""
@@ -311,7 +392,10 @@ class EmbeddingService:
         """Obtener la instancia del modelo activo"""
         if self.current_model_instance is None:
             logger.error("No hay un modelo de embedding activo")
-            raise HTTPException(status_code=500, detail="No hay un modelo de embedding activo inicializado")
+            raise HTTPException(
+                status_code=409,
+                detail="No hay un modelo de embedding activo inicializado. Use el endpoint /models/load primero."
+            )
         return self.current_model_instance
 
     async def create_embedding(self,
@@ -390,7 +474,8 @@ class EmbeddingService:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         retry=retry_if_exception_type((RuntimeError, ConnectionError, TimeoutError)),
-        retry_error_callback=lambda retry_state: logger.error(f"Failed embedding generation after {retry_state.attempt_number} attempts")
+        retry_error_callback=lambda retry_state: logger.error(
+            f"Failed embedding generation after {retry_state.attempt_number} attempts")
     )
     async def _generate_embedding(self,
                                   text: str,
@@ -467,8 +552,10 @@ class EmbeddingService:
 
         # Limitar número de textos por batch
         if len(texts) > self.settings.max_texts_per_batch:
-            logger.error(f"Número máximo de textos por batch excedido: {len(texts)} > {self.settings.max_texts_per_batch}")
-            raise HTTPException(status_code=400, detail=f"Número máximo de textos por batch excedido: {len(texts)} > {self.settings.max_texts_per_batch}")
+            logger.error(
+                f"Número máximo de textos por batch excedido: {len(texts)} > {self.settings.max_texts_per_batch}")
+            raise HTTPException(status_code=400,
+                                detail=f"Número máximo de textos por batch excedido: {len(texts)} > {self.settings.max_texts_per_batch}")
 
         # Verificar que hay un modelo activo
         model_instance = self._get_model_instance()
@@ -495,7 +582,8 @@ class EmbeddingService:
                     # Usar el batch_size configurado
                     batch_size = self.settings.models.batch_size
 
-                    logger.info(f"Procesando embeddings batch con modelo {self.current_model_name} (total: {len(input_texts)} textos)")
+                    logger.info(
+                        f"Procesando embeddings batch con modelo {self.current_model_name} (total: {len(input_texts)} textos)")
                     logger.info(f"Usando batch_size={batch_size}")
 
                     # Generar embeddings en batch
@@ -512,7 +600,8 @@ class EmbeddingService:
                     # Liberar memoria de tensores temporales
                     del embeddings
 
-                    logger.info(f"Generados {len(all_embeddings)} vectores. Dimensión: {all_embeddings[0].shape if all_embeddings else 'N/A'}")
+                    logger.info(
+                        f"Generados {len(all_embeddings)} vectores. Dimensión: {all_embeddings[0].shape if all_embeddings else 'N/A'}")
 
                     return all_embeddings
                 except Exception as e:
@@ -610,7 +699,8 @@ class EmbeddingService:
         max_size = self.settings.max_document_size_mb * 1024 * 1024
         if len(document) > max_size:
             logger.error(f"Tamaño de documento excedido: {len(document)} bytes > {max_size} bytes")
-            raise HTTPException(status_code=413, detail=f"Tamaño de documento excedido: {len(document)} bytes > {max_size} bytes")
+            raise HTTPException(status_code=413,
+                                detail=f"Tamaño de documento excedido: {len(document)} bytes > {max_size} bytes")
 
         # Extraer texto del documento según su tipo
         text = await self._extract_text_from_document(document, filename, content_type)
@@ -711,7 +801,9 @@ class EmbeddingService:
                 logger.error(f"Error extrayendo texto de PDF: {e}")
                 return f"[Error en contenido de PDF: {filename}]"
 
-        elif content_type in ["application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"] or ext in [".doc", ".docx"]:
+        elif content_type in ["application/msword",
+                              "application/vnd.openxmlformats-officedocument.wordprocessingml.document"] or ext in [
+            ".doc", ".docx"]:
             # Usar la bandera de soporte DOCX para decidir el comportamiento
             if not self.docx_support:
                 logger.warning(f"Procesamiento de documentos Word no disponible para: {filename}")
@@ -883,7 +975,8 @@ class EmbeddingService:
                         return True, data
                     else:
                         logger.error(f"Context service health check failed with status {response.status_code}")
-                        return False, {"status": "error", "code": response.status_code, "message": "MCP service health check failed"}
+                        return False, {"status": "error", "code": response.status_code,
+                                       "message": "MCP service health check failed"}
             else:
                 import aiohttp
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10.0)) as session:
@@ -894,7 +987,8 @@ class EmbeddingService:
                             return True, data
                         else:
                             logger.error(f"Context service health check failed with status {response.status}")
-                            return False, {"status": "error", "code": response.status, "message": "MCP service health check failed"}
+                            return False, {"status": "error", "code": response.status,
+                                           "message": "MCP service health check failed"}
         except Exception as e:
             logger.error(f"Critical error: Context service not available: {e}")
             return False, {"status": "error", "error": str(e), "message": "MCP service unavailable"}
@@ -932,7 +1026,8 @@ class EmbeddingService:
                         )
             else:
                 import aiohttp
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.settings.mcp_service_timeout)) as session:
+                async with aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=self.settings.mcp_service_timeout)) as session:
                     async with session.get(f"{self.settings.mcp_service_url}/contexts") as response:
                         if response.status == 200:
                             return await response.json()
@@ -985,8 +1080,10 @@ class EmbeddingService:
                         )
             else:
                 import aiohttp
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.settings.mcp_service_timeout)) as session:
-                    async with session.post(f"{self.settings.mcp_service_url}/contexts/{context_id}/activate") as response:
+                async with aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=self.settings.mcp_service_timeout)) as session:
+                    async with session.post(
+                            f"{self.settings.mcp_service_url}/contexts/{context_id}/activate") as response:
                         if response.status == 200:
                             return await response.json()
                         else:
@@ -1038,8 +1135,10 @@ class EmbeddingService:
                         )
             else:
                 import aiohttp
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.settings.mcp_service_timeout)) as session:
-                    async with session.post(f"{self.settings.mcp_service_url}/contexts/{context_id}/deactivate") as response:
+                async with aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=self.settings.mcp_service_timeout)) as session:
+                    async with session.post(
+                            f"{self.settings.mcp_service_url}/contexts/{context_id}/deactivate") as response:
                         if response.status == 200:
                             return await response.json()
                         else:

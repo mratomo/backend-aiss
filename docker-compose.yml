@@ -339,7 +339,7 @@ services:
               count: 1 # O 'all' si quieres todas las GPUs
               capabilities: [gpu]
     volumes:
-      - ${VOLUMES_PATH:-/home/prods/ssd/aissdata}/data/embedding-models:/app/modelos # Ruta donde se cachean modelos?
+      - ${VOLUMES_PATH:-/home/prods/ssd/aissdata}/data/embedding-models:/app/modelos # Ruta donde se cachean modelos
     environment:
       - MONGODB_URI=mongodb://admin:password@mongodb:27017/aiss?authSource=admin
       - VECTOR_DB=weaviate
@@ -350,7 +350,7 @@ services:
       - MCP_SERVICE_TIMEOUT=30.0
       - ALLOW_DEGRADED_MODE=true
       - USE_HTTPX=true
-      - DEFAULT_EMBEDDING_MODEL=${DEFAULT_EMBEDDING_MODEL:-BAAI/bge-m3} # Modelo por defecto
+      - DEFAULT_EMBEDDING_MODEL=${DEFAULT_EMBEDDING_MODEL:-BAAI/bge-m3-large} # Modelo por defecto
       - USE_GPU=${USE_GPU:-true} # Permitir configurar desde .env
       - USE_FP16=${USE_FP16:-true} # Permitir configurar desde .env
       - FALLBACK_TO_CPU=${FALLBACK_TO_CPU:-true} # Permitir configurar desde .env
@@ -358,6 +358,13 @@ services:
       - MAX_TEXTS_PER_BATCH=50
       - CORS_ALLOWED_ORIGINS='["http://localhost:3000","http://localhost","http://localhost:80"]'
       - LOG_LEVEL=info
+      # Reutiliza el token existente de Hugging Face
+      - HF_TOKEN=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
+      # Variables para configurar la caché
+      - SENTENCE_TRANSFORMERS_HOME=/app/modelos
+      - HF_HOME=/app/modelos
+      - HF_HUB_CACHE=/app/modelos
+      - TRANSFORMERS_CACHE=/app/modelos
     ports:
       - "8084:8084"
     depends_on:
@@ -662,6 +669,7 @@ services:
       start_period: 10s
     networks:
       - aiss-network
+
 
   terminal-gateway-service:
     build:
