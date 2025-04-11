@@ -11,21 +11,20 @@ class WeaviateSettings(BaseSettings):
     """Configuración para Weaviate"""
     url: str = Field(default="http://weaviate:8080")  # Puerto interno de Weaviate
     api_key: Optional[str] = Field(default=None)
-    
+
     # Nombres de clases para diferentes tipos de embeddings
     class_general: str = Field(default="GeneralKnowledge")
     class_personal: str = Field(default="PersonalKnowledge")
-    
+
     # Parámetros para Weaviate
     batch_size: int = Field(default=100)
     timeout: int = Field(default=60)
 
 
 class ModelSettings(BaseSettings):
-    """Configuración para modelos de embeddings (SOLO NOMIC v1.5)"""
-    # Modelos fijos - ya no configurables por env var para estos campos
-    general_model: str = Field(default="nomic-ai/nomic-embed-text-v1.5")
-    personal_model: str = Field(default="nomic-ai/nomic-embed-text-v1.5")
+    """Configuración para modelo de embedding"""
+    # Modelo por defecto - configurable por variable de entorno
+    default_model_name: str = Field(default="BAAI/bge-m3-large")
 
     # Configuración común - Optimizada para RTX 4090 con 24GB VRAM
     batch_size: int = Field(default=128) # Aumentado para RTX 4090 (24GB VRAM)
@@ -35,9 +34,6 @@ class ModelSettings(BaseSettings):
 
     # Opciones de optimización
     use_fp16: bool = Field(default=True) # Media precisión para mayor rendimiento en RTX 4090
-    # Estas opciones ya no son relevantes al quitar los modelos HF genéricos
-    # use_8bit: bool = Field(default=False)
-    # max_length: int = Field(default=512) # Nomic/SentenceTransformer lo maneja internamente
 
     # Umbral de similaridad (0.0 a 1.0) - Aún relevante para búsquedas
     similarity_threshold: float = Field(default=0.65)
@@ -57,7 +53,7 @@ class Settings(BaseSettings):
 
     # Configuración de base de datos vectorial
     weaviate: WeaviateSettings = Field(default_factory=WeaviateSettings)
-    
+
     # Selección de base de datos vectorial a utilizar (weaviate)
     vector_db: str = Field(default="weaviate")
 
@@ -90,7 +86,7 @@ class Settings(BaseSettings):
         cors_origins = os.getenv("CORS_ALLOWED_ORIGINS")
         if cors_origins:
             kwargs["cors_allowed_origins"] = cors_origins.split(",")
-            
+
         super().__init__(**kwargs)
 
         # Priorizar variables de entorno sobre valores por defecto
@@ -107,8 +103,8 @@ class Settings(BaseSettings):
         self.weaviate.class_general = os.getenv("WEAVIATE_CLASS_GENERAL", self.weaviate.class_general)
         self.weaviate.class_personal = os.getenv("WEAVIATE_CLASS_PERSONAL", self.weaviate.class_personal)
 
-        # Configuración de modelos - Ya no se leen de env vars los nombres de modelos
-        # Los modelos están fijos en "nomic-ai/nomic-embed-text-v1.5"
+        # Configuración de modelos - Leer el modelo por defecto y otras configuraciones
+        self.models.default_model_name = os.getenv("DEFAULT_EMBEDDING_MODEL", self.models.default_model_name)
         self.models.use_gpu = os.getenv("USE_GPU", "true").lower() in ("true", "1", "yes")
         self.models.fallback_to_cpu = os.getenv("FALLBACK_TO_CPU", "false").lower() in ("true", "1", "yes")
         self.models.use_fp16 = os.getenv("USE_FP16", "true").lower() in ("true", "1", "yes")

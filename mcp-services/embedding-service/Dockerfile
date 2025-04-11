@@ -37,9 +37,7 @@ FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04 AS base
 
  # Actualizar pip, instalar PyTorch con CUDA y otras dependencias
  RUN pip install --no-cache-dir --upgrade pip && \
- # --- LÍNEA MODIFICADA ---
      pip install --no-cache-dir torch==2.5.1+cu121 --extra-index-url https://download.pytorch.org/whl/cu121 && \
- # --- FIN LÍNEA MODIFICADA ---
      pip install --no-cache-dir -r requirements.txt && \
      # Verificar instalación de torch con CUDA
      python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}'); print(f'GPU count: {torch.cuda.device_count()}');"
@@ -53,10 +51,10 @@ FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04 AS base
  # Crear directorio para caché de modelos
  RUN mkdir -p /app/modelos
 
- # Copiar solo el script de descarga de modelos
+ # Copiar el script de descarga de modelos actualizado para BGE-M3
  COPY download_model.py /app/
 
- # Descargar el modelo Nomic durante la fase de construcción
+ # Descargar el modelo BGE-M3 durante la fase de construcción
  # No usará GPU durante build pero los archivos quedarán en caché para su uso posterior
  RUN cd /app && python download_model.py
 
@@ -77,13 +75,15 @@ FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04 AS base
      SENTENCE_TRANSFORMERS_HOME=/app/modelos \
      HF_HOME=/app/modelos \
      HF_HUB_CACHE=/app/modelos \
-     TRANSFORMERS_CACHE=/app/modelos
+     TRANSFORMERS_CACHE=/app/modelos \
+     # Configuración del modelo por defecto
+     DEFAULT_EMBEDDING_MODEL=BAAI/bge-m3-large
 
  # Copiar código fuente
  COPY . .
 
- # Verificar la instalación
- RUN python -c "import fastapi, uvicorn, pydantic, pydantic_settings; print(f'Import check successful: fastapi={fastapi.__version__}, uvicorn={uvicorn.__version__}, pydantic={pydantic.__version__}, pydantic_settings={pydantic_settings.__version__}')"
+ # Verificar solo las dependencias básicas
+ RUN python -c "import fastapi, uvicorn, pydantic, pydantic_settings; print(f'Imports básicos correctos: fastapi={fastapi.__version__}, uvicorn={uvicorn.__version__}, pydantic={pydantic.__version__}, pydantic_settings={pydantic_settings.__version__}')"
 
  # Cambiar al usuario no privilegiado para mayor seguridad
  RUN adduser --disabled-password --gecos "" appuser && \

@@ -2,11 +2,11 @@ import logging
 import uuid
 import os
 import asyncio
+import gc
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple, Union
 
 import torch
-# Importar sentence_transformers directamente en lugar de transformers
 from sentence_transformers import SentenceTransformer
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from fastapi import HTTPException
@@ -31,8 +31,13 @@ class EmbeddingService:
         self.vectordb_service = vectordb_service
         self.settings = settings
 
-        # Modelos para embeddings
-        self.models: Dict[EmbeddingType, Dict[str, Any]] = {}
+        # Variables para el modelo actual (único activo)
+        self.current_model_name: Optional[str] = None
+        self.current_model_instance: Optional[SentenceTransformer] = None
+        self.current_model_dim: Optional[int] = None
+        self.model_change_lock = asyncio.Lock()  # Lock para proteger cambios de modelo
+
+        # Estado de GPU
         self.gpu_available = False
         self.gpu_info = "No GPU detected"
         self.device = None
@@ -53,16 +58,16 @@ class EmbeddingService:
             logger.warning("python-docx no está instalado. El procesamiento de documentos Word será limitado.")
 
     async def initialize_models(self):
-        """Inicializar modelos de embeddings optimizados para GPU"""
+        """Inicializar modelo de embedding por defecto"""
         try:
             # Comprobar disponibilidad de GPU
             use_gpu = self.settings.models.use_gpu
             gpu_detected = torch.cuda.is_available()
             fallback_to_cpu = self.settings.models.fallback_to_cpu
-            
+
             # Primera verificación: ¿Se quiere usar GPU y está disponible?
             self.gpu_available = gpu_detected and use_gpu
-            
+
             if use_gpu and not gpu_detected:
                 if fallback_to_cpu:
                     logger.warning("GPU solicitada pero no detectada. Fallback a CPU activado.")
@@ -81,12 +86,12 @@ class EmbeddingService:
                     memory_info = torch.cuda.get_device_properties(0).total_memory / (1024**3) if device_count > 0 else 0
                     self.gpu_info = f"{device_count} dispositivo(s), {device_name} ({memory_info:.1f} GB)"
                     self.device = "cuda:0"
-                    
+
                     # Información detallada sobre la GPU
                     logger.info(f"Usando GPU: {self.gpu_info}")
                     logger.info(f"CUDA version: {torch.version.cuda}")
                     logger.info(f"PyTorch CUDA configurado: {torch.cuda.is_available()}")
-                    
+
                     # Intento de reservar una pequeña cantidad de memoria para verificar que la GPU funciona
                     try:
                         test_tensor = torch.zeros((10, 10), device=self.device)
@@ -102,14 +107,6 @@ class EmbeddingService:
                             self.gpu_available = False
                         else:
                             raise ValueError(f"Error al inicializar GPU: {e}")
-                    
-                    # Verificar que estamos usando tecnología adecuada para RTX 4090
-                    if self.gpu_available:
-                        logger.info("SentenceTransformer está configurado para aprovechar la GPU detectada")
-                        logger.info("Batch size optimizado para RTX 4090: " + str(self.settings.models.batch_size))
-                        if self.settings.models.use_fp16:
-                            logger.info("FP16 (media precisión) activado para mejor rendimiento en RTX 4090")
-                        logger.info("Modelo Nomic utilizará GPU a través de SentenceTransformer")
                 except Exception as e:
                     # Error general al configurar GPU
                     logger.error(f"Error configurando GPU: {e}")
@@ -125,14 +122,19 @@ class EmbeddingService:
                 self.device = "cpu"
                 self.gpu_info = "CPU seleccionada por configuración"
                 logger.info("Usando CPU para generación de embeddings por configuración")
-            
+
             # Si llegamos aquí sin GPU disponible y sin errores, es porque estamos usando CPU
             if not self.gpu_available:
                 logger.info("Usando CPU para generación de embeddings")
-            
+
             # Asegurarse de que las colecciones existen en la base de datos vectorial
             await self.vectordb_service.ensure_collections_exist()
-            
+
+            # Cargar el modelo por defecto
+            default_model = self.settings.models.default_model_name
+            logger.info(f"Cargando modelo de embedding por defecto: {default_model}")
+            await self._load_and_set_model(default_model)
+
         except Exception as e:
             logger.error(f"Error crítico inicializando hardware para modelos: {e}")
             if fallback_to_cpu:
@@ -144,104 +146,62 @@ class EmbeddingService:
             else:
                 raise ValueError(f"Error crítico inicializando hardware para modelos y fallback a CPU desactivado: {e}")
 
-        # Cargar modelo para embeddings generales
-        logger.info(f"Cargando modelo de embedding general: {self.settings.models.general_model}")
-        general_model = await self._load_model(self.settings.models.general_model)
-        self.models[EmbeddingType.GENERAL] = general_model
-
-        # Cargar modelo para embeddings personales (si es diferente)
-        if self.settings.models.personal_model != self.settings.models.general_model:
-            logger.info(f"Cargando modelo de embedding personal: {self.settings.models.personal_model}")
-            personal_model = await self._load_model(self.settings.models.personal_model)
-            self.models[EmbeddingType.PERSONAL] = personal_model
-        else:
-            # Usar el mismo modelo para ambos tipos
-            logger.info("Usando el mismo modelo para embeddings personales")
-            self.models[EmbeddingType.PERSONAL] = general_model
-
-        # Actualizar tamaño del vector en configuración de Qdrant si es necesario
-        self._update_vector_size()
-
-    async def _load_model(self, model_name: str) -> Dict[str, Any]:
+    async def _load_and_set_model(self, model_name: str) -> bool:
         """
-        Cargar y optimizar modelo de embeddings (SOLO NOMIC v1.5).
-        Devuelve un diccionario con la instancia del modelo y metadatos.
+        Cargar y configurar un modelo específico como el modelo activo
+
+        Args:
+            model_name: Nombre del modelo a cargar desde HuggingFace
+
+        Returns:
+            True si se cargó correctamente, False en caso contrario
         """
-        # Como solo usamos Nomic, model_name siempre debería ser "nomic-ai/nomic-embed-text-v1.5"
-        if "nomic-ai/nomic-embed-text-v1.5" not in model_name:
-            # Forzar al modelo correcto si por alguna razón se intenta cargar otro
-            logger.warning(f"Intentando cargar un modelo no soportado: {model_name}. Usando Nomic v1.5.")
-            model_name = "nomic-ai/nomic-embed-text-v1.5"
-            
         try:
-            # Verificar versión de sentence_transformers 
-            try:
-                import importlib.metadata
-                st_version = importlib.metadata.version("sentence_transformers")
-                logger.info(f"SentenceTransformer versión detectada: {st_version}")
-            except ImportError:
-                logger.error("Biblioteca sentence_transformers no está instalada correctamente.")
-                raise
-            
             # Crear directorio para caché si no existe
-            import os
             cache_dir = "./modelos"
             os.makedirs(cache_dir, exist_ok=True)
-            
-            # Cargar el modelo una sola vez - esta función es crucial para la eficiencia
-            logger.info(f"Cargando modelo {model_name} usando SentenceTransformer...")
-            
+
+            logger.info(f"Cargando modelo {model_name}...")
+
             # Ejecutar en un thread separado para no bloquear
             def load_actual_model():
                 try:
-                    # Determinar dispositivo (ya debería estar en self.device)
+                    # Usar el dispositivo configurado
                     device = self.device
-                    
-                    # Si fallback_to_cpu=False y solo hay CPU disponible, es un error crítico
-                    if device == "cpu" and not self.settings.models.fallback_to_cpu:
+
+                    # Verificación final de disponibilidad de GPU
+                    if device == "cpu" and not self.settings.models.fallback_to_cpu and self.settings.models.use_gpu:
                         raise RuntimeError("GPU requerida pero solo CPU disponible y fallback desactivado.")
-                    
-                    # Verificar disponibilidad de GPU y mostrar información
-                    if self.gpu_available:
-                        # Verificar memoria disponible - útil para RTX 4090 con 24GB
-                        mem_info = torch.cuda.get_device_properties(0)
-                        total_mem_gb = mem_info.total_memory / (1024 * 1024 * 1024)
-                        logger.info(f"GPU detectada: {mem_info.name} con {total_mem_gb:.1f} GB de memoria")
-                    else:
-                        if not self.settings.models.fallback_to_cpu:
-                            raise RuntimeError("No se detectó GPU y fallback a CPU está desactivado.")
-                        logger.warning("Usando CPU (GPU no disponible o desactivada).")
-                    
-                    # Cargar modelo usando SentenceTransformer - ESTA INSTANCIA SE REUTILIZARÁ
-                    logger.info(f"Cargando y manteniendo en memoria modelo {model_name} en {device}...")
+
+                    # Cargar modelo usando SentenceTransformer
+                    logger.info(f"Cargando modelo {model_name} en {device}...")
                     sentence_model = SentenceTransformer(
-                        model_name, 
+                        model_name,
                         cache_folder=cache_dir,
                         device=device,
-                        trust_remote_code=True  # Necesario para modelos Nomic
+                        trust_remote_code=True
                     )
-                    
+
                     # Verificar modelo con una entrada simple
-                    test_text = "search_document: Prueba de modelo"
+                    test_text = "Prueba de modelo"
                     logger.info(f"Verificando el modelo con texto de prueba: '{test_text}'")
-                    
+
                     # Generar embedding de prueba
                     embedding = sentence_model.encode(
-                        test_text, 
+                        test_text,
                         convert_to_tensor=True,
                         show_progress_bar=False
                     )
-                    
+
                     # Obtener dimensión del embedding
                     embedding_dim = embedding.size(-1)
                     logger.info(f"Dimensión de embedding detectada: {embedding_dim}")
                     logger.info(f"Modelo verificado exitosamente en {device}")
-                    
-                    # Importante: NO eliminamos el modelo, lo devolvemos para reutilizarlo
-                    # Solo liberamos el embedding de prueba
+
+                    # Liberar embedding de prueba
                     del embedding
-                    
-                    # Devolvemos la instancia del modelo y la dimensión del vector
+
+                    # Devolver la instancia y dimensión
                     return {
                         "model_instance": sentence_model,
                         "vector_dim": embedding_dim
@@ -249,86 +209,110 @@ class EmbeddingService:
                 except Exception as e:
                     logger.error(f"Error cargando modelo: {e}", exc_info=True)
                     raise
-            
+
             # Cargar el modelo de forma asíncrona
             model_data = await asyncio.to_thread(load_actual_model)
-            
+
             # Obtener la instancia del modelo y la dimensión del vector
             sentence_model = model_data["model_instance"]
             vector_dim = model_data["vector_dim"]
-            
-            logger.info(f"Modelo Nomic cargado exitosamente con SentenceTransformer: {model_name}")
-            
-            if self.gpu_available:
-                logger.info(f"Nomic utilizará GPU en dispositivo: {self.device}")
-            
-            # Obtener versión de transformers
-            try:
-                import transformers
-                transformers_version = getattr(transformers, "__version__", "desconocida")
-            except ImportError:
-                transformers_version = "no disponible"
-            
-            # Devolver diccionario con la instancia del modelo y metadatos
-            return {
-                "model_type": "nomic",
-                "model_name": model_name,
-                "model_instance": sentence_model,  # IMPORTANTE: Ahora devolvemos la instancia real del modelo
-                "vector_dim": vector_dim,
-                "version": transformers_version,
-                "cache_dir": cache_dir
-            }
-        except Exception as e:
-            logger.error(f"Error cargando modelo Nomic con SentenceTransformer: {e}", exc_info=True)
-            raise
 
-    def _update_vector_size(self):
-        """Registra información sobre la dimensión del vector para el modelo de embedding y la base de datos vectorial"""
-        if EmbeddingType.GENERAL in self.models:
-            vector_dim = self.models[EmbeddingType.GENERAL]["vector_dim"]
-            model_type = self.models[EmbeddingType.GENERAL].get("model_type", "desconocido")
-            model_name = self.models[EmbeddingType.GENERAL].get("model_name", "desconocido")
-            
-            # Verificar si las dimensiones son válidas
-            if vector_dim is None or vector_dim <= 0:
-                logger.warning(f"Dimensión de vector inválida: {vector_dim} para modelo {model_name}")
-                vector_dim = 1024  # Valor predeterminado para Nomic
-            
-            # Esta información es útil para diagnóstico y verificación de compatibilidad
-            logger.info(f"Vector dimension detectada: {vector_dim} (modelo {model_type}: {model_name})")
-            logger.info(f"Base de datos vectorial: {self.settings.vector_db} configurada para manejar vectores de {vector_dim} dimensiones")
+            # Establecer como modelo actual
+            self.current_model_name = model_name
+            self.current_model_instance = sentence_model
+            self.current_model_dim = vector_dim
+
+            logger.info(f"Modelo {model_name} cargado y establecido como modelo activo")
+            logger.info(f"Dimensión de vector: {vector_dim}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error cargando modelo {model_name}: {e}", exc_info=True)
+            return False
+
+    async def _unload_current_model(self) -> None:
+        """Descargar el modelo actual para liberar memoria"""
+        if self.current_model_instance is None:
+            logger.info("No hay modelo activo para descargar")
+            return
+
+        try:
+            logger.info(f"Descargando modelo actual: {self.current_model_name}")
+
+            # Guardar nombre para el log
+            model_name = self.current_model_name
+
+            # Eliminar referencias
+            model_instance = self.current_model_instance
+            self.current_model_instance = None
+            self.current_model_name = None
+            self.current_model_dim = None
+
+            # Forzar eliminación del modelo
+            del model_instance
+
+            # Forzar recolección de basura
+            gc.collect()
+
+            # Liberar caché de CUDA si hay GPU
+            if self.gpu_available and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.info("Memoria GPU liberada")
+
+            logger.info(f"Modelo {model_name} descargado correctamente")
+
+        except Exception as e:
+            logger.error(f"Error descargando modelo: {e}")
+            # No re-lanzar excepción para permitir la carga del nuevo modelo
+
+    async def change_active_model(self, new_model_name: str) -> bool:
+        """
+        Cambiar el modelo activo por uno nuevo
+
+        Args:
+            new_model_name: Nombre del nuevo modelo a cargar
+
+        Returns:
+            True si se cambió correctamente, False en caso contrario
+        """
+        # Adquirir lock para proteger el proceso de cambio
+        async with self.model_change_lock:
+            # Si es el mismo modelo, no hacer nada
+            if new_model_name == self.current_model_name:
+                logger.info(f"El modelo {new_model_name} ya está activo")
+                return True
+
+            # Descargar modelo actual
+            await self._unload_current_model()
+
+            # Cargar nuevo modelo
+            success = await self._load_and_set_model(new_model_name)
+
+            if success:
+                logger.info(f"Cambio de modelo exitoso: {new_model_name}")
+                # Aquí podríamos emitir un evento o actualizar métricas sobre el cambio
+            else:
+                logger.error(f"Error al cambiar al modelo {new_model_name}")
+                # Intentar volver al modelo por defecto si fallamos
+                default_model = self.settings.models.default_model_name
+                if default_model != new_model_name:
+                    logger.info(f"Intentando volver al modelo por defecto: {default_model}")
+                    await self._load_and_set_model(default_model)
+
+            return success
 
     async def close(self):
-        """Liberar recursos del servicio - limpieza adecuada de modelos cargados"""
-        # Liberar modelos y GPU si es necesario
-        for model_type in self.models:
-            model_info = self.models[model_type]
-            
-            # Liberar la instancia del modelo explícitamente
-            if "model_instance" in model_info:
-                logger.info(f"Liberando instancia del modelo para {model_type}")
-                model_instance = model_info["model_instance"]
-                model_info["model_instance"] = None
-                del model_instance
-            
-            # Limpiar el resto de la información
-            model_info.clear()
+        """Liberar recursos del servicio"""
+        # Eliminar modelo activo
+        await self._unload_current_model()
 
-        # Limpiar diccionario de modelos
-        self.models.clear()
-
-        if self.gpu_available:
-            # Limpiar caché de CUDA
-            torch.cuda.empty_cache()
-            logger.info("Instancias de modelos y recursos de GPU liberados correctamente")
-
-    def _get_model(self, embedding_type: EmbeddingType) -> Dict[str, Any]:
-        """Obtener modelo para el tipo de embedding especificado"""
-        model_info = self.models.get(embedding_type)
-        if not model_info:
-            logger.error(f"Modelo no inicializado para el tipo de embedding: {embedding_type}")
-            raise HTTPException(status_code=500, detail=f"Modelo no inicializado para el tipo de embedding: {embedding_type}")
-        return model_info
+    def _get_model_instance(self) -> Optional[SentenceTransformer]:
+        """Obtener la instancia del modelo activo"""
+        if self.current_model_instance is None:
+            logger.error("No hay un modelo de embedding activo")
+            raise HTTPException(status_code=500, detail="No hay un modelo de embedding activo inicializado")
+        return self.current_model_instance
 
     async def create_embedding(self,
                                text: str,
@@ -338,11 +322,11 @@ class EmbeddingService:
                                area_id: Optional[str] = None,
                                metadata: Optional[Dict[str, Any]] = None) -> EmbeddingResponse:
         """Generar y almacenar un embedding para un texto"""
-        # Obtener modelo para el tipo de embedding
-        model_info = self._get_model(embedding_type)
+        # Verificar que hay un modelo activo
+        model_instance = self._get_model_instance()
 
-        # Generar embedding de forma asíncrona para no bloquear el bucle de eventos
-        vector = await self._generate_embedding(text, model_info)
+        # Generar embedding de forma asíncrona
+        vector = await self._generate_embedding(text, model_instance)
         vector_list = vector.tolist()
 
         # Preparar metadatos
@@ -353,6 +337,10 @@ class EmbeddingService:
             meta["owner_id"] = owner_id
         if area_id and "area_id" not in meta:
             meta["area_id"] = area_id
+
+        # Añadir información del modelo
+        meta["model_name"] = self.current_model_name
+        meta["vector_dim"] = self.current_model_dim
 
         # Almacenar vector en la base de datos vectorial
         vector_id = await self.vectordb_service.store_vector(
@@ -379,7 +367,8 @@ class EmbeddingService:
             "collection_name": self.vectordb_service._get_collection_for_type(embedding_type),
             "text_snippet": text[:500],  # Guardar un fragmento como referencia
             "created_at": datetime.utcnow(),
-            "metadata": meta
+            "metadata": meta,
+            "model_name": self.current_model_name  # Guardar qué modelo generó este embedding
         }
 
         # Almacenar referencia en MongoDB
@@ -405,66 +394,62 @@ class EmbeddingService:
     )
     async def _generate_embedding(self,
                                   text: str,
-                                  model_info: Dict[str, Any]) -> torch.Tensor:
+                                  model_instance: SentenceTransformer) -> torch.Tensor:
         """
-        Genera embedding para un texto usando el modelo Nomic v1.5 con SentenceTransformer.
-        Usa la instancia precargada del modelo para mayor eficiencia.
+        Genera embedding para un texto usando el modelo activo
         Con reintentos automáticos en caso de fallos transitorios.
 
         Args:
             text: Texto a convertir en embedding
-            model_info: Información del modelo cargado, incluye la instancia SentenceTransformer
+            model_instance: Instancia del modelo SentenceTransformer
 
         Returns:
             Vector de embedding normalizado
         """
         try:
-            # Verificar disponibilidad de GPU si es obligatoria
-            if self.device == "cpu" and not self.settings.models.fallback_to_cpu:
-                raise RuntimeError("GPU requerida para generar embeddings pero solo CPU disponible.")
-            
-            # Importante: Obtener la instancia del modelo ya cargada
-            sentence_model = model_info.get("model_instance")
-            if sentence_model is None:
+            # Verificar que tenemos un modelo válido
+            if model_instance is None:
                 raise ValueError("Instancia de modelo no disponible - inicialización incorrecta")
-            
+
             # Generar embeddings usando la instancia precargada del modelo
-            def generate_nomic_embedding(model, input_text):
+            def generate_embedding(model, input_text):
                 try:
-                    # Añadir prefijo de instrucción según recomendación de Nomic si no existe ya
-                    # 'search_document:' para textos que serán almacenados
-                    # 'search_query:' para consultas de búsqueda
-                    if input_text.startswith("search_query:") or input_text.startswith("search_document:"):
-                        prefixed_text = input_text  # Ya tiene el prefijo correcto
+                    # Determinar si debemos usar un prefijo para BGE-M3
+                    use_prefix = "bge-m3" in self.current_model_name.lower()
+
+                    if use_prefix:
+                        # Para BGE-M3, añadir prefijo si no existe ya
+                        if input_text.startswith("passage:") or input_text.startswith("query:"):
+                            prefixed_text = input_text  # Ya tiene el prefijo correcto
+                        else:
+                            prefixed_text = f"passage: {input_text}"  # Por defecto usar passage
                     else:
-                        prefixed_text = f"search_document: {input_text}"  # Por defecto usar search_document
-                    
-                    # Generar embedding usando el modelo precargado (más eficiente)
+                        # Para otros modelos, no usar prefijo
+                        prefixed_text = input_text
+
+                    # Generar embedding
                     embedding = model.encode(
-                        prefixed_text, 
+                        prefixed_text,
                         convert_to_tensor=True,
                         show_progress_bar=False
                     )
-                    
-                    # Normalizar para consistencia (aunque SentenceTransformer ya lo hace)
+
+                    # Normalizar para consistencia
                     normalized = torch.nn.functional.normalize(embedding, p=2, dim=0)
-                    
+
                     # Mover a CPU para procesamiento posterior
                     normalized = normalized.cpu()
-                    
-                    # NO destruimos el modelo, solo la representación intermedia
-                    del embedding
-                    
+
                     return normalized
                 except Exception as e:
-                    logger.error(f"Error en generate_nomic_embedding: {e}", exc_info=True)
+                    logger.error(f"Error generando embedding: {e}", exc_info=True)
                     raise
-            
-            # Ejecutar de forma asíncrona - pasamos la instancia del modelo
-            result = await asyncio.to_thread(generate_nomic_embedding, sentence_model, text)
+
+            # Ejecutar de forma asíncrona
+            result = await asyncio.to_thread(generate_embedding, model_instance, text)
             return result
         except Exception as e:
-            logger.error(f"Error generando embedding con Nomic/SentenceTransformer: {e}", exc_info=True)
+            logger.error(f"Error generando embedding: {e}", exc_info=True)
             raise
 
     async def create_embeddings_batch(self,
@@ -474,7 +459,7 @@ class EmbeddingService:
                                       owner_id: str,
                                       area_id: Optional[str] = None,
                                       metadata: Optional[Dict[str, Any]] = None) -> List[EmbeddingResponse]:
-        """Generar y almacenar embeddings para múltiples textos en batch (optimizado para RTX 4090)"""
+        """Generar y almacenar embeddings para múltiples textos en batch"""
         # Verificar que las listas tienen el mismo tamaño
         if len(texts) != len(doc_ids):
             logger.error("Las listas de textos y doc_ids tienen diferente tamaño")
@@ -485,63 +470,60 @@ class EmbeddingService:
             logger.error(f"Número máximo de textos por batch excedido: {len(texts)} > {self.settings.max_texts_per_batch}")
             raise HTTPException(status_code=400, detail=f"Número máximo de textos por batch excedido: {len(texts)} > {self.settings.max_texts_per_batch}")
 
-        # Obtener modelo para el tipo de embedding
-        model_info = self._get_model(embedding_type)
-        
-        # Verificar disponibilidad de GPU si es obligatoria
-        if self.device == "cpu" and not self.settings.models.fallback_to_cpu:
-            raise RuntimeError("GPU requerida para generar embeddings batch pero solo CPU disponible.")
-        
-        # Importante: Obtener la instancia del modelo ya cargada
-        sentence_model = model_info.get("model_instance")
-        if sentence_model is None:
-            raise ValueError("Instancia de modelo no disponible - inicialización incorrecta")
-        
-        # Procesamiento por lotes con la instancia de SentenceTransformer ya cargada
+        # Verificar que hay un modelo activo
+        model_instance = self._get_model_instance()
+
+        # Procesamiento por lotes
         try:
-            # Función para generar embeddings en batch con el modelo precargado
-            def generate_nomic_batch(model, input_texts):
+            # Función para generar embeddings en batch
+            def generate_batch(model, input_texts):
                 try:
-                    # Añadir prefijo de instrucción a todos los textos que no lo tengan ya
+                    # Determinar si debemos usar un prefijo para BGE-M3
+                    use_prefix = "bge-m3" in self.current_model_name.lower()
+
+                    # Preparar textos con prefijos si es necesario
                     prefixed_texts = []
                     for t in input_texts:
-                        if t.startswith("search_query:") or t.startswith("search_document:"):
-                            prefixed_texts.append(t)  # Ya tiene el prefijo correcto
+                        if use_prefix:
+                            if t.startswith("passage:") or t.startswith("query:"):
+                                prefixed_texts.append(t)  # Ya tiene el prefijo correcto
+                            else:
+                                prefixed_texts.append(f"passage: {t}")  # Por defecto
                         else:
-                            prefixed_texts.append(f"search_document: {t}")  # Por defecto
-                    
-                    # Usar el batch_size configurado - optimizado para RTX 4090 (128)
+                            prefixed_texts.append(t)  # Sin prefijo
+
+                    # Usar el batch_size configurado
                     batch_size = self.settings.models.batch_size
-                    
-                    logger.info(f"Procesando embeddings batch con modelo precargado (total: {len(input_texts)} textos)")
-                    logger.info(f"Usando batch_size={batch_size} optimizado para RTX 4090")
-                    
-                    # Generar embeddings en batch con el modelo precargado - mucho más eficiente
+
+                    logger.info(f"Procesando embeddings batch con modelo {self.current_model_name} (total: {len(input_texts)} textos)")
+                    logger.info(f"Usando batch_size={batch_size}")
+
+                    # Generar embeddings en batch
                     embeddings = model.encode(
                         prefixed_texts,
                         batch_size=batch_size,
                         convert_to_tensor=True,
                         show_progress_bar=True  # Mostrar progreso en batches grandes
                     )
-                    
+
                     # Normalizar y convertir a CPU
                     all_embeddings = [torch.nn.functional.normalize(emb, p=2, dim=0).cpu() for emb in embeddings]
-                    
-                    # Liberar memoria de tensores temporales (pero NO el modelo)
+
+                    # Liberar memoria de tensores temporales
                     del embeddings
-                    
+
                     logger.info(f"Generados {len(all_embeddings)} vectores. Dimensión: {all_embeddings[0].shape if all_embeddings else 'N/A'}")
-                    
+
                     return all_embeddings
                 except Exception as e:
-                    logger.error(f"Error en generate_nomic_batch: {e}", exc_info=True)
+                    logger.error(f"Error generando batch de embeddings: {e}", exc_info=True)
                     raise
-            
-            # Ejecutar de forma asíncrona - pasamos el modelo precargado
-            vectors = await asyncio.to_thread(generate_nomic_batch, sentence_model, texts)
-            
+
+            # Ejecutar de forma asíncrona
+            vectors = await asyncio.to_thread(generate_batch, model_instance, texts)
+
         except Exception as e:
-            logger.error(f"Error generando embeddings batch con Nomic/SentenceTransformer: {e}", exc_info=True)
+            logger.error(f"Error generando embeddings batch: {e}", exc_info=True)
             raise
 
         # Convertir a listas de Python
@@ -553,6 +535,10 @@ class EmbeddingService:
             meta["owner_id"] = owner_id
         if area_id and "area_id" not in meta:
             meta["area_id"] = area_id
+
+        # Añadir información del modelo
+        meta["model_name"] = self.current_model_name
+        meta["vector_dim"] = self.current_model_dim
 
         # Almacenar vectores en batch
         vector_ids = await self.vectordb_service.store_vectors_batch(
@@ -588,7 +574,8 @@ class EmbeddingService:
                 "collection_name": collection_name,
                 "text_snippet": text[:500],  # Guardar un fragmento
                 "created_at": datetime.utcnow(),
-                "metadata": item_meta
+                "metadata": item_meta,
+                "model_name": self.current_model_name  # Guardar qué modelo generó este embedding
             }
 
             # Almacenar referencia en MongoDB
@@ -639,7 +626,7 @@ class EmbeddingService:
             "file_size": len(document)
         })
 
-        # Si el texto es muy largo, dividirlo en chunks optimizados para BGE/E5
+        # Si el texto es muy largo, dividirlo en chunks
         if len(text) > self.settings.chunk_size:
             chunks = self._chunk_text(text, self.settings.chunk_size, self.settings.chunk_overlap)
 
@@ -753,7 +740,7 @@ class EmbeddingService:
 
     def _chunk_text(self, text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
         """
-        Dividir texto en chunks con superposición optimizada para modelos BGE/E5
+        Dividir texto en chunks con superposición optimizada
 
         Args:
             text: Texto a dividir
@@ -766,8 +753,8 @@ class EmbeddingService:
         chunks: List[str] = []
         start = 0
 
-        # Ajustar para tamaño óptimo de BGE/E5
-        max_chars = min(chunk_size, 2048)  # Aproximadamente 512 tokens para modelos BGE/E5
+        # Ajustar para tamaño óptimo
+        max_chars = min(chunk_size, 2048)  # Limitar a 2048 por defecto
 
         while start < len(text):
             # Calcular el final del chunk
@@ -841,18 +828,18 @@ class EmbeddingService:
                      owner_id: Optional[str] = None,
                      area_id: Optional[str] = None,
                      limit: int = 10) -> List[Dict[str, Any]]:
-        """Buscar textos similares a la consulta usando Nomic v1.5"""
-        # Obtener modelo para el tipo de embedding
-        model_info = self._get_model(embedding_type)
+        """Buscar textos similares a la consulta"""
+        # Verificar que hay un modelo activo
+        model_instance = self._get_model_instance()
 
-        # Agregar prefijo especial search_query para consultas (recomendado por Nomic)
-        # Esto optimiza el embedding para búsqueda
-        if not query.startswith("search_query:"):
-            query = f"search_query: {query}"
-            logger.info(f"Prefijo de búsqueda añadido a la consulta: '{query}'")
+        # Para BGE-M3, añadir prefijo para consultas
+        if "bge-m3" in self.current_model_name.lower():
+            if not query.startswith("query:"):
+                query = f"query: {query}"
+                logger.info(f"Prefijo de búsqueda añadido para BGE-M3: '{query}'")
 
         # Generar embedding para la consulta
-        query_vector = await self._generate_embedding(query, model_info)
+        query_vector = await self._generate_embedding(query, model_instance)
         query_vector_list = query_vector.tolist()
 
         # Realizar búsqueda en la base de datos vectorial
@@ -866,8 +853,8 @@ class EmbeddingService:
 
         # Log para debug
         if results:
-            logger.info(f"Búsqueda con Nomic v1.5 encontró {len(results)} resultados. " +
-                       f"Mejor score: {results[0].score:.4f}")
+            logger.info(f"Búsqueda con {self.current_model_name} encontró {len(results)} resultados. " +
+                        f"Mejor score: {results[0].score:.4f}")
         else:
             logger.info("La búsqueda no encontró resultados.")
 
@@ -916,19 +903,19 @@ class EmbeddingService:
         """Listar contextos MCP disponibles"""
         # Verificar la disponibilidad del servicio de contexto
         service_available, error_info = await self.check_context_service_health()
-        
+
         if not service_available:
             error_message = error_info.get("message", "Unknown error")
             logger.error(f"Critical dependency error: Context service not available - {error_message}")
             raise HTTPException(
-                status_code=503, 
+                status_code=503,
                 detail={
                     "error": "MCP Context Service unavailable",
                     "details": error_info,
                     "message": "The MCP Context Service is required for proper operation of the embedding service"
                 }
             )
-        
+
         # Conexión con el servicio de contexto MCP
         try:
             if self.settings.use_httpx:
@@ -940,7 +927,7 @@ class EmbeddingService:
                     else:
                         logger.error(f"Error al listar contextos: {response.status_code}")
                         raise HTTPException(
-                            status_code=response.status_code, 
+                            status_code=response.status_code,
                             detail=f"Error listing contexts from MCP service: {response.text}"
                         )
             else:
@@ -953,7 +940,7 @@ class EmbeddingService:
                             error_text = await response.text()
                             logger.error(f"Error al listar contextos: {response.status} - {error_text}")
                             raise HTTPException(
-                                status_code=response.status, 
+                                status_code=response.status,
                                 detail=f"Error listing contexts from MCP service: {error_text}"
                             )
         except HTTPException:
@@ -961,7 +948,7 @@ class EmbeddingService:
         except Exception as e:
             logger.error(f"Error conectando con el servicio de contexto: {e}")
             raise HTTPException(
-                status_code=500, 
+                status_code=500,
                 detail=f"Error connecting to MCP Context Service: {str(e)}"
             )
 
@@ -969,19 +956,19 @@ class EmbeddingService:
         """Activar un contexto MCP"""
         # Verificar la disponibilidad del servicio de contexto
         service_available, error_info = await self.check_context_service_health()
-        
+
         if not service_available:
             error_message = error_info.get("message", "Unknown error")
             logger.error(f"Critical dependency error: Context service not available - {error_message}")
             raise HTTPException(
-                status_code=503, 
+                status_code=503,
                 detail={
                     "error": "MCP Context Service unavailable",
                     "details": error_info,
                     "message": f"Unable to activate context {context_id}: MCP service is required for this operation"
                 }
             )
-        
+
         try:
             if self.settings.use_httpx:
                 import httpx
@@ -993,7 +980,7 @@ class EmbeddingService:
                         error_text = response.text
                         logger.error(f"Error al activar contexto: {response.status_code} - {error_text}")
                         raise HTTPException(
-                            status_code=response.status_code, 
+                            status_code=response.status_code,
                             detail=f"Error activating context {context_id}: {error_text}"
                         )
             else:
@@ -1006,7 +993,7 @@ class EmbeddingService:
                             error_text = await response.text()
                             logger.error(f"Error al activar contexto: {response.status} - {error_text}")
                             raise HTTPException(
-                                status_code=response.status, 
+                                status_code=response.status,
                                 detail=f"Error activating context {context_id}: {error_text}"
                             )
         except HTTPException:
@@ -1014,7 +1001,7 @@ class EmbeddingService:
         except Exception as e:
             logger.error(f"Error connecting to context service when activating context {context_id}: {e}")
             raise HTTPException(
-                status_code=500, 
+                status_code=500,
                 detail=f"Error activating context {context_id}: Unable to connect to MCP Context Service: {str(e)}"
             )
 
@@ -1022,19 +1009,19 @@ class EmbeddingService:
         """Desactivar un contexto MCP"""
         # Verificar la disponibilidad del servicio de contexto
         service_available, error_info = await self.check_context_service_health()
-        
+
         if not service_available:
             error_message = error_info.get("message", "Unknown error")
             logger.error(f"Critical dependency error: Context service not available - {error_message}")
             raise HTTPException(
-                status_code=503, 
+                status_code=503,
                 detail={
                     "error": "MCP Context Service unavailable",
                     "details": error_info,
                     "message": f"Unable to deactivate context {context_id}: MCP service is required for this operation"
                 }
             )
-        
+
         try:
             if self.settings.use_httpx:
                 import httpx
@@ -1046,7 +1033,7 @@ class EmbeddingService:
                         error_text = response.text
                         logger.error(f"Error al desactivar contexto: {response.status_code} - {error_text}")
                         raise HTTPException(
-                            status_code=response.status_code, 
+                            status_code=response.status_code,
                             detail=f"Error deactivating context {context_id}: {error_text}"
                         )
             else:
@@ -1059,7 +1046,7 @@ class EmbeddingService:
                             error_text = await response.text()
                             logger.error(f"Error al desactivar contexto: {response.status} - {error_text}")
                             raise HTTPException(
-                                status_code=response.status, 
+                                status_code=response.status,
                                 detail=f"Error deactivating context {context_id}: {error_text}"
                             )
         except HTTPException:
@@ -1067,6 +1054,6 @@ class EmbeddingService:
         except Exception as e:
             logger.error(f"Error connecting to context service when deactivating context {context_id}: {e}")
             raise HTTPException(
-                status_code=500, 
+                status_code=500,
                 detail=f"Error deactivating context {context_id}: Unable to connect to MCP Context Service: {str(e)}"
             )
