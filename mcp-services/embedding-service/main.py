@@ -1,7 +1,7 @@
 # Añadir estos nuevos modelos en la sección de importación (probablemente después de la línea "from pydantic import BaseModel, Field")
 from pydantic import BaseModel, Field
 
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks
 app = FastAPI()
 
 # --- Añadir estos nuevos modelos ---
