@@ -1,6 +1,9 @@
 # Añadir estos nuevos modelos en la sección de importación (probablemente después de la línea "from pydantic import BaseModel, Field")
 from pydantic import BaseModel, Field
 
+from fastapi import FastAPI
+app = FastAPI()
+
 # --- Añadir estos nuevos modelos ---
 class ModelInfo(BaseModel):
     """Información sobre el modelo activo"""
